@@ -9,6 +9,8 @@ import logging
 import json
 import time
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Optional, Set
@@ -55,8 +57,21 @@ class YouTubeDownloaderBot:
         self.user_settings: Dict[int, Dict] = {}  # user_id -> settings
         self._last_progress_update = 0  # For progress tracking
         
+        # Check yt-dlp version
+        self.check_ytdlp_version()
+        
         # Load saved data
         self.load_data()
+    
+    def check_ytdlp_version(self):
+        """Check if yt-dlp is up to date"""
+        try:
+            result = subprocess.run([sys.executable, '-m', 'yt_dlp', '--version'], 
+                                  capture_output=True, text=True)
+            current_version = result.stdout.strip()
+            logger.info(f"Current yt-dlp version: {current_version}")
+        except Exception as e:
+            logger.warning(f"Could not check yt-dlp version: {e}")
     
     def load_data(self):
         """Load saved user data from JSON files"""
@@ -270,17 +285,7 @@ class YouTubeDownloaderBot:
             cookies_path = f"cookies_{user_id}.txt"
             await file.download_to_drive(cookies_path)
             
-            # Verify cookies file format
-            with open(cookies_path, 'r') as f:
-                first_line = f.readline().strip()
-                if not first_line.startswith('# Netscape HTTP Cookie File'):
-                    await update.message.reply_text(
-                        "⚠️ Cookies file format might not be correct.\n"
-                        "Please make sure you exported in Netscape format.\n"
-                        "Trying to save anyway...",
-                        reply_markup=self.get_main_keyboard(user_id)
-                    )
-            
+            # Store cookie path
             self.user_cookies[user_id] = cookies_path
             self.save_data()
             
@@ -346,7 +351,6 @@ class YouTubeDownloaderBot:
             )
             
             if not video_path:
-                # Error message already handled in download_video
                 return ConversationHandler.END
             
             default_share = self.get_default_setting(user_id)
@@ -371,63 +375,42 @@ class YouTubeDownloaderBot:
         return ConversationHandler.END
     
     async def download_video(self, url: str, cookies_file: str, status_message, update) -> tuple:
-        """Download YouTube video using yt-dlp with enhanced options"""
+        """Download YouTube video using yt-dlp with proven working configuration"""
         try:
             output_template = os.path.join(self.config.DOWNLOAD_DIR, '%(title)s.%(ext)s')
             
-            # Enhanced yt-dlp options to avoid 403 errors
+            # Using the same working configuration from the bash script
             ydl_opts = {
-                'format': 'best[ext=mp4]/best',
+                'format': 'bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/best[ext=mp4]/best',
                 'outtmpl': output_template,
                 'cookiefile': cookies_file,
                 'quiet': True,
-                'no_warnings': False,
+                'no_warnings': True,
+                'socket_timeout': 120,
+                'retries': 50,
+                'fragment_retries': 50,
+                'http_chunk_size': 5 * 1024 * 1024,  # 5M
+                'throttled_rate': '100K',
+                'no_mtime': True,
+                'merge_output_format': 'mp4',
                 'progress_hooks': [lambda d: self.sync_progress_hook(d)],
-                # Additional options to avoid blocking
-                'extractor_args': {
-                    'youtube': {
-                        'player_client': ['android', 'web'],
-                        'player_skip': ['webpage'],
-                    }
-                },
-                # User agent to look like a browser
-                'http_headers': {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                    'Accept-Language': 'en-us,en;q=0.5',
-                    'Sec-Fetch-Mode': 'navigate',
-                },
-                # Avoid IP blocking
-                'extractor_retries': 3,
-                'fragment_retries': 3,
-                'retries': 3,
-                # Throttle download speed slightly to avoid detection
-                'throttledratelimit': 10000000,
             }
             
             await status_message.edit_text("📥 Fetching video information...")
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 try:
-                    # First try to extract info without downloading
-                    info = ydl.extract_info(url, download=False)
+                    # Extract info and download
+                    info = ydl.extract_info(url, download=True)
                     video_title = info.get('title', 'Unknown Title')
-                    
-                    await status_message.edit_text(
-                        f"📥 Downloading: *{video_title[:100]}*\n"
-                        "Please wait...",
-                        parse_mode=ParseMode.MARKDOWN
-                    )
-                    
-                    # Now download
-                    ydl.download([url])
                     
                     # Find downloaded file
                     filename = ydl.prepare_filename(info)
                     
+                    # Check for merged MP4 file
                     if not os.path.exists(filename):
                         base = os.path.splitext(filename)[0]
-                        for ext in ['.mp4', '.webm', '.mkv', '.m4a']:
+                        for ext in ['.mp4', '.webm', '.mkv']:
                             if os.path.exists(base + ext):
                                 filename = base + ext
                                 break
@@ -449,31 +432,20 @@ class YouTubeDownloaderBot:
                     error_msg = str(e)
                     logger.error(f"Download error: {error_msg}")
                     
-                    if "403" in error_msg or "Forbidden" in error_msg:
-                        await status_message.edit_text(
-                            "❌ *HTTP 403 Forbidden Error*\n\n"
-                            "YouTube is blocking the download request.\n\n"
-                            "*Solutions:*\n"
-                            "1. Upload fresh cookies (log into YouTube again)\n"
-                            "2. Make sure cookies are from a logged-in session\n"
-                            "3. Try a different video\n"
-                            "4. Wait a few minutes and try again\n\n"
-                            "*How to fix cookies:*\n"
-                            "• Log into YouTube in your browser\n"
-                            "• Use 'Get cookies.txt LOCALLY' extension\n"
-                            "• Export fresh cookies and upload again",
-                            parse_mode=ParseMode.MARKDOWN,
-                            reply_markup=InlineKeyboardMarkup([[
-                                InlineKeyboardButton("🍪 Upload New Cookies", callback_data='cookies'),
-                                InlineKeyboardButton("🔙 Main Menu", callback_data='back_to_main')
-                            ]])
-                        )
-                    else:
-                        await status_message.edit_text(
-                            f"❌ Download failed: {error_msg[:200]}",
-                            reply_markup=self.get_main_keyboard(update.effective_user.id)
-                        )
-                    
+                    await status_message.edit_text(
+                        f"❌ Download failed: {error_msg[:200]}\n\n"
+                        f"*Troubleshooting:*\n"
+                        f"• Make sure cookies are fresh (logged-in YouTube session)\n"
+                        f"• Try again in a few minutes\n"
+                        f"• Some videos may have restrictions\n\n"
+                        f"Update yt-dlp if issue persists:\n"
+                        f"`pip install --upgrade yt-dlp`",
+                        parse_mode=ParseMode.MARKDOWN,
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("🍪 Upload New Cookies", callback_data='cookies')],
+                            [InlineKeyboardButton("🔙 Main Menu", callback_data='back_to_main')]
+                        ])
+                    )
                     return None, None
                     
         except Exception as e:

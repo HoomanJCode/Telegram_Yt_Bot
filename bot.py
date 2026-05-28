@@ -273,14 +273,20 @@ class YouTubeDownloaderBot:
     
     async def _do_download(self, uid: int, url: str, status) -> tuple:
         try:
+            # Simple format selection - let yt-dlp pick best available
             opts = {
-                'format': 'best[ext=mp4]/best',
+                'format': 'best',  # Let yt-dlp decide, just get the best
                 'outtmpl': str(DOWNLOADS_DIR / '%(title)s.%(ext)s'),
                 'cookiefile': str(self.user_cookies[uid]),
-                'quiet': True, 'no_warnings': True,
-                'socket_timeout': 120, 'retries': 50, 'fragment_retries': 50,
-                'http_chunk_size': 5*1024*1024, 'throttled_rate': '100K',
-                'no_mtime': True, 'merge_output_format': 'mp4',
+                'quiet': True,
+                'no_warnings': True,
+                'socket_timeout': 120,
+                'retries': 50,
+                'fragment_retries': 50,
+                'http_chunk_size': 5 * 1024 * 1024,
+                'throttled_rate': '100K',
+                'no_mtime': True,
+                'merge_output_format': 'mp4',
                 'progress_hooks': [lambda d: self._hook(d)],
             }
             
@@ -291,29 +297,43 @@ class YouTubeDownloaderBot:
                 title = info.get('title', 'Unknown')
                 fp = ydl.prepare_filename(info)
                 
-                if not Path(fp).exists():
+                # Find the actual file
+                found = None
+                if Path(fp).exists():
+                    found = fp
+                else:
                     base = Path(fp).stem
-                    for ext in ('.mp4', '.webm', '.mkv', '.m4a'):
+                    for ext in ('.mp4', '.webm', '.mkv', '.m4a', '.3gp', '.flv'):
                         alt = DOWNLOADS_DIR / f'{base}{ext}'
-                        if alt.exists(): fp = str(alt); break
+                        if alt.exists():
+                            found = str(alt)
+                            break
                 
-                if not Path(fp).exists():
-                    st = "".join(c for c in title if c.isalnum() or c in (' ','-','_')).rstrip()[:50]
-                    for f in DOWNLOADS_DIR.iterdir():
-                        if f.is_file() and st in f.stem: fp = str(f); break
+                if not found:
+                    # Search by title
+                    st = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).rstrip()[:50]
+                    for f in sorted(DOWNLOADS_DIR.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
+                        if f.is_file() and st.lower() in f.stem.lower():
+                            found = str(f)
+                            break
                 
-                if not Path(fp).exists():
-                    raise FileNotFoundError("File not found")
+                if not found:
+                    raise FileNotFoundError(f"Downloaded file not found for: {title}")
                 
-                mb = Path(fp).stat().st_size / 1024 / 1024
+                mb = Path(found).stat().st_size / 1024 / 1024
                 logger.info("Downloaded user %d: %.1f MB", uid, mb)
-                await status.edit_text(f"✅ *{self._esc_md(title[:100])}*\n📦 {mb:.1f} MB", parse_mode=ParseMode.MARKDOWN)
-                return fp, title
+                await status.edit_text(
+                    f"✅ *{self._esc_md(title[:100])}*\n📦 {mb:.1f} MB",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return found, title
                 
         except DownloadError as e:
             logger.error("yt-dlp user %d: %s", uid, str(e)[:100])
             await status.edit_text(
-                "❌ Download failed\n\n`pip install --upgrade yt-dlp`",
+                "❌ Download failed\n\n"
+                "Try: `pip install --upgrade yt-dlp`\n"
+                "Or upload fresh cookies.",
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("🍪 Cookies", callback_data='cookies'),
@@ -330,7 +350,9 @@ class YouTubeDownloaderBot:
         if d['status'] == 'downloading':
             now = time.time()
             if now - self._last_progress > 10:
-                logger.info("Download: %s at %s", d.get('_percent_str','?').strip(), d.get('_speed_str','?').strip())
+                logger.info("Download: %s at %s", 
+                          d.get('_percent_str', '?').strip(),
+                          d.get('_speed_str', '?').strip())
                 self._last_progress = now
     
     async def _send_video(self, u, s, path, title, uid):
@@ -350,17 +372,22 @@ class YouTubeDownloaderBot:
     
     async def _send_link(self, u, s, path, title, uid):
         try:
-            sn = "".join(c for c in title if c.isalnum() or c in (' ','-','_')).rstrip()
+            sn = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).rstrip()
             nn = f"{sn[:50]}_{uid}_{datetime.now():%Y%m%d_%H%M%S}.mp4"
             np = DOWNLOADS_DIR / nn
             shutil.move(path, np)
             for v in self.user_videos.get(uid, []):
-                if v.file_path == path: v.file_path = str(np); break
+                if v.file_path == path:
+                    v.file_path = str(np)
+                    break
             self._save_data()
             url = f"{self.base_download_link}/{quote(nn)}"
             await s.edit_text(
-                f"✅ *{self._esc_md(title[:200])}*\n\n[📥 Download]({url})\n\n⚠️ Deleted after {self.config.STORAGE_DAYS} days.",
-                parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True,
+                f"✅ *{self._esc_md(title[:200])}*\n\n"
+                f"[📥 Download]({url})\n\n"
+                f"⚠️ Deleted after {self.config.STORAGE_DAYS} days.",
+                parse_mode=ParseMode.MARKDOWN,
+                disable_web_page_preview=True,
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("📥 Download", url=url)],
                     [InlineKeyboardButton("📹 Recent", callback_data='recent'),
@@ -378,7 +405,8 @@ class YouTubeDownloaderBot:
         videos = self.user_videos.get(uid, [])
         
         if not videos:
-            await msg.reply_text("📭 No videos yet.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data='back')]]))
+            await msg.reply_text("📭 No videos yet.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data='back')]]))
             return
         
         pp = 5
@@ -395,8 +423,10 @@ class YouTubeDownloaderBot:
         kb = []
         for i, v in enumerate(pv, page*pp+1):
             if Path(v.file_path).exists():
-                kb.append([InlineKeyboardButton(f"📥 {i}. {v.title[:30]}", url=f"{self.base_download_link}/{quote(Path(v.file_path).name)}")])
-                kb.append([InlineKeyboardButton(f"🗑️ Delete #{i}", callback_data=f'del_{page*pp + (i-page*pp-1)}')])
+                kb.append([InlineKeyboardButton(f"📥 {i}. {v.title[:30]}", 
+                          url=f"{self.base_download_link}/{quote(Path(v.file_path).name)}")])
+                kb.append([InlineKeyboardButton(f"🗑️ Delete #{i}", 
+                          callback_data=f'del_{page*pp + (i-page*pp-1)}')])
         
         nav = []
         if page > 0: nav.append(InlineKeyboardButton("⬅️", callback_data=f'pg_{page-1}'))
@@ -404,7 +434,8 @@ class YouTubeDownloaderBot:
         if nav: kb.append(nav)
         kb.append([InlineKeyboardButton("🔙 Menu", callback_data='back')])
         
-        await msg.reply_text(txt, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(kb))
+        await msg.reply_text(txt, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True,
+                            reply_markup=InlineKeyboardMarkup(kb))
     
     async def _del_video(self, u: Update, c: ContextTypes.DEFAULT_TYPE):
         q = u.callback_query; await q.answer()
@@ -412,13 +443,15 @@ class YouTubeDownloaderBot:
         idx = int(q.data.split('_')[1])
         videos = self.user_videos.get(uid, [])
         if 0 <= idx < len(videos):
-            v = videos[idx]; p = Path(v.file_path)
-            if p.exists(): p.unlink(missing_ok=True)
-            videos.pop(idx); self._save_data()
-            await q.message.reply_text(f"🗑️ Deleted.", reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("📹 Videos", callback_data='recent'),
-                InlineKeyboardButton("🔙 Menu", callback_data='back')
-            ]]))
+            v = videos[idx]
+            Path(v.file_path).unlink(missing_ok=True)
+            videos.pop(idx)
+            self._save_data()
+            await q.message.reply_text("🗑️ Deleted.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("📹 Videos", callback_data='recent'),
+                    InlineKeyboardButton("🔙 Menu", callback_data='back')
+                ]]))
     
     # --- Cookies ---
     async def _ask_cookies(self, u: Update, c: ContextTypes.DEFAULT_TYPE):
@@ -438,7 +471,8 @@ class YouTubeDownloaderBot:
         if not self._whitelisted(uid):
             await u.message.reply_text("⛔ Unauthorized."); return ConversationHandler.END
         if not u.message.document:
-            await u.message.reply_text("❌ Send .txt file.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Cancel", callback_data='back')]]))
+            await u.message.reply_text("❌ Send .txt file.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Cancel", callback_data='back')]]))
             return WAITING_FOR_COOKIES
         try:
             f = await c.bot.get_file(u.message.document.file_id)
@@ -450,7 +484,8 @@ class YouTubeDownloaderBot:
             return ConversationHandler.END
         except Exception as e:
             logger.error("Cookie save user %d: %s", uid, e)
-            await u.message.reply_text("❌ Failed.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Cancel", callback_data='back')]]))
+            await u.message.reply_text("❌ Failed.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Cancel", callback_data='back')]]))
             return WAITING_FOR_COOKIES
     
     # --- Settings ---
@@ -474,8 +509,11 @@ class YouTubeDownloaderBot:
         uid = u.effective_user.id
         v = 'link' if q.data == 'slink' else 'telegram'
         self.user_settings[uid] = {'default_share': v}; self._save_data()
-        await q.edit_message_text(f"✅ Set to *{'Link' if v=='link' else 'Upload'}*", parse_mode=ParseMode.MARKDOWN,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Settings", callback_data='settings')]]))
+        await q.edit_message_text(
+            f"✅ Set to *{'Link' if v=='link' else 'Upload'}*",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Settings", callback_data='settings')]])
+        )
     
     # --- Router ---
     async def _router(self, u: Update, c: ContextTypes.DEFAULT_TYPE):
@@ -509,12 +547,18 @@ class YouTubeDownloaderBot:
         app = Application.builder().token(self.config.BOT_TOKEN).build()
         
         cookies_conv = ConversationHandler(
-            entry_points=[CommandHandler('cookies', self._ask_cookies), CallbackQueryHandler(self._ask_cookies, pattern='^cookies$')],
+            entry_points=[
+                CommandHandler('cookies', self._ask_cookies),
+                CallbackQueryHandler(self._ask_cookies, pattern='^cookies$')
+            ],
             states={WAITING_FOR_COOKIES: [
                 MessageHandler(filters.Document.FileExtension("txt"), self._recv_cookies),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, self._ask_cookies),
             ]},
-            fallbacks=[CommandHandler('cancel', self.cancel), CallbackQueryHandler(self._router, pattern='^back$')],
+            fallbacks=[
+                CommandHandler('cancel', self.cancel),
+                CallbackQueryHandler(self._router, pattern='^back$')
+            ],
             per_message=False
         )
         

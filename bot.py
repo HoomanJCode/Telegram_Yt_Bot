@@ -7,7 +7,7 @@ Downloads YouTube videos and sends them to users or provides download links.
 import os
 import logging
 import json
-import tempfile
+import time
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Optional, Set
@@ -51,6 +51,7 @@ class YouTubeDownloaderBot:
         # User data storage
         self.user_cookies: Dict[int, str] = {}  # user_id -> cookie_file_path
         self.user_settings: Dict[int, Dict] = {}  # user_id -> settings
+        self._last_progress_update = 0  # For progress tracking
         
         # Load saved data
         self.load_data()
@@ -60,25 +61,32 @@ class YouTubeDownloaderBot:
         try:
             if os.path.exists('user_cookies.json'):
                 with open('user_cookies.json', 'r') as f:
-                    self.user_cookies = json.load(f)
+                    data = json.load(f)
+                    # Convert string keys back to integers
+                    self.user_cookies = {int(k): v for k, v in data.items()}
         except Exception as e:
             logger.error(f"Error loading cookies data: {e}")
         
         try:
             if os.path.exists('user_settings.json'):
                 with open('user_settings.json', 'r') as f:
-                    self.user_settings = json.load(f)
+                    data = json.load(f)
+                    # Convert string keys back to integers
+                    self.user_settings = {int(k): v for k, v in data.items()}
         except Exception as e:
             logger.error(f"Error loading settings data: {e}")
     
     def save_data(self):
         """Save user data to JSON files"""
         try:
+            # Convert int keys to strings for JSON
+            cookies_data = {str(k): v for k, v in self.user_cookies.items()}
             with open('user_cookies.json', 'w') as f:
-                json.dump(self.user_cookies, f)
+                json.dump(cookies_data, f, indent=2)
             
+            settings_data = {str(k): v for k, v in self.user_settings.items()}
             with open('user_settings.json', 'w') as f:
-                json.dump(self.user_settings, f)
+                json.dump(settings_data, f, indent=2)
         except Exception as e:
             logger.error(f"Error saving data: {e}")
     
@@ -152,13 +160,13 @@ class YouTubeDownloaderBot:
         await query.answer()
         
         if query.data == 'download':
-            await self.ask_for_url(query.message, context)
+            await self.ask_for_url(update, context)
         elif query.data == 'cookies':
-            await self.ask_for_cookies(query.message, context)
+            await self.ask_for_cookies(update, context)
         elif query.data == 'settings':
-            await self.show_settings(query.message, context)
+            await self.show_settings(update, context)
         elif query.data == 'back_to_main':
-            await self.show_main_menu(query.message, context)
+            await self.show_main_menu(update, context)
         elif query.data == 'cookies_status':
             user_id = update.effective_user.id
             if user_id in self.user_cookies:
@@ -174,11 +182,22 @@ class YouTubeDownloaderBot:
                 f"Current sharing method: {'📎 Download Link' if default == 'link' else '📤 Direct Telegram Upload'}"
             )
     
-    async def ask_for_url(self, message, context):
+    async def ask_for_url(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Ask user for YouTube URL"""
-        if message.from_user and not self.is_whitelisted(message.from_user.id):
-            await message.reply_text("⛔ Unauthorized access.")
-            return
+        user_id = update.effective_user.id
+        
+        if not self.is_whitelisted(user_id):
+            if update.callback_query:
+                await update.callback_query.message.reply_text("⛔ Unauthorized access.")
+            else:
+                await update.message.reply_text("⛔ Unauthorized access.")
+            return ConversationHandler.END
+        
+        # Check if we have a callback query or direct message
+        if update.callback_query:
+            message = update.callback_query.message
+        else:
+            message = update.message
         
         await message.reply_text(
             "🔗 Please send me the YouTube video URL you want to download:",
@@ -188,11 +207,16 @@ class YouTubeDownloaderBot:
         )
         return WAITING_FOR_URL
     
-    async def ask_for_cookies(self, message, context):
+    async def ask_for_cookies(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Ask user to upload cookies file"""
-        if message.from_user and not self.is_whitelisted(message.from_user.id):
-            await message.reply_text("⛔ Unauthorized access.")
-            return
+        user_id = update.effective_user.id
+        
+        if not self.is_whitelisted(user_id):
+            if update.callback_query:
+                await update.callback_query.message.reply_text("⛔ Unauthorized access.")
+            else:
+                await update.message.reply_text("⛔ Unauthorized access.")
+            return ConversationHandler.END
         
         warning_text = (
             "⚠️ *WARNING: COOKIE SECURITY NOTICE*\n\n"
@@ -204,6 +228,12 @@ class YouTubeDownloaderBot:
             "📤 Please send your cookies file (.txt) now.\n"
             "Export from browser extension like 'Get cookies.txt LOCALLY'"
         )
+        
+        # Check if we have a callback query or direct message
+        if update.callback_query:
+            message = update.callback_query.message
+        else:
+            message = update.message
         
         await message.reply_text(
             warning_text,
@@ -225,29 +255,42 @@ class YouTubeDownloaderBot:
         document = update.message.document
         if not document:
             await update.message.reply_text(
-                "❌ Please send a valid cookies file (.txt)",
+                "❌ Please send a valid cookies file (.txt)\n\n"
+                "Use the button below to go back or try again.",
                 reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🔙 Back", callback_data='back_to_main')
+                    InlineKeyboardButton("🔙 Back", callback_data='back_to_main'),
+                    InlineKeyboardButton("🔄 Try Again", callback_data='cookies')
                 ]])
             )
             return WAITING_FOR_COOKIES
         
         # Download the file
-        file = await context.bot.get_file(document.file_id)
-        cookies_path = f"cookies_{user_id}.txt"
-        await file.download_to_drive(cookies_path)
-        
-        # Store cookie path
-        self.user_cookies[user_id] = cookies_path
-        self.save_data()
-        
-        await update.message.reply_text(
-            "✅ Cookies saved successfully!\n"
-            "You can now download YouTube videos.",
-            reply_markup=self.get_main_keyboard(user_id)
-        )
-        
-        return ConversationHandler.END
+        try:
+            file = await context.bot.get_file(document.file_id)
+            cookies_path = f"cookies_{user_id}.txt"
+            await file.download_to_drive(cookies_path)
+            
+            # Store cookie path
+            self.user_cookies[user_id] = cookies_path
+            self.save_data()
+            
+            await update.message.reply_text(
+                "✅ Cookies saved successfully!\n"
+                "You can now download YouTube videos.",
+                reply_markup=self.get_main_keyboard(user_id)
+            )
+            
+            return ConversationHandler.END
+            
+        except Exception as e:
+            logger.error(f"Error saving cookies: {e}")
+            await update.message.reply_text(
+                "❌ Failed to save cookies. Please try again.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 Back", callback_data='back_to_main')
+                ]])
+            )
+            return WAITING_FOR_COOKIES
     
     async def handle_url(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle YouTube URL and download video"""
@@ -272,7 +315,8 @@ class YouTubeDownloaderBot:
         
         if 'youtube.com' not in url and 'youtu.be' not in url:
             await update.message.reply_text(
-                "❌ Please send a valid YouTube URL.",
+                "❌ Please send a valid YouTube URL.\n"
+                "Example: https://www.youtube.com/watch?v=...",
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("🔙 Back", callback_data='back_to_main')
                 ]])
@@ -280,7 +324,10 @@ class YouTubeDownloaderBot:
             return WAITING_FOR_URL
         
         # Send processing message
-        status_message = await update.message.reply_text("⏳ Processing your request...")
+        status_message = await update.message.reply_text(
+            "⏳ Initializing download...\n"
+            "This may take a few moments."
+        )
         
         try:
             # Download the video
@@ -292,7 +339,13 @@ class YouTubeDownloaderBot:
             
             if not video_path:
                 await status_message.edit_text(
-                    "❌ Failed to download video. Please check the URL and try again.",
+                    "❌ Failed to download video.\n"
+                    "Possible reasons:\n"
+                    "• Invalid URL\n"
+                    "• Video is private/age-restricted\n"
+                    "• Cookies are expired\n"
+                    "• Network issues\n\n"
+                    "Please check and try again.",
                     reply_markup=self.get_main_keyboard(user_id)
                 )
                 return ConversationHandler.END
@@ -313,7 +366,8 @@ class YouTubeDownloaderBot:
         except Exception as e:
             logger.error(f"Error downloading video: {e}")
             await status_message.edit_text(
-                f"❌ An error occurred: {str(e)}",
+                f"❌ An error occurred: {str(e)[:200]}\n\n"
+                "Please try again or contact support.",
                 reply_markup=self.get_main_keyboard(user_id)
             )
         
@@ -330,15 +384,21 @@ class YouTubeDownloaderBot:
                 'cookiefile': cookies_file,
                 'quiet': True,
                 'no_warnings': True,
-                'progress_hooks': [lambda d: self.progress_hook(d, status_message)],
+                'progress_hooks': [lambda d: self.sync_progress_hook(d)],
             }
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                await status_message.edit_text("📥 Downloading video information...")
+                await status_message.edit_text("📥 Fetching video information...")
                 info = ydl.extract_info(url, download=False)
                 video_title = info.get('title', 'Unknown Title')
                 
-                await status_message.edit_text(f"📥 Downloading: {video_title[:50]}...")
+                await status_message.edit_text(
+                    f"📥 Downloading: *{video_title[:100]}*\n"
+                    "Please wait...",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                
+                # Download the video
                 ydl.download([url])
                 
                 # Find downloaded file
@@ -352,30 +412,36 @@ class YouTubeDownloaderBot:
                             filename = base + ext
                             break
                 
+                if not os.path.exists(filename):
+                    raise FileNotFoundError("Downloaded file not found")
+                
+                file_size = os.path.getsize(filename)
+                await status_message.edit_text(
+                    f"✅ Download complete!\n"
+                    f"📹 *{video_title[:100]}*\n"
+                    f"📦 Size: {file_size / 1024 / 1024:.1f} MB",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                
                 return filename, video_title
                 
         except Exception as e:
             logger.error(f"Download error: {e}")
             return None, None
     
-    def progress_hook(self, d, status_message):
-        """Update progress in status message"""
+    def sync_progress_hook(self, d):
+        """Synchronous progress hook for yt-dlp"""
         if d['status'] == 'downloading':
+            # This runs in a separate thread, so we just log progress
             try:
-                percent = d.get('_percent_str', 'N/A')
-                speed = d.get('_speed_str', 'N/A')
-                eta = d.get('_eta_str', 'N/A')
+                percent = d.get('_percent_str', 'N/A').strip()
+                speed = d.get('_speed_str', 'N/A').strip()
+                eta = d.get('_eta_str', 'N/A').strip()
                 
-                # Update message periodically (not every hook call to avoid rate limiting)
-                if hasattr(self, '_last_progress_update'):
-                    import time
-                    if time.time() - self._last_progress_update < 5:
-                        return
-                
-                self._last_progress_update = time.time()
-                
-                # We can't await here, so we'll skip live progress updates
-                # The message will be updated at download completion
+                current_time = time.time()
+                if current_time - self._last_progress_update > 5:
+                    logger.info(f"Download progress: {percent} at {speed}, ETA: {eta}")
+                    self._last_progress_update = current_time
             except:
                 pass
     
@@ -387,7 +453,7 @@ class YouTubeDownloaderBot:
             
             if file_size > self.config.MAX_TELEGRAM_FILE_SIZE:
                 await status_message.edit_text(
-                    f"⚠️ File is too large for Telegram ({file_size / 1024 / 1024:.1f} MB)\n"
+                    f"⚠️ File too large for Telegram ({file_size / 1024 / 1024:.1f} MB)\n"
                     f"Max size: {self.config.MAX_TELEGRAM_FILE_SIZE / 1024 / 1024:.1f} MB\n"
                     "Switching to download link...",
                     reply_markup=self.get_main_keyboard(user_id)
@@ -422,43 +488,48 @@ class YouTubeDownloaderBot:
         """Provide download link for the video"""
         try:
             # Create a permanent copy in downloads folder
-            perm_filename = f"video_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
+            safe_title = "".join(c for c in video_title if c.isalnum() or c in (' ', '-', '_')).rstrip()
+            perm_filename = f"{safe_title[:50]}_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
             perm_path = os.path.join(self.config.DOWNLOAD_DIR, perm_filename)
             
-            os.rename(video_path, perm_path)
+            # Move file to permanent location
+            import shutil
+            shutil.move(video_path, perm_path)
             
             # Generate download link
-            download_url = f"{self.base_download_link}/downloads/{quote(perm_filename)}"
+            download_url = f"{self.base_download_link}/{quote(perm_filename)}"
             
             await status_message.edit_text(
                 f"✅ Video downloaded successfully!\n\n"
-                f"📹 *Title:* {video_title}\n"
+                f"📹 *Title:* {video_title[:200]}\n"
                 f"📥 *Download Link:* [Click here]({download_url})\n\n"
-                f"⚠️ Link will expire or file will be removed eventually.",
+                f"⚠️ Link may expire or file will be removed eventually.\n"
+                f"💾 Save the file locally if you want to keep it.",
                 parse_mode=ParseMode.MARKDOWN,
+                disable_web_page_preview=True,
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("📥 Download", url=download_url)],
                     [InlineKeyboardButton("🔙 Main Menu", callback_data='back_to_main')]
                 ])
             )
             
-            # Schedule file cleanup after 24 hours (optional)
-            # You can implement a cleanup mechanism here
-            
         except Exception as e:
             logger.error(f"Error creating download link: {e}")
             await status_message.edit_text(
-                f"❌ Failed to create download link: {str(e)}",
+                f"❌ Failed to create download link: {str(e)[:200]}",
                 reply_markup=self.get_main_keyboard(user_id)
             )
     
-    async def show_settings(self, message, context):
+    async def show_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show settings menu"""
-        user_id = message.from_user.id if hasattr(message, 'from_user') else message.chat.id
+        user_id = update.effective_user.id
         
         if not self.is_whitelisted(user_id):
-            await message.reply_text("⛔ Unauthorized access.")
-            return
+            if update.callback_query:
+                await update.callback_query.message.reply_text("⛔ Unauthorized access.")
+            else:
+                await update.message.reply_text("⛔ Unauthorized access.")
+            return ConversationHandler.END
         
         current_setting = self.get_default_setting(user_id)
         
@@ -483,6 +554,12 @@ class YouTubeDownloaderBot:
             ],
             [InlineKeyboardButton("🔙 Back to Menu", callback_data='back_to_main')]
         ]
+        
+        # Check if we have a callback query or direct message
+        if update.callback_query:
+            message = update.callback_query.message
+        else:
+            message = update.message
         
         await message.reply_text(
             settings_text,
@@ -522,9 +599,15 @@ class YouTubeDownloaderBot:
                 ]])
             )
     
-    async def show_main_menu(self, message, context):
+    async def show_main_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show main menu"""
-        user_id = message.from_user.id if hasattr(message, 'from_user') else message.chat.id
+        if update.callback_query:
+            message = update.callback_query.message
+            user_id = update.callback_query.from_user.id
+        else:
+            message = update.message
+            user_id = update.message.from_user.id
+        
         await message.reply_text(
             "📋 Main Menu:",
             reply_markup=self.get_main_keyboard(user_id)
@@ -554,11 +637,19 @@ class YouTubeDownloaderBot:
             reply_markup=self.get_main_keyboard(update.effective_user.id)
         )
     
+    async def cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Cancel current operation"""
+        await update.message.reply_text(
+            "❌ Operation cancelled.",
+            reply_markup=self.get_main_keyboard(update.effective_user.id)
+        )
+        return ConversationHandler.END
+    
     def run(self):
         """Start the bot"""
         app = Application.builder().token(self.config.BOT_TOKEN).build()
         
-        # Conversation handler for cookies upload
+        # Conversation handler for cookies upload - FIXED with per_message=True
         cookies_conv = ConversationHandler(
             entry_points=[
                 CommandHandler('cookies', self.ask_for_cookies),
@@ -567,13 +658,17 @@ class YouTubeDownloaderBot:
             states={
                 WAITING_FOR_COOKIES: [
                     MessageHandler(filters.Document.FileExtension("txt"), self.handle_cookies),
-                    MessageHandler(filters.ALL, self.ask_for_cookies)
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.ask_for_cookies),
                 ]
             },
-            fallbacks=[CommandHandler('cancel', self.start)]
+            fallbacks=[
+                CommandHandler('cancel', self.cancel),
+                CallbackQueryHandler(self.show_main_menu, pattern='^back_to_main$')
+            ],
+            per_message=True  # FIX: Set per_message=True
         )
         
-        # Conversation handler for URL download
+        # Conversation handler for URL download - FIXED with per_message=True
         download_conv = ConversationHandler(
             entry_points=[
                 CommandHandler('download', self.ask_for_url),
@@ -582,10 +677,13 @@ class YouTubeDownloaderBot:
             states={
                 WAITING_FOR_URL: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_url),
-                    MessageHandler(filters.ALL, self.ask_for_url)
                 ]
             },
-            fallbacks=[CommandHandler('cancel', self.start)]
+            fallbacks=[
+                CommandHandler('cancel', self.cancel),
+                CallbackQueryHandler(self.show_main_menu, pattern='^back_to_main$')
+            ],
+            per_message=True  # FIX: Set per_message=True
         )
         
         # Add handlers
@@ -600,6 +698,7 @@ class YouTubeDownloaderBot:
         
         # Start polling
         logger.info("Starting bot...")
+        logger.info("Bot is ready to receive messages!")
         app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':

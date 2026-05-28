@@ -26,6 +26,7 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 import yt_dlp
+from yt_dlp.utils import DownloadError
 
 from config import Config
 
@@ -63,7 +64,6 @@ class YouTubeDownloaderBot:
             if os.path.exists('user_cookies.json'):
                 with open('user_cookies.json', 'r') as f:
                     data = json.load(f)
-                    # Convert string keys back to integers
                     self.user_cookies = {int(k): v for k, v in data.items()}
         except Exception as e:
             logger.error(f"Error loading cookies data: {e}")
@@ -72,7 +72,6 @@ class YouTubeDownloaderBot:
             if os.path.exists('user_settings.json'):
                 with open('user_settings.json', 'r') as f:
                     data = json.load(f)
-                    # Convert string keys back to integers
                     self.user_settings = {int(k): v for k, v in data.items()}
         except Exception as e:
             logger.error(f"Error loading settings data: {e}")
@@ -80,7 +79,6 @@ class YouTubeDownloaderBot:
     def save_data(self):
         """Save user data to JSON files"""
         try:
-            # Convert int keys to strings for JSON
             cookies_data = {str(k): v for k, v in self.user_cookies.items()}
             with open('user_cookies.json', 'w') as f:
                 json.dump(cookies_data, f, indent=2)
@@ -94,7 +92,7 @@ class YouTubeDownloaderBot:
     def is_whitelisted(self, user_id: int) -> bool:
         """Check if user is whitelisted"""
         whitelist = self.config.get_whitelist()
-        if not whitelist:  # Empty whitelist means all users are allowed
+        if not whitelist:
             return True
         return user_id in whitelist
     
@@ -102,7 +100,7 @@ class YouTubeDownloaderBot:
         """Get user's default sharing method"""
         if user_id in self.user_settings:
             return self.user_settings[user_id].get('default_share', 'link')
-        return 'link'  # Default to link sharing
+        return 'link'
     
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Send welcome message and show main menu"""
@@ -194,7 +192,6 @@ class YouTubeDownloaderBot:
                 await update.message.reply_text("⛔ Unauthorized access.")
             return ConversationHandler.END
         
-        # Check if we have a callback query or direct message
         if update.callback_query:
             message = update.callback_query.message
         else:
@@ -226,11 +223,14 @@ class YouTubeDownloaderBot:
             "• We store cookies locally and only use them for YouTube downloads\n"
             "• *We are NOT responsible* for any security issues or account compromises\n"
             "• Use at your own risk!\n\n"
-            "📤 Please send your cookies file (.txt) now.\n"
-            "Export from browser extension like 'Get cookies.txt LOCALLY'"
+            "📤 Please send your cookies file (.txt) now.\n\n"
+            "*How to export cookies:*\n"
+            "1. Install 'Get cookies.txt LOCALLY' browser extension\n"
+            "2. Log into YouTube in your browser\n"
+            "3. Click the extension and export cookies as Netscape format (.txt)\n"
+            "4. Send the exported .txt file here"
         )
         
-        # Check if we have a callback query or direct message
         if update.callback_query:
             message = update.callback_query.message
         else:
@@ -265,13 +265,22 @@ class YouTubeDownloaderBot:
             )
             return WAITING_FOR_COOKIES
         
-        # Download the file
         try:
             file = await context.bot.get_file(document.file_id)
             cookies_path = f"cookies_{user_id}.txt"
             await file.download_to_drive(cookies_path)
             
-            # Store cookie path
+            # Verify cookies file format
+            with open(cookies_path, 'r') as f:
+                first_line = f.readline().strip()
+                if not first_line.startswith('# Netscape HTTP Cookie File'):
+                    await update.message.reply_text(
+                        "⚠️ Cookies file format might not be correct.\n"
+                        "Please make sure you exported in Netscape format.\n"
+                        "Trying to save anyway...",
+                        reply_markup=self.get_main_keyboard(user_id)
+                    )
+            
             self.user_cookies[user_id] = cookies_path
             self.save_data()
             
@@ -301,7 +310,6 @@ class YouTubeDownloaderBot:
             await update.message.reply_text("⛔ Unauthorized access.")
             return ConversationHandler.END
         
-        # Check for cookies
         if user_id not in self.user_cookies:
             await update.message.reply_text(
                 "❌ You need to upload cookies first!\n"
@@ -324,37 +332,34 @@ class YouTubeDownloaderBot:
             )
             return WAITING_FOR_URL
         
-        # Send processing message
         status_message = await update.message.reply_text(
             "⏳ Initializing download...\n"
             "This may take a few moments."
         )
         
         try:
-            # Download the video
             video_path, video_title = await self.download_video(
                 url, 
                 self.user_cookies[user_id], 
-                status_message
+                status_message,
+                update
             )
             
             if not video_path:
                 await status_message.edit_text(
-                    "❌ Failed to download video.\n"
+                    "❌ Failed to download video.\n\n"
                     "Possible reasons:\n"
-                    "• Invalid URL\n"
+                    "• Invalid or expired cookies\n"
                     "• Video is private/age-restricted\n"
-                    "• Cookies are expired\n"
+                    "• YouTube blocked the request\n"
                     "• Network issues\n\n"
-                    "Please check and try again.",
+                    "Try uploading fresh cookies and check the URL.",
                     reply_markup=self.get_main_keyboard(user_id)
                 )
                 return ConversationHandler.END
             
-            # Check default sharing method
             default_share = self.get_default_setting(user_id)
             
-            # Send based on preference
             if default_share == 'telegram':
                 await self.send_video_telegram(
                     update, status_message, video_path, video_title, user_id
@@ -374,66 +379,115 @@ class YouTubeDownloaderBot:
         
         return ConversationHandler.END
     
-    async def download_video(self, url: str, cookies_file: str, status_message) -> tuple:
-        """Download YouTube video using yt-dlp"""
+    async def download_video(self, url: str, cookies_file: str, status_message, update) -> tuple:
+        """Download YouTube video using yt-dlp with enhanced options"""
         try:
             output_template = os.path.join(self.config.DOWNLOAD_DIR, '%(title)s.%(ext)s')
             
+            # Enhanced yt-dlp options to avoid 403 errors
             ydl_opts = {
                 'format': 'best[ext=mp4]/best',
                 'outtmpl': output_template,
                 'cookiefile': cookies_file,
                 'quiet': True,
-                'no_warnings': True,
+                'no_warnings': False,
                 'progress_hooks': [lambda d: self.sync_progress_hook(d)],
+                # Additional options to avoid blocking
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['android', 'web'],
+                        'player_skip': ['webpage'],
+                    }
+                },
+                # User agent to look like a browser
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'en-us,en;q=0.5',
+                    'Sec-Fetch-Mode': 'navigate',
+                },
+                # Avoid IP blocking
+                'extractor_retries': 3,
+                'fragment_retries': 3,
+                'retries': 3,
+                # Throttle download speed slightly to avoid detection
+                'throttledratelimit': 10000000,
             }
             
+            await status_message.edit_text("📥 Fetching video information...")
+            
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                await status_message.edit_text("📥 Fetching video information...")
-                info = ydl.extract_info(url, download=False)
-                video_title = info.get('title', 'Unknown Title')
-                
-                await status_message.edit_text(
-                    f"📥 Downloading: *{video_title[:100]}*\n"
-                    "Please wait...",
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                
-                # Download the video
-                ydl.download([url])
-                
-                # Find downloaded file
-                filename = ydl.prepare_filename(info)
-                
-                # Check if file exists (might have different extension)
-                if not os.path.exists(filename):
-                    base = os.path.splitext(filename)[0]
-                    for ext in ['.mp4', '.webm', '.mkv']:
-                        if os.path.exists(base + ext):
-                            filename = base + ext
-                            break
-                
-                if not os.path.exists(filename):
-                    raise FileNotFoundError("Downloaded file not found")
-                
-                file_size = os.path.getsize(filename)
-                await status_message.edit_text(
-                    f"✅ Download complete!\n"
-                    f"📹 *{video_title[:100]}*\n"
-                    f"📦 Size: {file_size / 1024 / 1024:.1f} MB",
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                
-                return filename, video_title
-                
-        except Exception as e:
-            logger.error(f"Download error: {e}")
-            return None, None
-    
+                try:
+                    # First try to extract info without downloading
+                    info = ydl.extract_info(url, download=False)
+                    video_title = info.get('title', 'Unknown Title')
+                    
+                    await status_message.edit_text(
+                        f"📥 Downloading: *{video_title[:100]}*\n"
+                        "Please wait...",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                    
+                    # Now download
+                    ydl.download([url])
+                    
+                    # Find downloaded file
+                    filename = ydl.prepare_filename(info)
+                    
+                    if not os.path.exists(filename):
+                        base = os.path.splitext(filename)[0]
+                        for ext in ['.mp4', '.webm', '.mkv', '.m4a']:
+                            if os.path.exists(base + ext):
+                                filename = base + ext
+                                break
+                    
+                    if not os.path.exists(filename):
+                        raise FileNotFoundError("Downloaded file not found")
+                    
+                    file_size = os.path.getsize(filename)
+                    await status_message.edit_text(
+                        f"✅ Download complete!\n"
+                        f"📹 *{video_title[:100]}*\n"
+                        f"📦 Size: {file_size / 1024 / 1024:.1f} MB",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                    
+                    return filename, video_title
+                    
+                except DownloadError as e:
+                    error_msg = str(e)
+                    logger.error(f"Download error: {error_msg}")
+                    
+                    if "403" in error_msg or "Forbidden" in error_msg:
+                        await status_message.edit_text(
+                            "❌ *HTTP 403 Forbidden Error*\n\n"
+                            "YouTube is blocking the download request.\n\n"
+                            "*Solutions:*\n"
+                            "1. Upload fresh cookies (log into YouTube again)\n"
+                            "2. Make sure cookies are from a logged-in session\n"
+                            "3. Try a different video\n"
+                            "4. Wait a few minutes and try again\n\n"
+                            "*How to fix cookies:*\n"
+                            "• Log into YouTube in your browser\n"
+                            "• Use 'Get cookies.txt LOCALLY' extension\n"
+                            "• Export fresh cookies and upload again",
+                            parse_mode=ParseMode.MARKDOWN,
+                            reply_markup=InlineKeyboardMarkup([[
+                                InlineKeyboardButton("🍪 Upload New Cookies", callback_data='cookies'),
+                                InlineKeyboardButton("🔙 Main Menu", callback_data='back_to_main')
+                            ]])
+                        )
+                    else:
+                        await status_message.edit_text(
+                            f"❌ Download failed: {error_msg[:200]}",
+                            reply_markup=self.get_main_keyboard(update.effective_user.id)
+                        )
+                    
+                    return None, None
+                    
     def sync_progress_hook(self, d):
         """Synchronous progress hook for yt-dlp"""
         if d['status'] == 'downloading':
-            # This runs in a separate thread, so we just log progress
             try:
                 percent = d.get('_percent_str', 'N/A').strip()
                 speed = d.get('_speed_str', 'N/A').strip()
@@ -449,7 +503,6 @@ class YouTubeDownloaderBot:
     async def send_video_telegram(self, update, status_message, video_path, video_title, user_id):
         """Send video directly via Telegram"""
         try:
-            # Check file size
             file_size = os.path.getsize(video_path)
             
             if file_size > self.config.MAX_TELEGRAM_FILE_SIZE:
@@ -464,7 +517,6 @@ class YouTubeDownloaderBot:
             
             await status_message.edit_text("📤 Uploading to Telegram...")
             
-            # Send video
             with open(video_path, 'rb') as video_file:
                 await update.message.reply_video(
                     video=video_file,
@@ -473,8 +525,6 @@ class YouTubeDownloaderBot:
                 )
             
             await status_message.delete()
-            
-            # Clean up
             os.remove(video_path)
             
         except Exception as e:
@@ -488,15 +538,12 @@ class YouTubeDownloaderBot:
     async def send_download_link(self, update, status_message, video_path, video_title, user_id):
         """Provide download link for the video"""
         try:
-            # Create a permanent copy in downloads folder
             safe_title = "".join(c for c in video_title if c.isalnum() or c in (' ', '-', '_')).rstrip()
             perm_filename = f"{safe_title[:50]}_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
             perm_path = os.path.join(self.config.DOWNLOAD_DIR, perm_filename)
             
-            # Move file to permanent location
             shutil.move(video_path, perm_path)
             
-            # Generate download link
             download_url = f"{self.base_download_link}/{quote(perm_filename)}"
             
             await status_message.edit_text(
@@ -555,7 +602,6 @@ class YouTubeDownloaderBot:
             [InlineKeyboardButton("🔙 Back to Menu", callback_data='back_to_main')]
         ]
         
-        # Check if we have a callback query or direct message
         if update.callback_query:
             message = update.callback_query.message
         else:
@@ -649,8 +695,6 @@ class YouTubeDownloaderBot:
         """Start the bot"""
         app = Application.builder().token(self.config.BOT_TOKEN).build()
         
-        # Conversation handler for cookies upload
-        # Using per_message=False (default) since we mix CommandHandler and MessageHandler
         cookies_conv = ConversationHandler(
             entry_points=[
                 CommandHandler('cookies', self.ask_for_cookies),
@@ -666,11 +710,9 @@ class YouTubeDownloaderBot:
                 CommandHandler('cancel', self.cancel),
                 CallbackQueryHandler(self.show_main_menu, pattern='^back_to_main$')
             ],
-            per_message=False  # Required when mixing CommandHandler and MessageHandler
+            per_message=False
         )
         
-        # Conversation handler for URL download
-        # Using per_message=False (default) since we mix CommandHandler and MessageHandler
         download_conv = ConversationHandler(
             entry_points=[
                 CommandHandler('download', self.ask_for_url),
@@ -685,10 +727,9 @@ class YouTubeDownloaderBot:
                 CommandHandler('cancel', self.cancel),
                 CallbackQueryHandler(self.show_main_menu, pattern='^back_to_main$')
             ],
-            per_message=False  # Required when mixing CommandHandler and MessageHandler
+            per_message=False
         )
         
-        # Add handlers
         app.add_handler(CommandHandler('start', self.start))
         app.add_handler(CommandHandler('help', self.help_command))
         app.add_handler(CallbackQueryHandler(self.button_handler, pattern='^(cookies_status|share_status)$'))
@@ -698,7 +739,6 @@ class YouTubeDownloaderBot:
         app.add_handler(cookies_conv)
         app.add_handler(download_conv)
         
-        # Start polling
         logger.info("Starting bot...")
         logger.info("Bot is ready to receive messages!")
         app.run_polling(allowed_updates=Update.ALL_TYPES)

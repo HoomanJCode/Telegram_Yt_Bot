@@ -8,6 +8,7 @@ import os
 import logging
 import json
 import time
+import shutil
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Optional, Set
@@ -160,13 +161,13 @@ class YouTubeDownloaderBot:
         await query.answer()
         
         if query.data == 'download':
-            await self.ask_for_url(update, context)
+            return await self.ask_for_url(update, context)
         elif query.data == 'cookies':
-            await self.ask_for_cookies(update, context)
+            return await self.ask_for_cookies(update, context)
         elif query.data == 'settings':
-            await self.show_settings(update, context)
+            return await self.show_settings(update, context)
         elif query.data == 'back_to_main':
-            await self.show_main_menu(update, context)
+            return await self.show_main_menu(update, context)
         elif query.data == 'cookies_status':
             user_id = update.effective_user.id
             if user_id in self.user_cookies:
@@ -493,7 +494,6 @@ class YouTubeDownloaderBot:
             perm_path = os.path.join(self.config.DOWNLOAD_DIR, perm_filename)
             
             # Move file to permanent location
-            import shutil
             shutil.move(video_path, perm_path)
             
             # Generate download link
@@ -649,7 +649,8 @@ class YouTubeDownloaderBot:
         """Start the bot"""
         app = Application.builder().token(self.config.BOT_TOKEN).build()
         
-        # Conversation handler for cookies upload - FIXED with per_message=True
+        # Conversation handler for cookies upload
+        # Using per_message=False (default) since we mix CommandHandler and MessageHandler
         cookies_conv = ConversationHandler(
             entry_points=[
                 CommandHandler('cookies', self.ask_for_cookies),
@@ -665,10 +666,11 @@ class YouTubeDownloaderBot:
                 CommandHandler('cancel', self.cancel),
                 CallbackQueryHandler(self.show_main_menu, pattern='^back_to_main$')
             ],
-            per_message=True  # FIX: Set per_message=True
+            per_message=False  # Required when mixing CommandHandler and MessageHandler
         )
         
-        # Conversation handler for URL download - FIXED with per_message=True
+        # Conversation handler for URL download
+        # Using per_message=False (default) since we mix CommandHandler and MessageHandler
         download_conv = ConversationHandler(
             entry_points=[
                 CommandHandler('download', self.ask_for_url),
@@ -683,7 +685,7 @@ class YouTubeDownloaderBot:
                 CommandHandler('cancel', self.cancel),
                 CallbackQueryHandler(self.show_main_menu, pattern='^back_to_main$')
             ],
-            per_message=True  # FIX: Set per_message=True
+            per_message=False  # Required when mixing CommandHandler and MessageHandler
         )
         
         # Add handlers

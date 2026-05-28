@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-YouTube Downloader Telegram Bot
+YouTube Downloader Telegram Bot with built-in file server
 """
 
 import os
@@ -11,10 +11,12 @@ import time
 import shutil
 import re
 import threading
+import asyncio
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List
-from urllib.parse import quote
+from urllib.parse import quote, unquote
+from http.server import HTTPServer, SimpleHTTPRequestHandler
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -51,6 +53,32 @@ WAITING_FOR_COOKIES = 1
 YOUTUBE_RE = re.compile(r'(https?://)?(www\.)?(youtube\.com|youtu\.be)/\S+')
 
 # ---------------------------------------------------------------------------
+# HTTP File Server
+# ---------------------------------------------------------------------------
+class FileServerHandler(SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=str(DOWNLOADS_DIR), **kwargs)
+    
+    def log_message(self, format, *args):
+        logger.info("FileServer: %s", args[0] if args else format)
+
+class FileServer:
+    def __init__(self, port=8000):
+        self.port = port
+        self.server = None
+        self.thread = None
+    
+    def start(self):
+        self.server = HTTPServer(('0.0.0.0', self.port), FileServerHandler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        logger.info("File server started on port %d", self.port)
+    
+    def stop(self):
+        if self.server:
+            self.server.shutdown()
+
+# ---------------------------------------------------------------------------
 # Video Record
 # ---------------------------------------------------------------------------
 class VideoRecord:
@@ -78,6 +106,7 @@ class YouTubeDownloaderBot:
     def __init__(self):
         self.config = Config()
         self.base_url = self.config.BASE_DOWNLOAD_LINK.rstrip('/')
+        self.file_server = FileServer(port=int(self.base_url.split(':')[-1]) if ':' in self.base_url else 8000)
         
         for d in (DATA_DIR, COOKIES_DIR, DOWNLOADS_DIR):
             d.mkdir(parents=True, exist_ok=True)
@@ -89,6 +118,7 @@ class YouTubeDownloaderBot:
         
         self._load()
         self._start_cleanup()
+        self.file_server.start()
     
     def _load(self):
         for name, fn, attr in [
@@ -150,7 +180,6 @@ class YouTubeDownloaderBot:
         return None
     
     def _extract_video_id(self, url):
-        """Extract YouTube video ID from URL"""
         patterns = [
             r'(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/embed/|youtube\.com/v/)([a-zA-Z0-9_-]{11})',
             r'youtube\.com/shorts/([a-zA-Z0-9_-]{11})',
@@ -161,7 +190,6 @@ class YouTubeDownloaderBot:
         return None
     
     def _find_existing(self, uid, video_id):
-        """Check if video already downloaded and file exists"""
         for v in self.videos.get(uid, []):
             if v.video_id == video_id and Path(v.file_path).exists():
                 return v
@@ -185,7 +213,6 @@ class YouTubeDownloaderBot:
             [InlineKeyboardButton(f"📦 Videos: {vc}", callback_data='vc')],
         ])
     
-    # --- Commands ---
     async def start(self, u, c):
         if not self._ok(u.effective_user.id): await u.message.reply_text("⛔"); return
         await u.message.reply_text(
@@ -207,7 +234,6 @@ class YouTubeDownloaderBot:
         await u.message.reply_text("❌ Cancelled.", reply_markup=self._menu(u.effective_user.id))
         return ConversationHandler.END
     
-    # --- Message Handler ---
     async def on_msg(self, u, c):
         uid = u.effective_user.id
         if not self._ok(uid): return
@@ -218,7 +244,6 @@ class YouTubeDownloaderBot:
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🍪 Upload", callback_data='c')]]))
             return
         
-        # Check if already downloaded
         video_id = self._extract_video_id(url)
         if video_id:
             existing = self._find_existing(uid, video_id)
@@ -230,10 +255,10 @@ class YouTubeDownloaderBot:
                     f"📹 *{self._esc(existing.title[:100])}*\n"
                     f"📦 {mb:.1f} MB\n"
                     f"🕒 {existing.download_time}\n\n"
-                    f"`{download_url}`",
+                    f"📥 `{download_url}`",
                     parse_mode=ParseMode.MARKDOWN,
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("📥 Download Again", url=download_url)],
+                        [InlineKeyboardButton("📥 Download", url=download_url)],
                         [InlineKeyboardButton("🔄 Re-download", callback_data=f'redl_{video_id}'),
                          InlineKeyboardButton("🔙 Menu", callback_data='b')]
                     ]))
@@ -291,10 +316,9 @@ class YouTubeDownloaderBot:
                 return found, title, video_id
         except DownloadError as e:
             logger.error("yt-dlp %d: %s", uid, str(e)[:100])
-            await status.edit_text("❌ Download failed.\n\nTry again or use different video.",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🍪 Cookies", callback_data='c'),
-                    InlineKeyboardButton("🔙 Menu", callback_data='b')]]))
+            await status.edit_text("❌ Download failed.", reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🍪 Cookies", callback_data='c'),
+                InlineKeyboardButton("🔙 Menu", callback_data='b')]]))
             return None, None, None
         except Exception as e:
             logger.error("Err %d: %s", uid, str(e)[:100])
@@ -328,7 +352,7 @@ class YouTubeDownloaderBot:
             url = f"{self.base_url}/{quote(Path(fp).name)}"
             await s.edit_text(
                 f"✅ *{self._esc(title[:200])}*\n\n"
-                f"📥 Download link:\n`{url}`\n\n"
+                f"📥 `{url}`\n\n"
                 f"⚠️ Deleted after {self.config.STORAGE_DAYS}d.",
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=InlineKeyboardMarkup([
@@ -339,7 +363,6 @@ class YouTubeDownloaderBot:
             logger.error("Link %d: %s", uid, str(e)[:50])
             await s.edit_text("❌ Failed.", reply_markup=self._menu(uid))
     
-    # --- Recent Videos ---
     async def _show_recent(self, u, c, page=0):
         uid = u.effective_user.id
         msg = u.callback_query.message if u.callback_query else u.message
@@ -374,7 +397,7 @@ class YouTubeDownloaderBot:
         videos = self.videos.get(uid, [])
         if 0 <= idx < len(videos) and Path(videos[idx].file_path).exists():
             url = f"{self.base_url}/{quote(Path(videos[idx].file_path).name)}"
-            await q.message.reply_text(f"📋 Copy this link:\n`{url}`", parse_mode=ParseMode.MARKDOWN)
+            await q.message.reply_text(f"📋 `{url}`", parse_mode=ParseMode.MARKDOWN)
     
     async def _del_video(self, u, c):
         q = u.callback_query; await q.answer()
@@ -388,23 +411,21 @@ class YouTubeDownloaderBot:
                 InlineKeyboardButton("🔙 Menu", callback_data='b')]]))
     
     async def _redownload(self, u, c):
-        q = u.callback_query; await q.answer("Starting re-download...")
+        q = u.callback_query; await q.answer("Re-downloading...")
         uid = u.effective_user.id
         video_id = q.data.split('_')[1]
-        # Find the URL from existing record
         for v in self.videos.get(uid, []):
             if v.video_id == video_id:
                 await self._download(uid, v.url, u)
                 return
-        await q.message.reply_text("❌ Original URL not found.")
+        await q.message.reply_text("❌ URL not found.")
     
-    # --- Cookies ---
     async def _ask_cookies(self, u, c):
         if not self._ok(u.effective_user.id):
             msg = u.callback_query.message if u.callback_query else u.message
             await msg.reply_text("⛔"); return ConversationHandler.END
         msg = u.callback_query.message if u.callback_query else u.message
-        await msg.reply_text("⚠️ *Cookie Warning*\n\nSend cookies.txt file.\nExport from browser extension.",
+        await msg.reply_text("⚠️ *Cookie Warning*\n\nSend cookies.txt file.",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Cancel", callback_data='b')]]))
         return WAITING_FOR_COOKIES
@@ -419,7 +440,7 @@ class YouTubeDownloaderBot:
             f = await c.bot.get_file(u.message.document.file_id)
             await f.download_to_drive(str(self._cookie_path(uid)))
             self.cookies[uid] = self._cookie_path(uid); self._save()
-            logger.info("User %d cookies saved", uid)
+            logger.info("User %d cookies", uid)
             await u.message.reply_text("✅ Cookies saved!", reply_markup=self._menu(uid))
             return ConversationHandler.END
         except Exception as e:
@@ -427,7 +448,6 @@ class YouTubeDownloaderBot:
             await u.message.reply_text("❌ Failed.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Cancel", callback_data='b')]]))
             return WAITING_FOR_COOKIES
     
-    # --- Settings ---
     async def _settings(self, u, c):
         uid = u.effective_user.id
         if not self._ok(uid): return
@@ -449,7 +469,6 @@ class YouTubeDownloaderBot:
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Settings", callback_data='s')]]))
     
-    # --- Router ---
     async def _router(self, u, c):
         q = u.callback_query; await q.answer()
         d = q.data; uid = u.effective_user.id
@@ -466,7 +485,6 @@ class YouTubeDownloaderBot:
         elif d.startswith('redl_'): await self._redownload(u, c)
         elif d in ('sl', 'st'): await self._set_setting(u, c)
     
-    # --- Run ---
     def run(self):
         app = Application.builder().token(self.config.BOT_TOKEN).build()
         app.add_handler(CommandHandler('start', self.start))
@@ -481,7 +499,7 @@ class YouTubeDownloaderBot:
             per_message=False))
         app.add_handler(CallbackQueryHandler(self._router))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_msg))
-        logger.info("Bot starting...")
+        logger.info("Bot starting on single core...")
         app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':

@@ -11,7 +11,7 @@ import time
 import shutil
 import re
 import threading
-import asyncio
+import socket
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List
@@ -53,14 +53,39 @@ WAITING_FOR_COOKIES = 1
 YOUTUBE_RE = re.compile(r'(https?://)?(www\.)?(youtube\.com|youtu\.be)/\S+')
 
 # ---------------------------------------------------------------------------
-# HTTP File Server
+# HTTP File Server with error handling
 # ---------------------------------------------------------------------------
 class FileServerHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(DOWNLOADS_DIR), **kwargs)
     
+    def handle(self):
+        """Handle a single HTTP request with broken pipe protection"""
+        try:
+            super().handle()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
+        except Exception as e:
+            logger.error("HTTP error: %s", str(e)[:100])
+    
+    def handle_one_request(self):
+        """Handle one request with timeout"""
+        try:
+            super().handle_one_request()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
+    
+    def copyfile(self, source, outputfile):
+        """Copy file with broken pipe protection"""
+        try:
+            super().copyfile(source, outputfile)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
+    
     def log_message(self, format, *args):
-        logger.info("FileServer: %s", args[0] if args else format)
+        # Only log successful requests
+        if args and len(args) > 1 and '200' in str(args[1]):
+            logger.info("FileServer: %s - %s", args[0], args[1])
 
 class FileServer:
     def __init__(self, port=8000):
@@ -69,14 +94,27 @@ class FileServer:
         self.thread = None
     
     def start(self):
-        self.server = HTTPServer(('0.0.0.0', self.port), FileServerHandler)
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
-        self.thread.start()
-        logger.info("File server started on port %d", self.port)
+        try:
+            self.server = HTTPServer(('0.0.0.0', self.port), FileServerHandler)
+            self.server.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.thread = threading.Thread(target=self._serve, daemon=True)
+            self.thread.start()
+            logger.info("File server started on port %d", self.port)
+        except Exception as e:
+            logger.error("Failed to start file server: %s", e)
+    
+    def _serve(self):
+        try:
+            self.server.serve_forever()
+        except Exception as e:
+            logger.error("File server error: %s", e)
     
     def stop(self):
         if self.server:
-            self.server.shutdown()
+            try:
+                self.server.shutdown()
+            except:
+                pass
 
 # ---------------------------------------------------------------------------
 # Video Record
@@ -106,7 +144,14 @@ class YouTubeDownloaderBot:
     def __init__(self):
         self.config = Config()
         self.base_url = self.config.BASE_DOWNLOAD_LINK.rstrip('/')
-        self.file_server = FileServer(port=int(self.base_url.split(':')[-1]) if ':' in self.base_url else 8000)
+        
+        # Extract port from URL or use default
+        try:
+            port = int(self.base_url.split(':')[-1]) if ':' in self.base_url.split('/')[2] else 8000
+        except:
+            port = 8000
+        
+        self.file_server = FileServer(port=port)
         
         for d in (DATA_DIR, COOKIES_DIR, DOWNLOADS_DIR):
             d.mkdir(parents=True, exist_ok=True)
@@ -499,7 +544,7 @@ class YouTubeDownloaderBot:
             per_message=False))
         app.add_handler(CallbackQueryHandler(self._router))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_msg))
-        logger.info("Bot starting on single core...")
+        logger.info("Bot starting...")
         app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':

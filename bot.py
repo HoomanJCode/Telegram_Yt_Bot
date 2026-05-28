@@ -32,34 +32,29 @@ from yt_dlp.utils import DownloadError
 
 from config import Config
 
-# Enable logging with custom filter
-class SensitiveDataFilter(logging.Filter):
-    """Filter out sensitive data from logs"""
-    def filter(self, record):
-        # Mask bot token in URLs
-        record.msg = re.sub(r'bot\d+:[A-Za-z0-9_-]+', 'bot***:***', str(record.msg))
-        # Mask any potential tokens in args
-        if record.args:
-            record.args = tuple(
-                re.sub(r'bot\d+:[A-Za-z0-9_-]+', 'bot***:***', str(arg)) 
-                if isinstance(arg, str) else arg 
-                for arg in record.args
-            )
-        return True
-
-# Configure logging
+# Configure root logger to suppress httpx and telegram request details
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.WARNING  # Only show warnings and errors by default
 )
 
-# Add filter to all handlers
-for handler in logging.root.handlers:
-    handler.addFilter(SensitiveDataFilter())
+# Set specific loggers
+logging.getLogger('httpx').setLevel(logging.WARNING)
+logging.getLogger('httpcore').setLevel(logging.WARNING)
+logging.getLogger('telegram').setLevel(logging.WARNING)
+logging.getLogger('telegram.ext').setLevel(logging.WARNING)
 
-# Also add to our logger
+# Our application logger
 logger = logging.getLogger(__name__)
-logger.addFilter(SensitiveDataFilter())
+logger.setLevel(logging.INFO)
+
+# Add console handler for our logger only
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+console_handler.setFormatter(console_formatter)
+logger.addHandler(console_handler)
+logger.propagate = False
 
 # Conversation states
 WAITING_FOR_COOKIES = 1
@@ -103,19 +98,14 @@ class YouTubeDownloaderBot:
         self.config = Config()
         self.base_download_link = self.config.BASE_DOWNLOAD_LINK.rstrip('/')
         
-        # Create downloads directory
         os.makedirs(self.config.DOWNLOAD_DIR, exist_ok=True)
         
-        # User data storage
         self.user_cookies: Dict[int, str] = {}
         self.user_settings: Dict[int, Dict] = {}
         self.user_videos: Dict[int, List[VideoRecord]] = {}
         self._last_progress_update = 0
         
-        # Load saved data
         self.load_data()
-        
-        # Start cleanup thread
         self.start_cleanup_thread()
     
     def load_data(self):
@@ -125,9 +115,9 @@ class YouTubeDownloaderBot:
                 with open('user_cookies.json', 'r') as f:
                     data = json.load(f)
                     self.user_cookies = {int(k): v for k, v in data.items()}
-                logger.info(f"Loaded cookies for {len(self.user_cookies)} users")
+                logger.info(f"Loaded cookies for %d users", len(self.user_cookies))
         except Exception as e:
-            logger.error(f"Error loading cookies data: {e}")
+            logger.error("Error loading cookies: %s", e)
         
         try:
             if os.path.exists('user_settings.json'):
@@ -135,7 +125,7 @@ class YouTubeDownloaderBot:
                     data = json.load(f)
                     self.user_settings = {int(k): v for k, v in data.items()}
         except Exception as e:
-            logger.error(f"Error loading settings data: {e}")
+            logger.error("Error loading settings: %s", e)
         
         try:
             if os.path.exists('user_videos.json'):
@@ -144,9 +134,9 @@ class YouTubeDownloaderBot:
                     self.user_videos = {}
                     for uid, videos in data.items():
                         self.user_videos[int(uid)] = [VideoRecord.from_dict(v) for v in videos]
-                logger.info(f"Loaded video records for {len(self.user_videos)} users")
+                logger.info("Loaded video records for %d users", len(self.user_videos))
         except Exception as e:
-            logger.error(f"Error loading videos data: {e}")
+            logger.error("Error loading videos: %s", e)
     
     def save_data(self):
         """Save user data to JSON files"""
@@ -165,7 +155,7 @@ class YouTubeDownloaderBot:
             with open('user_videos.json', 'w') as f:
                 json.dump(videos_data, f, indent=2)
         except Exception as e:
-            logger.error(f"Error saving data: {e}")
+            logger.error("Error saving data: %s", e)
     
     def start_cleanup_thread(self):
         """Start background thread to clean old files"""
@@ -174,7 +164,7 @@ class YouTubeDownloaderBot:
                 try:
                     self.cleanup_old_files()
                 except Exception as e:
-                    logger.error(f"Cleanup error: {e}")
+                    logger.error("Cleanup error: %s", e)
                 time.sleep(3600)
         
         thread = threading.Thread(target=cleanup_worker, daemon=True)
@@ -197,9 +187,8 @@ class YouTubeDownloaderBot:
                         cleaned_count += 1
             
             if cleaned_count > 0:
-                logger.info(f"Cleaned up {cleaned_count} old files")
+                logger.info("Cleaned up %d old files", cleaned_count)
             
-            # Clean up video records
             for user_id in list(self.user_videos.keys()):
                 self.user_videos[user_id] = [
                     v for v in self.user_videos[user_id]
@@ -211,7 +200,7 @@ class YouTubeDownloaderBot:
             self.save_data()
             
         except Exception as e:
-            logger.error(f"Error during cleanup: {e}")
+            logger.error("Error during cleanup: %s", e)
     
     def add_video_record(self, user_id: int, title: str, url: str, file_path: str, file_size: int):
         """Add a video record for a user"""
@@ -228,7 +217,6 @@ class YouTubeDownloaderBot:
         
         self.user_videos[user_id].insert(0, video_record)
         
-        # Keep only last 20 videos
         if len(self.user_videos[user_id]) > 20:
             old_video = self.user_videos[user_id].pop()
             if os.path.exists(old_video.file_path):
@@ -372,14 +360,11 @@ class YouTubeDownloaderBot:
             return
         
         text = update.message.text
-        
-        # Check if the message contains a YouTube link
         youtube_url = self.extract_youtube_url(text)
         
         if youtube_url:
-            logger.info(f"User {user_id} requested download: {youtube_url[:50]}...")
+            logger.info("User %d requested download", user_id)
             
-            # Check if user has cookies
             if user_id not in self.user_cookies:
                 await update.message.reply_text(
                     "❌ You need to upload cookies first!\n"
@@ -390,7 +375,6 @@ class YouTubeDownloaderBot:
                 )
                 return
             
-            # Start download process
             await self.process_download(update, youtube_url)
     
     async def process_download(self, update: Update, url: str):
@@ -414,7 +398,6 @@ class YouTubeDownloaderBot:
             if not video_path:
                 return
             
-            # Add to video records
             file_size = os.path.getsize(video_path)
             self.add_video_record(user_id, video_title, url, video_path, file_size)
             
@@ -430,7 +413,7 @@ class YouTubeDownloaderBot:
                 )
             
         except Exception as e:
-            logger.error(f"Error in process_download for user {user_id}: {str(e)[:100]}")
+            logger.error("Error processing download for user %d: %s", user_id, str(e)[:100])
             await status_message.edit_text(
                 "❌ An error occurred while processing your request.\n"
                 "Please try again or contact support.",
@@ -458,7 +441,6 @@ class YouTubeDownloaderBot:
             )
             return
         
-        # Pagination
         videos_per_page = 5
         total_pages = (len(videos) + videos_per_page - 1) // videos_per_page
         page = max(0, min(page, total_pages - 1))
@@ -468,14 +450,12 @@ class YouTubeDownloaderBot:
         
         page_videos = videos[start_idx:end_idx]
         
-        # Build message
         text = f"📹 *Recent Downloads* (Page {page + 1}/{total_pages})\n\n"
         
         for i, video in enumerate(page_videos, start_idx + 1):
             file_exists = os.path.exists(video.file_path)
             status = "✅" if file_exists else "🗑️"
             
-            # Escape special characters for Markdown
             safe_title = video.title[:50].replace('*', '\\*').replace('_', '\\_').replace('`', '\\`').replace('[', '\\[')
             
             text += (
@@ -487,10 +467,8 @@ class YouTubeDownloaderBot:
         text += f"⚠️ Files are deleted after {self.config.STORAGE_DAYS} days.\n"
         text += "Click a button below to manage videos."
         
-        # Build keyboard
         keyboard = []
         
-        # Add video action buttons
         for i, video in enumerate(page_videos, start_idx + 1):
             if os.path.exists(video.file_path):
                 download_url = f"{self.base_download_link}/{quote(os.path.basename(video.file_path))}"
@@ -502,7 +480,6 @@ class YouTubeDownloaderBot:
                     InlineKeyboardButton(f"🗑️ Delete #{i}", callback_data=f'delete_video_{start_idx + i - 1}')
                 ])
         
-        # Pagination buttons
         nav_buttons = []
         if page > 0:
             nav_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f'video_page_{page - 1}'))
@@ -534,15 +511,13 @@ class YouTubeDownloaderBot:
         if 0 <= video_idx < len(videos):
             video = videos[video_idx]
             
-            # Delete file
             if os.path.exists(video.file_path):
                 try:
                     os.remove(video.file_path)
-                    logger.info(f"Deleted file for user {user_id}: {video.title[:30]}")
+                    logger.info("User %d deleted video", user_id)
                 except Exception as e:
-                    logger.error(f"Error deleting file: {e}")
+                    logger.error("Error deleting file: %s", e)
             
-            # Remove from list
             videos.pop(video_idx)
             self.save_data()
             
@@ -629,7 +604,7 @@ class YouTubeDownloaderBot:
             self.user_cookies[user_id] = cookies_path
             self.save_data()
             
-            logger.info(f"User {user_id} uploaded cookies")
+            logger.info("User %d uploaded cookies", user_id)
             
             await update.message.reply_text(
                 "✅ Cookies saved successfully!\n"
@@ -640,7 +615,7 @@ class YouTubeDownloaderBot:
             return ConversationHandler.END
             
         except Exception as e:
-            logger.error(f"Error saving cookies for user {user_id}: {e}")
+            logger.error("Error saving cookies for user %d: %s", user_id, e)
             await update.message.reply_text(
                 "❌ Failed to save cookies. Please try again.",
                 reply_markup=InlineKeyboardMarkup([[
@@ -690,11 +665,12 @@ class YouTubeDownloaderBot:
                         raise FileNotFoundError("Downloaded file not found")
                     
                     file_size = os.path.getsize(filename)
-                    logger.info(f"Download complete for user {user_id}: {video_title[:50]} ({file_size / 1024 / 1024:.1f} MB)")
+                    logger.info("Download complete for user %d: %.1f MB", user_id, file_size / 1024 / 1024)
                     
+                    safe_title = self._escape_markdown(video_title[:100])
                     await status_message.edit_text(
                         f"✅ Download complete!\n"
-                        f"📹 *{self._escape_markdown(video_title[:100])}*\n"
+                        f"📹 *{safe_title}*\n"
                         f"📦 Size: {file_size / 1024 / 1024:.1f} MB",
                         parse_mode=ParseMode.MARKDOWN
                     )
@@ -702,22 +678,16 @@ class YouTubeDownloaderBot:
                     return filename, video_title
                     
                 except DownloadError as e:
-                    error_msg = str(e)
-                    logger.error(f"Download error for user {user_id}: {error_msg[:100]}")
+                    logger.error("Download error for user %d", user_id)
                     
-                    # Simple error message without parsing issues
-                    error_text = (
+                    await status_message.edit_text(
                         "❌ Download failed\n\n"
                         "*Troubleshooting:*\n"
                         "• Make sure cookies are fresh (logged-in YouTube session)\n"
                         "• Try again in a few minutes\n"
                         "• Some videos may have restrictions\n\n"
                         "Update yt-dlp if issue persists:\n"
-                        "`pip install --upgrade yt-dlp`"
-                    )
-                    
-                    await status_message.edit_text(
-                        error_text,
+                        "`pip install --upgrade yt-dlp`",
                         parse_mode=ParseMode.MARKDOWN,
                         reply_markup=InlineKeyboardMarkup([
                             [InlineKeyboardButton("🍪 Upload New Cookies", callback_data='cookies')],
@@ -727,7 +697,7 @@ class YouTubeDownloaderBot:
                     return None, None
                     
         except Exception as e:
-            logger.error(f"Unexpected error for user {user_id}: {str(e)[:100]}")
+            logger.error("Unexpected error for user %d", user_id)
             await status_message.edit_text(
                 "❌ An unexpected error occurred.\n"
                 "Please try again or contact support.",
@@ -750,7 +720,7 @@ class YouTubeDownloaderBot:
                 if current_time - self._last_progress_update > 10:
                     percent = d.get('_percent_str', 'N/A').strip()
                     speed = d.get('_speed_str', 'N/A').strip()
-                    logger.info(f"Download progress: {percent} at {speed}")
+                    logger.info("Download progress: %s at %s", percent, speed)
                     self._last_progress_update = current_time
             except:
                 pass
@@ -782,7 +752,7 @@ class YouTubeDownloaderBot:
             await status_message.delete()
             
         except Exception as e:
-            logger.error(f"Error sending video for user {user_id}: {e}")
+            logger.error("Error sending video for user %d", user_id)
             await status_message.edit_text(
                 "❌ Failed to send video. Trying download link...",
                 reply_markup=self.get_main_keyboard(user_id)
@@ -798,7 +768,6 @@ class YouTubeDownloaderBot:
             
             shutil.move(video_path, perm_path)
             
-            # Update video record with new path
             if user_id in self.user_videos:
                 for video in self.user_videos[user_id]:
                     if video.file_path == video_path:
@@ -808,9 +777,10 @@ class YouTubeDownloaderBot:
             
             download_url = f"{self.base_download_link}/{quote(perm_filename)}"
             
+            safe_title_md = self._escape_markdown(video_title[:200])
             await status_message.edit_text(
                 f"✅ Video downloaded successfully!\n\n"
-                f"📹 *Title:* {self._escape_markdown(video_title[:200])}\n"
+                f"📹 *Title:* {safe_title_md}\n"
                 f"📥 *Download Link:* [Click here]({download_url})\n\n"
                 f"⚠️ This file will be deleted after {self.config.STORAGE_DAYS} days.\n"
                 f"💾 Save the file locally if you want to keep it.",
@@ -824,7 +794,7 @@ class YouTubeDownloaderBot:
             )
             
         except Exception as e:
-            logger.error(f"Error creating download link for user {user_id}: {e}")
+            logger.error("Error creating download link for user %d", user_id)
             await status_message.edit_text(
                 "❌ Failed to create download link.",
                 reply_markup=self.get_main_keyboard(user_id)

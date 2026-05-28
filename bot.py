@@ -346,16 +346,7 @@ class YouTubeDownloaderBot:
             )
             
             if not video_path:
-                await status_message.edit_text(
-                    "❌ Failed to download video.\n\n"
-                    "Possible reasons:\n"
-                    "• Invalid or expired cookies\n"
-                    "• Video is private/age-restricted\n"
-                    "• YouTube blocked the request\n"
-                    "• Network issues\n\n"
-                    "Try uploading fresh cookies and check the URL.",
-                    reply_markup=self.get_main_keyboard(user_id)
-                )
+                # Error message already handled in download_video
                 return ConversationHandler.END
             
             default_share = self.get_default_setting(user_id)
@@ -370,7 +361,7 @@ class YouTubeDownloaderBot:
                 )
             
         except Exception as e:
-            logger.error(f"Error downloading video: {e}")
+            logger.error(f"Error in handle_url: {e}")
             await status_message.edit_text(
                 f"❌ An error occurred: {str(e)[:200]}\n\n"
                 "Please try again or contact support.",
@@ -485,6 +476,14 @@ class YouTubeDownloaderBot:
                     
                     return None, None
                     
+        except Exception as e:
+            logger.error(f"Unexpected error in download_video: {e}")
+            await status_message.edit_text(
+                f"❌ An unexpected error occurred: {str(e)[:200]}",
+                reply_markup=self.get_main_keyboard(update.effective_user.id)
+            )
+            return None, None
+    
     def sync_progress_hook(self, d):
         """Synchronous progress hook for yt-dlp"""
         if d['status'] == 'downloading':

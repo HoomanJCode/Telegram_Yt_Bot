@@ -409,55 +409,78 @@ class YouTubeDownloaderBot:
             )
     
     async def _download_video(self, url: str, cookies_file: str, 
-                              status_msg, user_id: int) -> tuple:
-        try:
-            ydl_opts = {
-                'format': 'bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/best[ext=mp4]/best',
-                'outtmpl': str(DOWNLOADS_DIR / '%(title)s.%(ext)s'),
-                'cookiefile': cookies_file,
-                'quiet': True,
-                'no_warnings': True,
-                'socket_timeout': 120,
-                'retries': 50,
-                'fragment_retries': 50,
-                'http_chunk_size': 5 * 1024 * 1024,
-                'throttled_rate': '100K',
-                'no_mtime': True,
-                'merge_output_format': 'mp4',
-                'progress_hooks': [lambda d: self._progress_hook(d)],
-            }
+                          status_msg, user_id: int) -> tuple:
+    try:
+        ydl_opts = {
+            'format': 'best[ext=mp4]/best',
+            'outtmpl': str(DOWNLOADS_DIR / '%(title)s.%(ext)s'),
+            'cookiefile': cookies_file,
+            'quiet': True,
+            'no_warnings': True,
+            'socket_timeout': 120,
+            'retries': 50,
+            'fragment_retries': 50,
+            'http_chunk_size': 5 * 1024 * 1024,
+            'throttled_rate': '100K',
+            'no_mtime': True,
+            'merge_output_format': 'mp4',
+            'progress_hooks': [lambda d: self._progress_hook(d)],
+        }
+        
+        await status_msg.edit_text("📥 Downloading video...")
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            title = info.get('title', 'Unknown')
+            filepath = ydl.prepare_filename(info)
             
-            await status_msg.edit_text("📥 Downloading video...")
+            # Find the actual downloaded file
+            if not Path(filepath).exists():
+                base = Path(filepath).stem
+                for ext in ('.mp4', '.webm', '.mkv', '.m4a'):
+                    alt = DOWNLOADS_DIR / f'{base}{ext}'
+                    if alt.exists():
+                        filepath = str(alt)
+                        break
             
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                title = info.get('title', 'Unknown')
-                filepath = ydl.prepare_filename(info)
-                
-                if not Path(filepath).exists():
-                    base = Path(filepath).stem
-                    for ext in ('.mp4', '.webm', '.mkv'):
-                        alt = DOWNLOADS_DIR / f'{base}{ext}'
-                        if alt.exists():
-                            filepath = str(alt)
-                            break
-                
-                if not Path(filepath).exists():
-                    raise FileNotFoundError("Downloaded file not found")
-                
-                size_mb = Path(filepath).stat().st_size / 1024 / 1024
-                logger.info("Downloaded for user %d: %.1f MB", user_id, size_mb)
-                
-                safe_title = self._escape_markdown(title[:100])
-                await status_msg.edit_text(
-                    f"✅ *{safe_title}*\n📦 {size_mb:.1f} MB",
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                
-                return filepath, title
-                
-        except DownloadError as e:
-            logger.error("yt-dlp error for user %d", user_id)
+            if not Path(filepath).exists():
+                # Search for any file with matching title
+                safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).rstrip()[:50]
+                for f in DOWNLOADS_DIR.iterdir():
+                    if f.is_file() and safe_title in f.stem:
+                        filepath = str(f)
+                        break
+            
+            if not Path(filepath).exists():
+                raise FileNotFoundError(f"Downloaded file not found for: {title}")
+            
+            size_mb = Path(filepath).stat().st_size / 1024 / 1024
+            logger.info("Downloaded for user %d: %.1f MB", user_id, size_mb)
+            
+            safe_title = self._escape_markdown(title[:100])
+            await status_msg.edit_text(
+                f"✅ *{safe_title}*\n📦 {size_mb:.1f} MB",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            return filepath, title
+            
+    except DownloadError as e:
+        logger.error("yt-dlp error for user %d: %s", user_id, str(e)[:100])
+        
+        # Check if it's a format error
+        error_msg = str(e)
+        if "format is not available" in error_msg.lower():
+            await status_msg.edit_text(
+                "❌ Video format not available\n\n"
+                "This video may have limited formats.\n"
+                "Try a different video or quality.",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Menu", callback_data='back_to_main')]
+                ])
+            )
+        else:
             await status_msg.edit_text(
                 "❌ Download failed\n\n"
                 "*Common fixes:*\n"
@@ -470,16 +493,16 @@ class YouTubeDownloaderBot:
                     [InlineKeyboardButton("🔙 Menu", callback_data='back_to_main')]
                 ])
             )
-            return None, None
-        
-        except Exception as e:
-            logger.error("Download error for user %d", user_id)
-            await status_msg.edit_text(
-                "❌ An error occurred. Please try again.",
-                reply_markup=self._build_main_keyboard(user_id)
-            )
-            return None, None
+        return None, None
     
+    except Exception as e:
+        logger.error("Download error for user %d: %s", user_id, str(e)[:100])
+        await status_msg.edit_text(
+            "❌ An error occurred. Please try again.",
+            reply_markup=self._build_main_keyboard(user_id)
+        )
+        return None, None
+        
     def _progress_hook(self, d: dict) -> None:
         if d['status'] == 'downloading':
             now = time.time()

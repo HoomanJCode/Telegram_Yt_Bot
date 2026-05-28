@@ -81,7 +81,7 @@ class YouTubeDownloaderBot:
         self.base_download_link = self.config.BASE_DOWNLOAD_LINK.rstrip('/')
         
         self._setup_dirs()
-        self._update_ytdlp()
+        self._install_deps()
         
         self.user_cookies: Dict[int, Path] = {}
         self.user_settings: Dict[int, dict] = {}
@@ -95,13 +95,33 @@ class YouTubeDownloaderBot:
         for d in (DATA_DIR, COOKIES_DIR, DOWNLOADS_DIR):
             d.mkdir(parents=True, exist_ok=True)
     
-    def _update_ytdlp(self):
+    def _install_deps(self):
+        """Install required dependencies"""
         try:
-            r = subprocess.run([sys.executable, '-m', 'pip', 'install', '--upgrade', 'yt-dlp'],
-                             capture_output=True, text=True, timeout=30)
-            logger.info("yt-dlp %s", "updated" if r.returncode == 0 else "update failed")
+            # Update yt-dlp
+            r1 = subprocess.run(
+                [sys.executable, '-m', 'pip', 'install', '--upgrade', 'yt-dlp'],
+                capture_output=True, text=True, timeout=60
+            )
+            logger.info("yt-dlp %s", "updated" if r1.returncode == 0 else "update failed")
+            
+            # Install yt-dlp-ejs for JavaScript runtime support
+            r2 = subprocess.run(
+                [sys.executable, '-m', 'pip', 'install', 'yt-dlp-ejs'],
+                capture_output=True, text=True, timeout=60
+            )
+            if r2.returncode == 0:
+                logger.info("yt-dlp-ejs installed")
+            else:
+                logger.warning("yt-dlp-ejs install failed, trying alternative...")
+                # Alternative: install Node.js if available
+                r3 = subprocess.run(['which', 'node'], capture_output=True, text=True)
+                if r3.returncode != 0:
+                    subprocess.run(['apt-get', 'install', '-y', 'nodejs'], 
+                                 capture_output=True, timeout=120)
+                    logger.info("Node.js installed for JS runtime")
         except Exception as e:
-            logger.warning("yt-dlp update error: %s", e)
+            logger.warning("Dependency install error: %s", e)
     
     def _load_data(self):
         for name, path, storage in [
@@ -273,9 +293,8 @@ class YouTubeDownloaderBot:
     
     async def _do_download(self, uid: int, url: str, status) -> tuple:
         try:
-            # Simple format selection - let yt-dlp pick best available
             opts = {
-                'format': 'best',  # Let yt-dlp decide, just get the best
+                'format': 'best',
                 'outtmpl': str(DOWNLOADS_DIR / '%(title)s.%(ext)s'),
                 'cookiefile': str(self.user_cookies[uid]),
                 'quiet': True,
@@ -297,7 +316,6 @@ class YouTubeDownloaderBot:
                 title = info.get('title', 'Unknown')
                 fp = ydl.prepare_filename(info)
                 
-                # Find the actual file
                 found = None
                 if Path(fp).exists():
                     found = fp
@@ -310,7 +328,6 @@ class YouTubeDownloaderBot:
                             break
                 
                 if not found:
-                    # Search by title
                     st = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).rstrip()[:50]
                     for f in sorted(DOWNLOADS_DIR.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
                         if f.is_file() and st.lower() in f.stem.lower():
@@ -318,7 +335,7 @@ class YouTubeDownloaderBot:
                             break
                 
                 if not found:
-                    raise FileNotFoundError(f"Downloaded file not found for: {title}")
+                    raise FileNotFoundError(f"File not found: {title}")
                 
                 mb = Path(found).stat().st_size / 1024 / 1024
                 logger.info("Downloaded user %d: %.1f MB", uid, mb)
@@ -332,8 +349,7 @@ class YouTubeDownloaderBot:
             logger.error("yt-dlp user %d: %s", uid, str(e)[:100])
             await status.edit_text(
                 "❌ Download failed\n\n"
-                "Try: `pip install --upgrade yt-dlp`\n"
-                "Or upload fresh cookies.",
+                "Try: `pip install --upgrade yt-dlp yt-dlp-ejs`",
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("🍪 Cookies", callback_data='cookies'),
@@ -350,7 +366,7 @@ class YouTubeDownloaderBot:
         if d['status'] == 'downloading':
             now = time.time()
             if now - self._last_progress > 10:
-                logger.info("Download: %s at %s", 
+                logger.info("Download: %s at %s",
                           d.get('_percent_str', '?').strip(),
                           d.get('_speed_str', '?').strip())
                 self._last_progress = now
@@ -423,9 +439,9 @@ class YouTubeDownloaderBot:
         kb = []
         for i, v in enumerate(pv, page*pp+1):
             if Path(v.file_path).exists():
-                kb.append([InlineKeyboardButton(f"📥 {i}. {v.title[:30]}", 
+                kb.append([InlineKeyboardButton(f"📥 {i}. {v.title[:30]}",
                           url=f"{self.base_download_link}/{quote(Path(v.file_path).name)}")])
-                kb.append([InlineKeyboardButton(f"🗑️ Delete #{i}", 
+                kb.append([InlineKeyboardButton(f"🗑️ Delete #{i}",
                           callback_data=f'del_{page*pp + (i-page*pp-1)}')])
         
         nav = []

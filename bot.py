@@ -79,13 +79,12 @@ class FileServerHandler(SimpleHTTPRequestHandler):
 class FileServer:
     def __init__(self, port=8000):
         self.port = port
-        self.server = None
     
     def start(self):
         try:
-            self.server = HTTPServer(('0.0.0.0', self.port), FileServerHandler)
-            self.server.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            threading.Thread(target=self.server.serve_forever, daemon=True).start()
+            s = HTTPServer(('0.0.0.0', self.port), FileServerHandler)
+            s.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            threading.Thread(target=s.serve_forever, daemon=True).start()
             logger.info("File server on port %d", self.port)
         except Exception as e:
             logger.error("File server: %s", e)
@@ -94,9 +93,11 @@ class FileServer:
 # Video Record
 # ---------------------------------------------------------------------------
 class VideoRecord:
-    __slots__ = ('title', 'url', 'video_id', 'file_path', 'file_size', 'download_time', 'telegram_file_id')
+    __slots__ = ('title', 'url', 'video_id', 'file_path', 'file_size', 
+                 'download_time', 'telegram_file_id', 'media_type')
     
-    def __init__(self, title, url, video_id, file_path, file_size, download_time, telegram_file_id=None):
+    def __init__(self, title, url, video_id, file_path, file_size, 
+                 download_time, telegram_file_id=None, media_type='video'):
         self.title = title
         self.url = url
         self.video_id = video_id
@@ -104,6 +105,7 @@ class VideoRecord:
         self.file_size = file_size
         self.download_time = download_time
         self.telegram_file_id = telegram_file_id
+        self.media_type = media_type
     
     def to_dict(self):
         return {k: getattr(self, k) for k in self.__slots__}
@@ -128,6 +130,7 @@ class YouTubeDownloaderBot:
         self.cookies: Dict[int, Path] = {}
         self.videos: Dict[int, List[VideoRecord]] = {}
         self._last_progress = 0
+        self._pending_urls: Dict[int, tuple] = {}  # user_id -> (url, video_id, title)
         
         self._load()
         self._start_cleanup()
@@ -198,9 +201,9 @@ class YouTubeDownloaderBot:
             if m: return m.group(1)
         return None
     
-    def _find_existing(self, uid, video_id):
+    def _find_existing(self, uid, video_id, media_type='video'):
         for v in self.videos.get(uid, []):
-            if v.video_id == video_id and Path(v.file_path).exists():
+            if v.video_id == video_id and v.media_type == media_type and Path(v.file_path).exists():
                 return v
         return None
     
@@ -213,20 +216,28 @@ class YouTubeDownloaderBot:
         has = uid in self.cookies
         vc = len(self.videos.get(uid, []))
         return InlineKeyboardMarkup([
-            [InlineKeyboardButton("📹 Recent Videos", callback_data='r')],
+            [InlineKeyboardButton("📹 Recent Downloads", callback_data='r')],
             [InlineKeyboardButton("🍪 Upload Cookies", callback_data='c')],
             [InlineKeyboardButton(f"🍪 {'✅' if has else '❌'}", callback_data='cs'),
-             InlineKeyboardButton(f"📦 {vc} videos", callback_data='vc')],
+             InlineKeyboardButton(f"📦 {vc} files", callback_data='vc')],
+        ])
+    
+    def _format_choice_keyboard(self, uid):
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎬 Video (MP4)", callback_data='fmt_video')],
+            [InlineKeyboardButton("🎵 Audio (MP3)", callback_data='fmt_audio')],
+            [InlineKeyboardButton("🖼️ Thumbnails", callback_data='fmt_thumb')],
+            [InlineKeyboardButton("🔙 Cancel", callback_data='b')],
         ])
     
     def _delivery_keyboard(self, uid, idx=None):
-        """Create keyboard with Telegram upload and Link options"""
-        kb = [
-            [InlineKeyboardButton("📤 Send via Telegram", callback_data=f'tg_{idx}' if idx is not None else 'tg_new')],
-            [InlineKeyboardButton("📋 Get Download Link", callback_data=f'lk_{idx}' if idx is not None else 'lk_new')],
-        ]
-        return InlineKeyboardMarkup(kb)
+        idx_str = str(idx) if idx is not None else 'new'
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("📤 Send via Telegram", callback_data=f'tg_{idx_str}')],
+            [InlineKeyboardButton("📋 Get Download Link", callback_data=f'lk_{idx_str}')],
+        ])
     
+    # --- Commands ---
     async def start(self, u, c):
         if not self._ok(u.effective_user.id): await u.message.reply_text("⛔"); return
         await u.message.reply_text(
@@ -234,12 +245,19 @@ class YouTubeDownloaderBot:
             "🎥 *YouTube Downloader Bot*\n\n"
             "/start /cookies /recent /help\n\n"
             "💡 Send YouTube link to download!\n"
+            "Choose format: Video, Audio, or Thumbnails\n"
             f"🗑️ Files deleted after {self.config.STORAGE_DAYS}d.",
             parse_mode=ParseMode.MARKDOWN, reply_markup=self._menu(u.effective_user.id))
     
     async def help(self, u, c):
         await u.message.reply_text(
-            "📚 *Help*\n\nSend YouTube link to download.\n/cookies - Upload cookies\n/recent - View downloads",
+            "📚 *Help*\n\n"
+            "Send YouTube link → Choose format:\n"
+            "• 🎬 Video - Full video MP4\n"
+            "• 🎵 Audio - Audio only MP3\n"
+            "• 🖼️ Thumbnails - Video thumbnails\n\n"
+            "/cookies - Upload cookies\n"
+            "/recent - View downloads",
             parse_mode=ParseMode.MARKDOWN, reply_markup=self._menu(u.effective_user.id))
     
     async def recent(self, u, c): await self._show_recent(u, c)
@@ -248,6 +266,7 @@ class YouTubeDownloaderBot:
         await u.message.reply_text("❌ Cancelled.", reply_markup=self._menu(u.effective_user.id))
         return ConversationHandler.END
     
+    # --- Message Handler ---
     async def on_msg(self, u, c):
         uid = u.effective_user.id
         if not self._ok(uid): return
@@ -258,61 +277,149 @@ class YouTubeDownloaderBot:
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🍪 Upload", callback_data='c')]]))
             return
         
+        # Get video info and show format choice
         video_id = self._extract_video_id(url)
-        if video_id:
-            existing = self._find_existing(uid, video_id)
-            if existing:
-                await self._show_delivery_options(u.message, existing, self.videos[uid].index(existing))
-                return
+        if not video_id:
+            await u.message.reply_text("❌ Invalid YouTube URL.")
+            return
         
-        logger.info("User %d download", uid)
-        await self._download(uid, url, u.message)
+        s = await u.message.reply_text("🔍 Fetching video info...")
+        try:
+            opts = {
+                'format': 'best',
+                'cookiefile': str(self.cookies[uid]),
+                'quiet': True, 'no_warnings': True,
+                'socket_timeout': 30, 'retries': 3,
+            }
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                title = info.get('title', 'Unknown')
+                duration = info.get('duration', 0)
+                thumbnails = info.get('thumbnails', [])
+            
+            self._pending_urls[uid] = (url, video_id, title)
+            
+            mins = duration // 60
+            secs = duration % 60
+            duration_str = f"{mins}:{secs:02d}" if duration else "?"
+            thumb_count = len(thumbnails) if thumbnails else "?"
+            
+            await s.edit_text(
+                f"📹 *{self._esc(title[:200])}*\n"
+                f"⏱ Duration: {duration_str}\n"
+                f"🖼 Thumbnails: {thumb_count}\n\n"
+                "Choose download format:",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=self._format_choice_keyboard(uid))
+        except Exception as e:
+            logger.error("Info fetch %d: %s", uid, str(e)[:100])
+            await s.edit_text("❌ Failed to get video info.", reply_markup=self._menu(uid))
     
-    async def _download(self, uid, url, msg):
+    async def _choose_format(self, u, c):
+        q = u.callback_query; await q.answer()
+        uid = u.effective_user.id
+        fmt = q.data
+        
+        if uid not in self._pending_urls:
+            await q.message.reply_text("❌ Session expired. Send link again.")
+            return
+        
+        url, video_id, title = self._pending_urls.pop(uid)
+        
+        if fmt == 'fmt_video':
+            # Check existing
+            existing = self._find_existing(uid, video_id, 'video')
+            if existing:
+                await self._show_delivery(q.message, existing, self.videos[uid].index(existing))
+                return
+            await self._download(uid, url, q.message, 'video')
+            
+        elif fmt == 'fmt_audio':
+            existing = self._find_existing(uid, video_id, 'audio')
+            if existing:
+                await self._show_delivery(q.message, existing, self.videos[uid].index(existing))
+                return
+            await self._download(uid, url, q.message, 'audio')
+            
+        elif fmt == 'fmt_thumb':
+            existing = self._find_existing(uid, video_id, 'thumb')
+            if existing:
+                await self._show_delivery(q.message, existing, self.videos[uid].index(existing))
+                return
+            await self._download_thumbnails(uid, url, q.message)
+    
+    async def _download(self, uid, url, msg, media_type):
         s = await msg.reply_text("⏳ Downloading...")
         try:
-            fp, title, video_id = await self._do_download(uid, url, s)
+            fp, title, video_id = await self._do_download(uid, url, s, media_type)
             if not fp: return
             sz = Path(fp).stat().st_size
-            record = VideoRecord(title, url, video_id, fp, sz, datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+            record = VideoRecord(title, url, video_id, fp, sz, 
+                                datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                media_type=media_type)
             self.videos.setdefault(uid, []).insert(0, record)
             while len(self.videos[uid]) > 20:
                 old = self.videos[uid].pop()
                 Path(old.file_path).unlink(missing_ok=True)
             self._save()
             await s.delete()
-            await self._show_delivery_options(msg, record, 0)
+            await self._show_delivery(msg, record, 0)
         except Exception as e:
             logger.error("Download fail %d: %s", uid, str(e)[:100])
             await s.edit_text("❌ Failed.", reply_markup=self._menu(uid))
     
-    async def _do_download(self, uid, url, status):
+    async def _do_download(self, uid, url, status, media_type):
         try:
+            if media_type == 'video':
+                fmt = 'best[ext=mp4]/best'
+                tmpl = str(DOWNLOADS_DIR / '%(id)s_v.%(ext)s')
+            else:
+                fmt = 'bestaudio[ext=m4a]/bestaudio'
+                tmpl = str(DOWNLOADS_DIR / '%(id)s_a.%(ext)s')
+            
             opts = {
-                'format': 'best',
-                'outtmpl': str(DOWNLOADS_DIR / '%(id)s.%(ext)s'),
+                'format': fmt,
+                'outtmpl': tmpl,
                 'cookiefile': str(self.cookies[uid]),
                 'quiet': True, 'no_warnings': True,
                 'socket_timeout': 120, 'retries': 50, 'fragment_retries': 50,
                 'http_chunk_size': 5*1024*1024, 'throttled_rate': '100K',
-                'no_mtime': True, 'merge_output_format': 'mp4',
+                'no_mtime': True,
                 'progress_hooks': [lambda d: self._hook(d)],
             }
-            await status.edit_text("📥 Downloading...")
+            
+            if media_type == 'audio':
+                opts['postprocessors'] = [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '192',
+                }]
+                opts['merge_output_format'] = None
+            
+            if media_type == 'video':
+                opts['merge_output_format'] = 'mp4'
+            
+            await status.edit_text(f"📥 Downloading {media_type}...")
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=True)
                 title = info.get('title', 'Unknown')
                 video_id = info.get('id', '')
                 fp = ydl.prepare_filename(info)
+                
+                # For audio, extension changes after post-processing
+                if media_type == 'audio':
+                    fp = str(Path(fp).with_suffix('.mp3'))
+                
                 found = None
                 if Path(fp).exists(): found = fp
                 else:
-                    for ext in ('.mp4', '.webm', '.mkv', '.m4a'):
+                    for ext in ('.mp4', '.mp3', '.webm', '.m4a', '.mkv'):
                         alt = DOWNLOADS_DIR / f'{Path(fp).stem}{ext}'
                         if alt.exists(): found = str(alt); break
+                
                 if not found: raise FileNotFoundError(title)
                 mb = Path(found).stat().st_size / 1024 / 1024
-                logger.info("Done %d: %.1f MB", uid, mb)
+                logger.info("Done %d: %.1f MB (%s)", uid, mb, media_type)
                 return found, title, video_id
         except DownloadError as e:
             logger.error("yt-dlp %d: %s", uid, str(e)[:100])
@@ -323,6 +430,63 @@ class YouTubeDownloaderBot:
             await status.edit_text("❌ Error.", reply_markup=self._menu(uid))
             return None, None, None
     
+    async def _download_thumbnails(self, uid, url, msg):
+        s = await msg.reply_text("🖼️ Downloading thumbnails...")
+        try:
+            opts = {
+                'cookiefile': str(self.cookies[uid]),
+                'quiet': True, 'no_warnings': True,
+                'socket_timeout': 30, 'retries': 3,
+                'skip_download': True,
+                'writethumbnail': True,
+                'outtmpl': str(DOWNLOADS_DIR / '%(id)s_thumb.%(ext)s'),
+            }
+            
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                title = info.get('title', 'Unknown')
+                video_id = info.get('id', '')
+                
+                # Download thumbnail
+                ydl.download([url])
+                
+                # Find downloaded thumbnail
+                found = None
+                for ext in ('.jpg', '.webp', '.png'):
+                    fp = DOWNLOADS_DIR / f'{video_id}_thumb{ext}'
+                    if fp.exists():
+                        found = str(fp)
+                        break
+                
+                if not found:
+                    # Try to download directly from thumbnail URL
+                    thumb_url = None
+                    for t in info.get('thumbnails', []):
+                        if t.get('preference', 0) >= 0:
+                            thumb_url = t.get('url')
+                    if thumb_url:
+                        import urllib.request
+                        ext = thumb_url.split('?')[0].split('.')[-1] or 'jpg'
+                        fp = DOWNLOADS_DIR / f'{video_id}_thumb.{ext}'
+                        urllib.request.urlretrieve(thumb_url, str(fp))
+                        found = str(fp)
+                
+                if not found:
+                    raise FileNotFoundError("No thumbnail found")
+                
+                sz = Path(found).stat().st_size
+                record = VideoRecord(title, url, video_id, found, sz,
+                                    datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                    media_type='thumb')
+                self.videos.setdefault(uid, []).insert(0, record)
+                self._save()
+                
+                await s.delete()
+                await self._show_delivery(msg, record, 0)
+        except Exception as e:
+            logger.error("Thumb %d: %s", uid, str(e)[:100])
+            await s.edit_text("❌ Failed to get thumbnails.", reply_markup=self._menu(uid))
+    
     def _hook(self, d):
         if d['status'] == 'downloading':
             now = time.time()
@@ -330,12 +494,14 @@ class YouTubeDownloaderBot:
                 logger.info("Progress: %s at %s", d.get('_percent_str','?').strip(), d.get('_speed_str','?').strip())
                 self._last_progress = now
     
-    async def _show_delivery_options(self, msg, record, idx):
-        """Show message with Telegram/Link options"""
+    async def _show_delivery(self, msg, record, idx):
+        type_emoji = {'video': '🎬', 'audio': '🎵', 'thumb': '🖼️'}
+        emoji = type_emoji.get(record.media_type, '📹')
         mb = record.file_size / 1024 / 1024
         txt = (
-            f"✅ *{self._esc(record.title[:200])}*\n"
-            f"📦 {mb:.1f} MB | 🕒 {record.download_time}\n\n"
+            f"{emoji} *{self._esc(record.title[:200])}*\n"
+            f"📦 {mb:.2f} MB | {record.media_type}\n"
+            f"🕒 {record.download_time}\n\n"
             "Choose how to receive:"
         )
         await msg.reply_text(
@@ -348,59 +514,51 @@ class YouTubeDownloaderBot:
         uid = u.effective_user.id
         data = q.data
         
-        # Determine if new download or from history
         if data == 'tg_new':
-            # New download - get latest video
             record = self.videos.get(uid, [None])[0]
         else:
             idx = int(data.split('_')[1])
             record = self.videos.get(uid, [None])[idx]
         
         if not record:
-            await q.message.reply_text("❌ Video not found.")
-            return
+            await q.message.reply_text("❌ Not found."); return
         
-        # Check if already uploaded to Telegram
+        # Use cached file_id if available
         if record.telegram_file_id:
             try:
-                await q.message.reply_video(
-                    video=record.telegram_file_id,
-                    caption=f"📹 {record.title}",
-                    supports_streaming=True)
-                await q.message.delete()
-                return
+                if record.media_type == 'thumb':
+                    await q.message.reply_photo(photo=record.telegram_file_id, caption=f"🖼️ {record.title}")
+                else:
+                    await q.message.reply_video(video=record.telegram_file_id, caption=f"{'🎬' if record.media_type=='video' else '🎵'} {record.title}", supports_streaming=True)
+                await q.message.delete(); return
             except:
-                record.telegram_file_id = None
-                self._save()
+                record.telegram_file_id = None; self._save()
         
-        # Upload file
         fp = record.file_path
         if not Path(fp).exists():
-            await q.message.reply_text("❌ File deleted from disk.")
-            return
+            await q.message.reply_text("❌ File deleted."); return
         
         mb = Path(fp).stat().st_size / 1024 / 1024
         if mb > self.config.MAX_TELEGRAM_FILE_SIZE:
-            await q.message.reply_text(f"⚠️ Too large ({mb:.1f}MB). Use link instead.")
-            return
+            await q.message.reply_text(f"⚠️ Too large ({mb:.1f}MB). Use link."); return
         
         s = await q.message.reply_text("📤 Uploading...")
         try:
             with open(fp, 'rb') as f:
-                sent = await q.message.reply_video(
-                    video=f,
-                    caption=f"📹 {record.title}",
-                    supports_streaming=True)
-            
-            # Save file_id for future use
-            record.telegram_file_id = sent.video.file_id
+                if record.media_type == 'thumb':
+                    sent = await q.message.reply_photo(photo=f, caption=f"🖼️ {record.title}")
+                    record.telegram_file_id = sent.photo[-1].file_id
+                elif record.media_type == 'audio':
+                    sent = await q.message.reply_audio(audio=f, title=record.title, performer="YouTube")
+                    record.telegram_file_id = sent.audio.file_id
+                else:
+                    sent = await q.message.reply_video(video=f, caption=f"🎬 {record.title}", supports_streaming=True)
+                    record.telegram_file_id = sent.video.file_id
             self._save()
-            
-            await s.delete()
-            await q.message.delete()
+            await s.delete(); await q.message.delete()
         except Exception as e:
             logger.error("Upload %d: %s", uid, str(e)[:50])
-            await s.edit_text("❌ Upload failed. Use link instead.")
+            await s.edit_text("❌ Upload failed. Use link.")
     
     async def _send_link(self, u, c):
         q = u.callback_query; await q.answer()
@@ -413,16 +571,10 @@ class YouTubeDownloaderBot:
             idx = int(data.split('_')[1])
             record = self.videos.get(uid, [None])[idx]
         
-        if not record:
-            await q.message.reply_text("❌ Video not found.")
-            return
+        if not record or not Path(record.file_path).exists():
+            await q.message.reply_text("❌ Not found."); return
         
-        fp = record.file_path
-        if not Path(fp).exists():
-            await q.message.reply_text("❌ File deleted from disk.")
-            return
-        
-        url = f"{self.base_url}/{quote(Path(fp).name)}"
+        url = f"{self.base_url}/{quote(Path(record.file_path).name)}"
         await q.message.reply_text(
             f"📥 `{url}`\n\n⚠️ Deleted after {self.config.STORAGE_DAYS}d.",
             parse_mode=ParseMode.MARKDOWN,
@@ -436,20 +588,22 @@ class YouTubeDownloaderBot:
         msg = u.callback_query.message if u.callback_query else u.message
         videos = self.videos.get(uid, [])
         if not videos:
-            await msg.reply_text("📭 No videos.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data='b')]]))
+            await msg.reply_text("📭 No files.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data='b')]]))
             return
         pp = 5; tp = max(1, (len(videos)+pp-1)//pp); page = max(0, min(page, tp-1))
         pv = videos[page*pp:(page+1)*pp]
+        type_emoji = {'video': '🎬', 'audio': '🎵', 'thumb': '🖼️'}
         txt = f"📹 *Downloads* ({page+1}/{tp})\n\n"
         for i, v in enumerate(pv, page*pp+1):
             ex = "✅" if Path(v.file_path).exists() else "🗑️"
-            txt += f"{ex} *{i}.* {self._esc(v.title[:50])}\n   📦 {v.file_size/1024/1024:.1f}MB | {v.download_time}\n\n"
-        txt += "Click a video to get options:"
+            emoji = type_emoji.get(v.media_type, '📹')
+            txt += f"{ex} {emoji} *{i}.* {self._esc(v.title[:50])}\n   📦 {v.file_size/1024/1024:.2f}MB | {v.download_time}\n\n"
         kb = []
         for i, v in enumerate(pv, page*pp+1):
             if Path(v.file_path).exists():
                 idx = page*pp + (i-page*pp-1)
-                kb.append([InlineKeyboardButton(f"📹 {i}. {v.title[:40]}", callback_data=f'sel_{idx}')])
+                emoji = type_emoji.get(v.media_type, '📹')
+                kb.append([InlineKeyboardButton(f"{emoji} {i}. {v.title[:40]}", callback_data=f'sel_{idx}')])
         nav = []
         if page > 0: nav.append(InlineKeyboardButton("⬅️", callback_data=f'p_{page-1}'))
         if page < tp-1: nav.append(InlineKeyboardButton("➡️", callback_data=f'p_{page+1}'))
@@ -463,7 +617,7 @@ class YouTubeDownloaderBot:
         idx = int(q.data.split('_')[1])
         videos = self.videos.get(uid, [])
         if 0 <= idx < len(videos):
-            await self._show_delivery_options(q.message, videos[idx], idx)
+            await self._show_delivery(q.message, videos[idx], idx)
             await q.message.delete()
     
     async def _del_video(self, u, c):
@@ -513,7 +667,8 @@ class YouTubeDownloaderBot:
         elif d == 'r': await self._show_recent(u, c)
         elif d == 'c': await self._ask_cookies(u, c)
         elif d == 'cs': await q.message.reply_text("✅ Ready!" if uid in self.cookies else "❌ Use /cookies")
-        elif d == 'vc': await q.message.reply_text(f"📦 {len(self.videos.get(uid,[]))} videos")
+        elif d == 'vc': await q.message.reply_text(f"📦 {len(self.videos.get(uid,[]))} files")
+        elif d.startswith('fmt_'): await self._choose_format(u, c)
         elif d.startswith('tg_'): await self._send_telegram(u, c)
         elif d.startswith('lk_'): await self._send_link(u, c)
         elif d.startswith('sel_'): await self._select_video(u, c)

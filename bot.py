@@ -28,7 +28,7 @@ from yt_dlp.utils import DownloadError
 from config import Config
 
 # ---------------------------------------------------------------------------
-# Logging - silent except our app
+# Logging
 # ---------------------------------------------------------------------------
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.WARNING)
 for lib in ('httpx', 'httpcore', 'telegram', 'telegram.ext'):
@@ -54,11 +54,12 @@ YOUTUBE_RE = re.compile(r'(https?://)?(www\.)?(youtube\.com|youtu\.be)/\S+')
 # Video Record
 # ---------------------------------------------------------------------------
 class VideoRecord:
-    __slots__ = ('title', 'url', 'file_path', 'file_size', 'download_time')
+    __slots__ = ('title', 'url', 'video_id', 'file_path', 'file_size', 'download_time')
     
-    def __init__(self, title, url, file_path, file_size, download_time):
+    def __init__(self, title, url, video_id, file_path, file_size, download_time):
         self.title = title
         self.url = url
+        self.video_id = video_id
         self.file_path = file_path
         self.file_size = file_size
         self.download_time = download_time
@@ -148,6 +149,24 @@ class YouTubeDownloaderBot:
             return u
         return None
     
+    def _extract_video_id(self, url):
+        """Extract YouTube video ID from URL"""
+        patterns = [
+            r'(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/embed/|youtube\.com/v/)([a-zA-Z0-9_-]{11})',
+            r'youtube\.com/shorts/([a-zA-Z0-9_-]{11})',
+        ]
+        for p in patterns:
+            m = re.search(p, url)
+            if m: return m.group(1)
+        return None
+    
+    def _find_existing(self, uid, video_id):
+        """Check if video already downloaded and file exists"""
+        for v in self.videos.get(uid, []):
+            if v.video_id == video_id and Path(v.file_path).exists():
+                return v
+        return None
+    
     @staticmethod
     def _esc(text):
         for c in '*_`[]': text = text.replace(c, '\\' + c)
@@ -198,16 +217,38 @@ class YouTubeDownloaderBot:
             await u.message.reply_text("❌ Upload cookies first! /cookies",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🍪 Upload", callback_data='c')]]))
             return
+        
+        # Check if already downloaded
+        video_id = self._extract_video_id(url)
+        if video_id:
+            existing = self._find_existing(uid, video_id)
+            if existing:
+                mb = existing.file_size / 1024 / 1024
+                download_url = f"{self.base_url}/{quote(Path(existing.file_path).name)}"
+                await u.message.reply_text(
+                    f"✅ Already downloaded!\n\n"
+                    f"📹 *{self._esc(existing.title[:100])}*\n"
+                    f"📦 {mb:.1f} MB\n"
+                    f"🕒 {existing.download_time}\n\n"
+                    f"`{download_url}`",
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("📥 Download Again", url=download_url)],
+                        [InlineKeyboardButton("🔄 Re-download", callback_data=f'redl_{video_id}'),
+                         InlineKeyboardButton("🔙 Menu", callback_data='b')]
+                    ]))
+                return
+        
         logger.info("User %d download", uid)
         await self._download(uid, url, u)
     
     async def _download(self, uid, url, update):
         s = await update.message.reply_text("⏳ Downloading...")
         try:
-            fp, title = await self._do_download(uid, url, s)
+            fp, title, video_id = await self._do_download(uid, url, s)
             if not fp: return
             sz = Path(fp).stat().st_size
-            self.videos.setdefault(uid, []).insert(0, VideoRecord(title, url, fp, sz, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+            self.videos.setdefault(uid, []).insert(0, VideoRecord(title, url, video_id, fp, sz, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
             while len(self.videos[uid]) > 20:
                 old = self.videos[uid].pop()
                 Path(old.file_path).unlink(missing_ok=True)
@@ -222,7 +263,7 @@ class YouTubeDownloaderBot:
         try:
             opts = {
                 'format': 'best',
-                'outtmpl': str(DOWNLOADS_DIR / '%(title)s.%(ext)s'),
+                'outtmpl': str(DOWNLOADS_DIR / '%(id)s.%(ext)s'),
                 'cookiefile': str(self.cookies[uid]),
                 'quiet': True, 'no_warnings': True,
                 'socket_timeout': 120, 'retries': 50, 'fragment_retries': 50,
@@ -234,6 +275,7 @@ class YouTubeDownloaderBot:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=True)
                 title = info.get('title', 'Unknown')
+                video_id = info.get('id', '')
                 fp = ydl.prepare_filename(info)
                 found = None
                 if Path(fp).exists(): found = fp
@@ -242,26 +284,22 @@ class YouTubeDownloaderBot:
                     for ext in ('.mp4', '.webm', '.mkv', '.m4a'):
                         alt = DOWNLOADS_DIR / f'{base}{ext}'
                         if alt.exists(): found = str(alt); break
-                if not found:
-                    st = "".join(c for c in title if c.isalnum() or c in (' ','-','_')).rstrip()[:50]
-                    for f in sorted(DOWNLOADS_DIR.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
-                        if f.is_file() and st.lower() in f.stem.lower(): found = str(f); break
                 if not found: raise FileNotFoundError(title)
                 mb = Path(found).stat().st_size / 1024 / 1024
                 logger.info("Done %d: %.1f MB", uid, mb)
                 await status.edit_text(f"✅ *{self._esc(title[:100])}*\n📦 {mb:.1f} MB", parse_mode=ParseMode.MARKDOWN)
-                return found, title
+                return found, title, video_id
         except DownloadError as e:
             logger.error("yt-dlp %d: %s", uid, str(e)[:100])
             await status.edit_text("❌ Download failed.\n\nTry again or use different video.",
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("🍪 Cookies", callback_data='c'),
                     InlineKeyboardButton("🔙 Menu", callback_data='b')]]))
-            return None, None
+            return None, None, None
         except Exception as e:
             logger.error("Err %d: %s", uid, str(e)[:100])
             await status.edit_text("❌ Error.", reply_markup=self._menu(uid))
-            return None, None
+            return None, None, None
     
     def _hook(self, d):
         if d['status'] == 'downloading':
@@ -287,17 +325,12 @@ class YouTubeDownloaderBot:
     
     async def _send_link(self, u, s, fp, title, uid):
         try:
-            sn = "".join(c for c in title if c.isalnum() or c in (' ','-','_')).rstrip()
-            nn = f"{sn[:50]}_{uid}_{datetime.now():%Y%m%d_%H%M%S}.mp4"
-            np = DOWNLOADS_DIR / nn
-            shutil.move(fp, np)
-            for v in self.videos.get(uid, []):
-                if v.file_path == fp: v.file_path = str(np); break
-            self._save()
-            url = f"{self.base_url}/{quote(nn)}"
+            url = f"{self.base_url}/{quote(Path(fp).name)}"
             await s.edit_text(
-                f"✅ *{self._esc(title[:200])}*\n\n[📥 Download]({url})\n\n⚠️ Deleted after {self.config.STORAGE_DAYS}d.",
-                parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True,
+                f"✅ *{self._esc(title[:200])}*\n\n"
+                f"📥 Download link:\n`{url}`\n\n"
+                f"⚠️ Deleted after {self.config.STORAGE_DAYS}d.",
+                parse_mode=ParseMode.MARKDOWN,
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("📥 Download", url=url)],
                     [InlineKeyboardButton("📹 Recent", callback_data='r'),
@@ -324,7 +357,9 @@ class YouTubeDownloaderBot:
         kb = []
         for i, v in enumerate(pv, page*pp+1):
             if Path(v.file_path).exists():
-                kb.append([InlineKeyboardButton(f"📥 {i}. {v.title[:30]}", url=f"{self.base_url}/{quote(Path(v.file_path).name)}")])
+                url = f"{self.base_url}/{quote(Path(v.file_path).name)}"
+                kb.append([InlineKeyboardButton(f"📥 {i}. {v.title[:30]}", url=url)])
+                kb.append([InlineKeyboardButton(f"📋 Copy link #{i}", callback_data=f'cp_{page*pp+(i-page*pp-1)}')])
                 kb.append([InlineKeyboardButton(f"🗑️ Delete #{i}", callback_data=f'd_{page*pp+(i-page*pp-1)}')])
         nav = []
         if page > 0: nav.append(InlineKeyboardButton("⬅️", callback_data=f'p_{page-1}'))
@@ -332,6 +367,14 @@ class YouTubeDownloaderBot:
         if nav: kb.append(nav)
         kb.append([InlineKeyboardButton("🔙 Menu", callback_data='b')])
         await msg.reply_text(txt, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(kb))
+    
+    async def _copy_link(self, u, c):
+        q = u.callback_query; await q.answer()
+        uid = u.effective_user.id; idx = int(q.data.split('_')[1])
+        videos = self.videos.get(uid, [])
+        if 0 <= idx < len(videos) and Path(videos[idx].file_path).exists():
+            url = f"{self.base_url}/{quote(Path(videos[idx].file_path).name)}"
+            await q.message.reply_text(f"📋 Copy this link:\n`{url}`", parse_mode=ParseMode.MARKDOWN)
     
     async def _del_video(self, u, c):
         q = u.callback_query; await q.answer()
@@ -343,6 +386,17 @@ class YouTubeDownloaderBot:
             await q.message.reply_text("🗑️ Deleted.", reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("📹 Videos", callback_data='r'),
                 InlineKeyboardButton("🔙 Menu", callback_data='b')]]))
+    
+    async def _redownload(self, u, c):
+        q = u.callback_query; await q.answer("Starting re-download...")
+        uid = u.effective_user.id
+        video_id = q.data.split('_')[1]
+        # Find the URL from existing record
+        for v in self.videos.get(uid, []):
+            if v.video_id == video_id:
+                await self._download(uid, v.url, u)
+                return
+        await q.message.reply_text("❌ Original URL not found.")
     
     # --- Cookies ---
     async def _ask_cookies(self, u, c):
@@ -406,8 +460,10 @@ class YouTubeDownloaderBot:
         elif d == 'cs': await q.message.reply_text("✅ Ready!" if uid in self.cookies else "❌ Use /cookies")
         elif d == 'ss': await q.message.reply_text(f"Method: {'Link' if self._share(uid)=='link' else 'Upload'}")
         elif d == 'vc': await q.message.reply_text(f"📦 {len(self.videos.get(uid,[]))} videos")
+        elif d.startswith('cp_'): await self._copy_link(u, c)
         elif d.startswith('d_'): await self._del_video(u, c)
         elif d.startswith('p_'): await self._show_recent(u, c, int(d.split('_')[1]))
+        elif d.startswith('redl_'): await self._redownload(u, c)
         elif d in ('sl', 'st'): await self._set_setting(u, c)
     
     # --- Run ---

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 YouTube Downloader Telegram Bot
-Downloads YouTube videos and sends them to users or provides download links.
+Automatically detects YouTube links, downloads videos, and manages file storage.
 """
 
 import os
@@ -9,11 +9,11 @@ import logging
 import json
 import time
 import shutil
-import subprocess
-import sys
+import re
+import threading
 from pathlib import Path
-from datetime import datetime
-from typing import Dict, Optional, Set
+from datetime import datetime, timedelta
+from typing import Dict, Optional, List, Set
 from urllib.parse import quote
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -41,8 +41,40 @@ logger = logging.getLogger(__name__)
 
 # Conversation states
 WAITING_FOR_COOKIES = 1
-WAITING_FOR_URL = 2
-SETTINGS_MENU = 3
+SETTINGS_MENU = 2
+
+# YouTube URL pattern
+YOUTUBE_URL_PATTERN = re.compile(
+    r'(https?://)?(www\.)?(youtube\.com|youtu\.be)/\S+'
+)
+
+class VideoRecord:
+    """Store video download information"""
+    def __init__(self, title: str, url: str, file_path: str, file_size: int, download_time: str):
+        self.title = title
+        self.url = url
+        self.file_path = file_path
+        self.file_size = file_size
+        self.download_time = download_time
+    
+    def to_dict(self):
+        return {
+            'title': self.title,
+            'url': self.url,
+            'file_path': self.file_path,
+            'file_size': self.file_size,
+            'download_time': self.download_time
+        }
+    
+    @classmethod
+    def from_dict(cls, data):
+        return cls(
+            data['title'],
+            data['url'],
+            data['file_path'],
+            data['file_size'],
+            data['download_time']
+        )
 
 class YouTubeDownloaderBot:
     def __init__(self):
@@ -55,23 +87,14 @@ class YouTubeDownloaderBot:
         # User data storage
         self.user_cookies: Dict[int, str] = {}  # user_id -> cookie_file_path
         self.user_settings: Dict[int, Dict] = {}  # user_id -> settings
+        self.user_videos: Dict[int, List[VideoRecord]] = {}  # user_id -> list of videos
         self._last_progress_update = 0  # For progress tracking
-        
-        # Check yt-dlp version
-        self.check_ytdlp_version()
         
         # Load saved data
         self.load_data()
-    
-    def check_ytdlp_version(self):
-        """Check if yt-dlp is up to date"""
-        try:
-            result = subprocess.run([sys.executable, '-m', 'yt_dlp', '--version'], 
-                                  capture_output=True, text=True)
-            current_version = result.stdout.strip()
-            logger.info(f"Current yt-dlp version: {current_version}")
-        except Exception as e:
-            logger.warning(f"Could not check yt-dlp version: {e}")
+        
+        # Start cleanup thread
+        self.start_cleanup_thread()
     
     def load_data(self):
         """Load saved user data from JSON files"""
@@ -90,6 +113,16 @@ class YouTubeDownloaderBot:
                     self.user_settings = {int(k): v for k, v in data.items()}
         except Exception as e:
             logger.error(f"Error loading settings data: {e}")
+        
+        try:
+            if os.path.exists('user_videos.json'):
+                with open('user_videos.json', 'r') as f:
+                    data = json.load(f)
+                    self.user_videos = {}
+                    for uid, videos in data.items():
+                        self.user_videos[int(uid)] = [VideoRecord.from_dict(v) for v in videos]
+        except Exception as e:
+            logger.error(f"Error loading videos data: {e}")
     
     def save_data(self):
         """Save user data to JSON files"""
@@ -101,8 +134,84 @@ class YouTubeDownloaderBot:
             settings_data = {str(k): v for k, v in self.user_settings.items()}
             with open('user_settings.json', 'w') as f:
                 json.dump(settings_data, f, indent=2)
+            
+            videos_data = {}
+            for uid, videos in self.user_videos.items():
+                videos_data[str(uid)] = [v.to_dict() for v in videos]
+            with open('user_videos.json', 'w') as f:
+                json.dump(videos_data, f, indent=2)
         except Exception as e:
             logger.error(f"Error saving data: {e}")
+    
+    def start_cleanup_thread(self):
+        """Start background thread to clean old files"""
+        def cleanup_worker():
+            while True:
+                try:
+                    self.cleanup_old_files()
+                except Exception as e:
+                    logger.error(f"Cleanup error: {e}")
+                time.sleep(3600)  # Check every hour
+        
+        thread = threading.Thread(target=cleanup_worker, daemon=True)
+        thread.start()
+        logger.info("Cleanup thread started")
+    
+    def cleanup_old_files(self):
+        """Remove files older than 2 days"""
+        try:
+            current_time = datetime.now()
+            cutoff_time = current_time - timedelta(days=2)
+            
+            # Clean up files in downloads directory
+            for filename in os.listdir(self.config.DOWNLOAD_DIR):
+                filepath = os.path.join(self.config.DOWNLOAD_DIR, filename)
+                if os.path.isfile(filepath):
+                    file_mtime = datetime.fromtimestamp(os.path.getmtime(filepath))
+                    if file_mtime < cutoff_time:
+                        os.remove(filepath)
+                        logger.info(f"Removed old file: {filename}")
+            
+            # Clean up video records
+            for user_id in list(self.user_videos.keys()):
+                self.user_videos[user_id] = [
+                    v for v in self.user_videos[user_id]
+                    if os.path.exists(v.file_path)
+                ]
+                if not self.user_videos[user_id]:
+                    del self.user_videos[user_id]
+            
+            self.save_data()
+            
+        except Exception as e:
+            logger.error(f"Error during cleanup: {e}")
+    
+    def add_video_record(self, user_id: int, title: str, url: str, file_path: str, file_size: int):
+        """Add a video record for a user"""
+        if user_id not in self.user_videos:
+            self.user_videos[user_id] = []
+        
+        video_record = VideoRecord(
+            title=title,
+            url=url,
+            file_path=file_path,
+            file_size=file_size,
+            download_time=datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        )
+        
+        # Add to beginning of list (most recent first)
+        self.user_videos[user_id].insert(0, video_record)
+        
+        # Keep only last 20 videos
+        if len(self.user_videos[user_id]) > 20:
+            old_video = self.user_videos[user_id].pop()
+            if os.path.exists(old_video.file_path):
+                try:
+                    os.remove(old_video.file_path)
+                except:
+                    pass
+        
+        self.save_data()
     
     def is_whitelisted(self, user_id: int) -> bool:
         """Check if user is whitelisted"""
@@ -116,6 +225,19 @@ class YouTubeDownloaderBot:
         if user_id in self.user_settings:
             return self.user_settings[user_id].get('default_share', 'link')
         return 'link'
+    
+    def extract_youtube_url(self, text: str) -> Optional[str]:
+        """Extract YouTube URL from text"""
+        match = YOUTUBE_URL_PATTERN.search(text)
+        if match:
+            url = match.group(0)
+            # Clean up the URL
+            if url.startswith('www.'):
+                url = 'https://' + url
+            elif not url.startswith('http'):
+                url = 'https://' + url
+            return url
+        return None
     
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Send welcome message and show main menu"""
@@ -133,12 +255,16 @@ class YouTubeDownloaderBot:
             "🎥 *YouTube Video Downloader Bot*\n\n"
             "📋 *Commands:*\n"
             "/start - Show this menu\n"
-            "/download - Download a YouTube video\n"
             "/cookies - Upload YouTube cookies\n"
+            "/recent - View recent downloads\n"
             "/settings - Configure bot settings\n"
             "/help - Show help message\n\n"
-            "⚠️ *Important:* You must upload cookies to download videos!\n"
-            "🔒 Sharing cookies is dangerous. We're not responsible for any issues."
+            "💡 *How to use:*\n"
+            "• Just send me a YouTube link and I'll download it!\n"
+            "• No need to use /download command\n\n"
+            "⚠️ *Important:* You must upload cookies first!\n"
+            "🔒 Sharing cookies is dangerous. We're not responsible for any issues.\n\n"
+            "🗑️ *Note:* Files are automatically deleted after 2 days."
         )
         
         await update.message.reply_text(
@@ -151,9 +277,10 @@ class YouTubeDownloaderBot:
         """Get main menu keyboard"""
         has_cookies = user_id in self.user_cookies
         default_share = self.get_default_setting(user_id)
+        video_count = len(self.user_videos.get(user_id, []))
         
         keyboard = [
-            [InlineKeyboardButton("📥 Download Video", callback_data='download')],
+            [InlineKeyboardButton("📹 Recent Videos", callback_data='recent_videos')],
             [InlineKeyboardButton("🍪 Upload Cookies", callback_data='cookies')],
             [InlineKeyboardButton("⚙️ Settings", callback_data='settings')],
         ]
@@ -166,6 +293,10 @@ class YouTubeDownloaderBot:
             InlineKeyboardButton(f"📤 Share: {share_method}", callback_data='share_status')
         ])
         
+        keyboard.append([
+            InlineKeyboardButton(f"📦 Videos: {video_count}", callback_data='video_count')
+        ])
+        
         return InlineKeyboardMarkup(keyboard)
     
     async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -173,12 +304,12 @@ class YouTubeDownloaderBot:
         query = update.callback_query
         await query.answer()
         
-        if query.data == 'download':
-            return await self.ask_for_url(update, context)
-        elif query.data == 'cookies':
+        if query.data == 'cookies':
             return await self.ask_for_cookies(update, context)
         elif query.data == 'settings':
             return await self.show_settings(update, context)
+        elif query.data == 'recent_videos':
+            return await self.show_recent_videos(update, context)
         elif query.data == 'back_to_main':
             return await self.show_main_menu(update, context)
         elif query.data == 'cookies_status':
@@ -195,30 +326,207 @@ class YouTubeDownloaderBot:
             await query.message.reply_text(
                 f"Current sharing method: {'📎 Download Link' if default == 'link' else '📤 Direct Telegram Upload'}"
             )
+        elif query.data == 'video_count':
+            user_id = update.effective_user.id
+            count = len(self.user_videos.get(user_id, []))
+            await query.message.reply_text(
+                f"📦 You have {count} videos stored.\n"
+                "Use /recent to view them.\n\n"
+                "⚠️ Files older than 2 days are automatically deleted."
+            )
+        elif query.data.startswith('delete_video_'):
+            await self.delete_video(update, context)
+        elif query.data.startswith('video_page_'):
+            await self.show_recent_videos(update, context, page=int(query.data.split('_')[2]))
     
-    async def ask_for_url(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Ask user for YouTube URL"""
+    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle incoming messages and detect YouTube links"""
         user_id = update.effective_user.id
         
         if not self.is_whitelisted(user_id):
-            if update.callback_query:
-                await update.callback_query.message.reply_text("⛔ Unauthorized access.")
+            return
+        
+        text = update.message.text
+        
+        # Check if the message contains a YouTube link
+        youtube_url = self.extract_youtube_url(text)
+        
+        if youtube_url:
+            # Check if user has cookies
+            if user_id not in self.user_cookies:
+                await update.message.reply_text(
+                    "❌ You need to upload cookies first!\n"
+                    "Use /cookies command to upload YouTube cookies.",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🍪 Upload Cookies", callback_data='cookies')
+                    ]])
+                )
+                return
+            
+            # Start download process
+            await self.process_download(update, youtube_url)
+    
+    async def process_download(self, update: Update, url: str):
+        """Process YouTube video download"""
+        user_id = update.effective_user.id
+        
+        status_message = await update.message.reply_text(
+            "⏳ Detected YouTube link!\n"
+            "Starting download...\n"
+            "This may take a few moments."
+        )
+        
+        try:
+            video_path, video_title = await self.download_video(
+                url, 
+                self.user_cookies[user_id], 
+                status_message
+            )
+            
+            if not video_path:
+                return
+            
+            # Add to video records
+            file_size = os.path.getsize(video_path)
+            self.add_video_record(user_id, video_title, url, video_path, file_size)
+            
+            default_share = self.get_default_setting(user_id)
+            
+            if default_share == 'telegram':
+                await self.send_video_telegram(
+                    update, status_message, video_path, video_title, user_id
+                )
             else:
-                await update.message.reply_text("⛔ Unauthorized access.")
-            return ConversationHandler.END
+                await self.send_download_link(
+                    update, status_message, video_path, video_title, user_id
+                )
+            
+        except Exception as e:
+            logger.error(f"Error in process_download: {e}")
+            await status_message.edit_text(
+                f"❌ An error occurred: {str(e)[:200]}\n\n"
+                "Please try again or contact support.",
+                reply_markup=self.get_main_keyboard(user_id)
+            )
+    
+    async def show_recent_videos(self, update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 0):
+        """Show recent videos menu with pagination"""
+        user_id = update.effective_user.id
         
         if update.callback_query:
             message = update.callback_query.message
         else:
             message = update.message
         
+        videos = self.user_videos.get(user_id, [])
+        
+        if not videos:
+            await message.reply_text(
+                "📭 No videos downloaded yet.\n\n"
+                "Send me a YouTube link to download!",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 Main Menu", callback_data='back_to_main')
+                ]])
+            )
+            return
+        
+        # Pagination
+        videos_per_page = 5
+        total_pages = (len(videos) + videos_per_page - 1) // videos_per_page
+        page = max(0, min(page, total_pages - 1))
+        
+        start_idx = page * videos_per_page
+        end_idx = min(start_idx + videos_per_page, len(videos))
+        
+        page_videos = videos[start_idx:end_idx]
+        
+        # Build message
+        text = f"📹 *Recent Downloads* (Page {page + 1}/{total_pages})\n\n"
+        
+        for i, video in enumerate(page_videos, start_idx + 1):
+            file_exists = os.path.exists(video.file_path)
+            status = "✅" if file_exists else "🗑️"
+            
+            text += (
+                f"{status} *{i}.* {video.title[:50]}\n"
+                f"   📦 {video.file_size / 1024 / 1024:.1f} MB\n"
+                f"   🕒 {video.download_time}\n\n"
+            )
+        
+        text += "⚠️ Files are deleted after 2 days.\n"
+        text += "Click a button below to manage videos."
+        
+        # Build keyboard
+        keyboard = []
+        
+        # Add video action buttons
+        for i, video in enumerate(page_videos, start_idx + 1):
+            if os.path.exists(video.file_path):
+                download_url = f"{self.base_download_link}/{quote(os.path.basename(video.file_path))}"
+                keyboard.append([
+                    InlineKeyboardButton(f"📥 {i}. {video.title[:30]}", url=download_url)
+                ])
+                keyboard.append([
+                    InlineKeyboardButton(f"🗑️ Delete #{i}", callback_data=f'delete_video_{start_idx + i - 1}')
+                ])
+        
+        # Pagination buttons
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f'video_page_{page - 1}'))
+        if page < total_pages - 1:
+            nav_buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f'video_page_{page + 1}'))
+        
+        if nav_buttons:
+            keyboard.append(nav_buttons)
+        
+        keyboard.append([InlineKeyboardButton("🔙 Main Menu", callback_data='back_to_main')])
+        
         await message.reply_text(
-            "🔗 Please send me the YouTube video URL you want to download:",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 Back", callback_data='back_to_main')
-            ]])
+            text,
+            parse_mode=ParseMode.MARKDOWN,
+            disable_web_page_preview=True,
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
-        return WAITING_FOR_URL
+    
+    async def delete_video(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Delete a specific video"""
+        query = update.callback_query
+        await query.answer()
+        
+        user_id = update.effective_user.id
+        video_idx = int(query.data.split('_')[2])
+        
+        videos = self.user_videos.get(user_id, [])
+        
+        if 0 <= video_idx < len(videos):
+            video = videos[video_idx]
+            
+            # Delete file
+            if os.path.exists(video.file_path):
+                try:
+                    os.remove(video.file_path)
+                except Exception as e:
+                    logger.error(f"Error deleting file: {e}")
+            
+            # Remove from list
+            videos.pop(video_idx)
+            self.save_data()
+            
+            await query.message.reply_text(
+                f"🗑️ Deleted: {video.title[:50]}",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("📹 View Videos", callback_data='recent_videos'),
+                    InlineKeyboardButton("🔙 Main Menu", callback_data='back_to_main')
+                ]])
+            )
+        else:
+            await query.message.reply_text(
+                "❌ Video not found. It may have been already deleted.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 Main Menu", callback_data='back_to_main')
+                ]])
+            )
     
     async def ask_for_cookies(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Ask user to upload cookies file"""
@@ -285,13 +593,12 @@ class YouTubeDownloaderBot:
             cookies_path = f"cookies_{user_id}.txt"
             await file.download_to_drive(cookies_path)
             
-            # Store cookie path
             self.user_cookies[user_id] = cookies_path
             self.save_data()
             
             await update.message.reply_text(
                 "✅ Cookies saved successfully!\n"
-                "You can now download YouTube videos.",
+                "You can now send me YouTube links to download!",
                 reply_markup=self.get_main_keyboard(user_id)
             )
             
@@ -307,79 +614,11 @@ class YouTubeDownloaderBot:
             )
             return WAITING_FOR_COOKIES
     
-    async def handle_url(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle YouTube URL and download video"""
-        user_id = update.effective_user.id
-        
-        if not self.is_whitelisted(user_id):
-            await update.message.reply_text("⛔ Unauthorized access.")
-            return ConversationHandler.END
-        
-        if user_id not in self.user_cookies:
-            await update.message.reply_text(
-                "❌ You need to upload cookies first!\n"
-                "Use /cookies command to upload.",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🍪 Upload Cookies", callback_data='cookies')
-                ]])
-            )
-            return ConversationHandler.END
-        
-        url = update.message.text.strip()
-        
-        if 'youtube.com' not in url and 'youtu.be' not in url:
-            await update.message.reply_text(
-                "❌ Please send a valid YouTube URL.\n"
-                "Example: https://www.youtube.com/watch?v=...",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🔙 Back", callback_data='back_to_main')
-                ]])
-            )
-            return WAITING_FOR_URL
-        
-        status_message = await update.message.reply_text(
-            "⏳ Initializing download...\n"
-            "This may take a few moments."
-        )
-        
-        try:
-            video_path, video_title = await self.download_video(
-                url, 
-                self.user_cookies[user_id], 
-                status_message,
-                update
-            )
-            
-            if not video_path:
-                return ConversationHandler.END
-            
-            default_share = self.get_default_setting(user_id)
-            
-            if default_share == 'telegram':
-                await self.send_video_telegram(
-                    update, status_message, video_path, video_title, user_id
-                )
-            else:
-                await self.send_download_link(
-                    update, status_message, video_path, video_title, user_id
-                )
-            
-        except Exception as e:
-            logger.error(f"Error in handle_url: {e}")
-            await status_message.edit_text(
-                f"❌ An error occurred: {str(e)[:200]}\n\n"
-                "Please try again or contact support.",
-                reply_markup=self.get_main_keyboard(user_id)
-            )
-        
-        return ConversationHandler.END
-    
-    async def download_video(self, url: str, cookies_file: str, status_message, update) -> tuple:
-        """Download YouTube video using yt-dlp with proven working configuration"""
+    async def download_video(self, url: str, cookies_file: str, status_message) -> tuple:
+        """Download YouTube video using yt-dlp"""
         try:
             output_template = os.path.join(self.config.DOWNLOAD_DIR, '%(title)s.%(ext)s')
             
-            # Using the same working configuration from the bash script
             ydl_opts = {
                 'format': 'bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/best[ext=mp4]/best',
                 'outtmpl': output_template,
@@ -389,7 +628,7 @@ class YouTubeDownloaderBot:
                 'socket_timeout': 120,
                 'retries': 50,
                 'fragment_retries': 50,
-                'http_chunk_size': 5 * 1024 * 1024,  # 5M
+                'http_chunk_size': 5 * 1024 * 1024,
                 'throttled_rate': '100K',
                 'no_mtime': True,
                 'merge_output_format': 'mp4',
@@ -400,14 +639,11 @@ class YouTubeDownloaderBot:
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 try:
-                    # Extract info and download
                     info = ydl.extract_info(url, download=True)
                     video_title = info.get('title', 'Unknown Title')
                     
-                    # Find downloaded file
                     filename = ydl.prepare_filename(info)
                     
-                    # Check for merged MP4 file
                     if not os.path.exists(filename):
                         base = os.path.splitext(filename)[0]
                         for ext in ['.mp4', '.webm', '.mkv']:
@@ -452,7 +688,7 @@ class YouTubeDownloaderBot:
             logger.error(f"Unexpected error in download_video: {e}")
             await status_message.edit_text(
                 f"❌ An unexpected error occurred: {str(e)[:200]}",
-                reply_markup=self.get_main_keyboard(update.effective_user.id)
+                reply_markup=self.get_main_keyboard(update.effective_user.id if hasattr(update, 'effective_user') else 0)
             )
             return None, None
     
@@ -496,7 +732,6 @@ class YouTubeDownloaderBot:
                 )
             
             await status_message.delete()
-            os.remove(video_path)
             
         except Exception as e:
             logger.error(f"Error sending video via Telegram: {e}")
@@ -515,18 +750,27 @@ class YouTubeDownloaderBot:
             
             shutil.move(video_path, perm_path)
             
+            # Update video record with new path
+            if user_id in self.user_videos:
+                for video in self.user_videos[user_id]:
+                    if video.file_path == video_path:
+                        video.file_path = perm_path
+                        break
+            self.save_data()
+            
             download_url = f"{self.base_download_link}/{quote(perm_filename)}"
             
             await status_message.edit_text(
                 f"✅ Video downloaded successfully!\n\n"
                 f"📹 *Title:* {video_title[:200]}\n"
                 f"📥 *Download Link:* [Click here]({download_url})\n\n"
-                f"⚠️ Link may expire or file will be removed eventually.\n"
+                f"⚠️ This file will be deleted after 2 days.\n"
                 f"💾 Save the file locally if you want to keep it.",
                 parse_mode=ParseMode.MARKDOWN,
                 disable_web_page_preview=True,
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("📥 Download", url=download_url)],
+                    [InlineKeyboardButton("📹 Recent Videos", callback_data='recent_videos')],
                     [InlineKeyboardButton("🔙 Main Menu", callback_data='back_to_main')]
                 ])
             )
@@ -630,22 +874,29 @@ class YouTubeDownloaderBot:
             reply_markup=self.get_main_keyboard(user_id)
         )
     
+    async def recent_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show recent videos"""
+        return await self.show_recent_videos(update, context)
+    
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show help message"""
         help_text = (
             "📚 *Help Guide*\n\n"
-            "1️⃣ *Upload Cookies*: Required for downloading YouTube videos\n"
-            "   • Use browser extension to export cookies\n"
-            "   • Send the .txt file to the bot\n\n"
-            "2️⃣ *Download Video*: Send a YouTube URL\n"
-            "   • Bot will download the video\n"
-            "   • Choose between download link or direct upload\n\n"
-            "3️⃣ *Settings*: Configure default sharing method\n"
+            "1️⃣ *Send YouTube Link*: Just send any message with a YouTube URL\n"
+            "   • Bot automatically detects and downloads it\n"
+            "   • No need for /download command!\n\n"
+            "2️⃣ *Upload Cookies*: Required for downloading\n"
+            "   • Use /cookies command\n"
+            "   • Send cookies.txt file from browser extension\n\n"
+            "3️⃣ *Recent Videos*: View your downloads\n"
+            "   • Use /recent command or menu button\n"
+            "   • Download or delete videos from the menu\n\n"
+            "4️⃣ *Settings*: Configure sharing method\n"
             "   • Download Link: Get a direct download link\n"
             "   • Telegram Upload: Receive video directly (up to 50MB)\n\n"
             "⚠️ *Security Notice*: Cookies are stored locally.\n"
             "We are not responsible for any misuse or security issues.\n\n"
-            "📞 Contact admin if you need access."
+            "🗑️ *Auto-Delete*: Files are removed after 2 days."
         )
         
         await update.message.reply_text(
@@ -666,6 +917,7 @@ class YouTubeDownloaderBot:
         """Start the bot"""
         app = Application.builder().token(self.config.BOT_TOKEN).build()
         
+        # Conversation handler for cookies upload only
         cookies_conv = ConversationHandler(
             entry_points=[
                 CommandHandler('cookies', self.ask_for_cookies),
@@ -684,34 +936,29 @@ class YouTubeDownloaderBot:
             per_message=False
         )
         
-        download_conv = ConversationHandler(
-            entry_points=[
-                CommandHandler('download', self.ask_for_url),
-                CallbackQueryHandler(self.ask_for_url, pattern='^download$')
-            ],
-            states={
-                WAITING_FOR_URL: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_url),
-                ]
-            },
-            fallbacks=[
-                CommandHandler('cancel', self.cancel),
-                CallbackQueryHandler(self.show_main_menu, pattern='^back_to_main$')
-            ],
-            per_message=False
-        )
-        
+        # Add handlers
         app.add_handler(CommandHandler('start', self.start))
         app.add_handler(CommandHandler('help', self.help_command))
-        app.add_handler(CallbackQueryHandler(self.button_handler, pattern='^(cookies_status|share_status)$'))
+        app.add_handler(CommandHandler('recent', self.recent_command))
+        app.add_handler(CallbackQueryHandler(self.button_handler, pattern='^(cookies_status|share_status|video_count)$'))
         app.add_handler(CallbackQueryHandler(self.show_main_menu, pattern='^back_to_main$'))
         app.add_handler(CallbackQueryHandler(self.handle_settings, pattern='^set_share_'))
         app.add_handler(CallbackQueryHandler(self.show_settings, pattern='^settings$'))
+        app.add_handler(CallbackQueryHandler(self.show_recent_videos, pattern='^recent_videos$'))
+        app.add_handler(CallbackQueryHandler(self.delete_video, pattern='^delete_video_'))
+        app.add_handler(CallbackQueryHandler(self.show_recent_videos, pattern='^video_page_'))
         app.add_handler(cookies_conv)
-        app.add_handler(download_conv)
         
+        # Message handler for YouTube link detection (lower priority)
+        app.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND, 
+            self.handle_message
+        ))
+        
+        # Start polling
         logger.info("Starting bot...")
         logger.info("Bot is ready to receive messages!")
+        logger.info("Send any YouTube link to download automatically!")
         app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':

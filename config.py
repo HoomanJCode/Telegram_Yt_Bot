@@ -19,6 +19,9 @@ class Config:
     # Maximum file size for Telegram upload (50MB)
     MAX_TELEGRAM_FILE_SIZE = 50 * 1024 * 1024
     
+    # File storage duration in days
+    STORAGE_DAYS = 2
+    
     @classmethod
     def get_whitelist(cls):
         """Get whitelist as set of integers"""

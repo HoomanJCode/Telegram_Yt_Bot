@@ -12,6 +12,7 @@ import shutil
 import re
 import threading
 import socket
+import subprocess
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List
@@ -51,6 +52,17 @@ COOKIES_DIR = DATA_DIR / 'cookies'
 DOWNLOADS_DIR = Path('downloads')
 WAITING_FOR_COOKIES = 1
 YOUTUBE_RE = re.compile(r'(https?://)?(www\.)?(youtube\.com|youtu\.be)/\S+')
+
+# Check FFmpeg availability
+def _check_ffmpeg():
+    try:
+        subprocess.run(['ffmpeg', '-version'], capture_output=True, timeout=5)
+        subprocess.run(['ffprobe', '-version'], capture_output=True, timeout=5)
+        return True
+    except:
+        return False
+
+HAS_FFMPEG = _check_ffmpeg()
 
 # ---------------------------------------------------------------------------
 # HTTP File Server
@@ -132,6 +144,8 @@ class YouTubeDownloaderBot:
         self._last_progress = 0
         self._pending_urls: Dict[int, tuple] = {}
         
+        logger.info("FFmpeg: %s", "available" if HAS_FFMPEG else "NOT FOUND - audio will be M4A format")
+        
         self._load()
         self._start_cleanup()
         FileServer(port=port).start()
@@ -202,7 +216,6 @@ class YouTubeDownloaderBot:
         return None
     
     def _get_existing_types(self, uid, video_id):
-        """Return set of already downloaded types for a video"""
         types = set()
         for v in self.videos.get(uid, []):
             if v.video_id == video_id and Path(v.file_path).exists():
@@ -231,27 +244,19 @@ class YouTubeDownloaderBot:
         ])
     
     def _format_choice_keyboard(self, uid, video_id):
-        """Show available formats - highlight already downloaded ones"""
         existing = self._get_existing_types(uid, video_id)
         
         kb = []
-        
-        # Video option
         v_label = "🎬 Video (MP4)"
-        if 'video' in existing:
-            v_label = "✅ 🎬 Video (MP4) - Downloaded"
+        if 'video' in existing: v_label = "✅ 🎬 Video (MP4) - Downloaded"
         kb.append([InlineKeyboardButton(v_label, callback_data='fmt_video')])
         
-        # Audio option
-        a_label = "🎵 Audio (MP3)"
-        if 'audio' in existing:
-            a_label = "✅ 🎵 Audio (MP3) - Downloaded"
+        a_label = f"🎵 Audio ({'MP3' if HAS_FFMPEG else 'M4A'})"
+        if 'audio' in existing: a_label = f"✅ 🎵 Audio - Downloaded"
         kb.append([InlineKeyboardButton(a_label, callback_data='fmt_audio')])
         
-        # Thumbnail option
         t_label = "🖼️ Thumbnails"
-        if 'thumb' in existing:
-            t_label = "✅ 🖼️ Thumbnails - Downloaded"
+        if 'thumb' in existing: t_label = "✅ 🖼️ Thumbnails - Downloaded"
         kb.append([InlineKeyboardButton(t_label, callback_data='fmt_thumb')])
         
         kb.append([InlineKeyboardButton("🔙 Cancel", callback_data='b')])
@@ -265,7 +270,6 @@ class YouTubeDownloaderBot:
             [InlineKeyboardButton("🔙 Back to formats", callback_data=f'backfmt_{idx_str}')],
         ])
     
-    # --- Commands ---
     async def start(self, u, c):
         if not self._ok(u.effective_user.id): await u.message.reply_text("⛔"); return
         await u.message.reply_text(
@@ -273,8 +277,7 @@ class YouTubeDownloaderBot:
             "🎥 *YouTube Downloader Bot*\n\n"
             "/start /cookies /recent /help\n\n"
             "💡 Send YouTube link to download!\n"
-            "Choose format: Video, Audio, or Thumbnails\n"
-            "You can download all formats of the same video.\n"
+            f"🎬 Video (MP4) | 🎵 Audio | 🖼️ Thumbnails\n"
             f"🗑️ Files deleted after {self.config.STORAGE_DAYS}d.",
             parse_mode=ParseMode.MARKDOWN, reply_markup=self._menu(u.effective_user.id))
     
@@ -282,11 +285,10 @@ class YouTubeDownloaderBot:
         await u.message.reply_text(
             "📚 *Help*\n\n"
             "Send YouTube link → Choose format:\n"
-            "• 🎬 Video - Full video MP4\n"
-            "• 🎵 Audio - Audio only MP3\n"
+            f"• 🎬 Video - Full video MP4\n"
+            f"• 🎵 Audio - {'MP3' if HAS_FFMPEG else 'M4A'} audio only\n"
             "• 🖼️ Thumbnails - Video thumbnails\n\n"
-            "You can download multiple formats of the same video!\n"
-            "Already downloaded formats show ✅\n\n"
+            "You can download all formats of same video!\n"
             "/cookies - Upload cookies\n"
             "/recent - View downloads",
             parse_mode=ParseMode.MARKDOWN, reply_markup=self._menu(u.effective_user.id))
@@ -297,7 +299,6 @@ class YouTubeDownloaderBot:
         await u.message.reply_text("❌ Cancelled.", reply_markup=self._menu(u.effective_user.id))
         return ConversationHandler.END
     
-    # --- Message Handler ---
     async def on_msg(self, u, c):
         uid = u.effective_user.id
         if not self._ok(uid): return
@@ -344,7 +345,7 @@ class YouTubeDownloaderBot:
             await s.edit_text(
                 f"📹 *{self._esc(title[:200])}*\n"
                 f"⏱ Duration: {duration_str}{downloaded_info}\n\n"
-                "Choose format to download\n(you can download all formats):",
+                "Choose format to download:",
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=self._format_choice_keyboard(uid, video_id))
         except Exception as e:
@@ -365,7 +366,7 @@ class YouTubeDownloaderBot:
         if fmt == 'fmt_video':
             existing = self._find_existing(uid, video_id, 'video')
             if existing:
-                await q.answer("Already downloaded! Showing delivery options.")
+                await q.answer("Already downloaded!")
                 await self._show_delivery(q.message, existing, self.videos[uid].index(existing))
                 return
             await self._download(uid, url, q.message, 'video', video_id)
@@ -373,7 +374,7 @@ class YouTubeDownloaderBot:
         elif fmt == 'fmt_audio':
             existing = self._find_existing(uid, video_id, 'audio')
             if existing:
-                await q.answer("Already downloaded! Showing delivery options.")
+                await q.answer("Already downloaded!")
                 await self._show_delivery(q.message, existing, self.videos[uid].index(existing))
                 return
             await self._download(uid, url, q.message, 'audio', video_id)
@@ -381,18 +382,16 @@ class YouTubeDownloaderBot:
         elif fmt == 'fmt_thumb':
             existing = self._find_existing(uid, video_id, 'thumb')
             if existing:
-                await q.answer("Already downloaded! Showing delivery options.")
+                await q.answer("Already downloaded!")
                 await self._show_delivery(q.message, existing, self.videos[uid].index(existing))
                 return
             await self._download_thumbnails(uid, url, q.message, video_id)
     
     async def _back_to_formats(self, u, c):
-        """Go back to format selection from delivery options"""
         q = u.callback_query; await q.answer()
         uid = u.effective_user.id
-        data = q.data  # backfmt_{idx}
+        data = q.data
         
-        # Get the record to find video_id
         if data == 'backfmt_new':
             record = self.videos.get(uid, [None])[0]
         else:
@@ -402,7 +401,6 @@ class YouTubeDownloaderBot:
         if not record:
             await q.message.reply_text("❌ Not found."); return
         
-        # Store pending URL and show format choice again
         self._pending_urls[uid] = (record.url, record.video_id, record.title)
         await self._show_format_choice(uid, record.url, record.video_id, q.message)
         await q.message.delete()
@@ -432,33 +430,50 @@ class YouTubeDownloaderBot:
             if media_type == 'video':
                 fmt = 'best[ext=mp4]/best'
                 tmpl = str(DOWNLOADS_DIR / '%(id)s_v.%(ext)s')
-                postprocessors = []
-                merge = 'mp4'
-            else:
-                fmt = 'bestaudio[ext=m4a]/bestaudio'
-                tmpl = str(DOWNLOADS_DIR / '%(id)s_a.%(ext)s')
-                postprocessors = [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '192',
-                }]
-                merge = None
-            
-            opts = {
-                'format': fmt,
-                'outtmpl': tmpl,
-                'cookiefile': str(self.cookies[uid]),
-                'quiet': True, 'no_warnings': True,
-                'socket_timeout': 120, 'retries': 50, 'fragment_retries': 50,
-                'http_chunk_size': 5*1024*1024, 'throttled_rate': '100K',
-                'no_mtime': True,
-                'progress_hooks': [lambda d: self._hook(d)],
-            }
-            
-            if postprocessors:
-                opts['postprocessors'] = postprocessors
-            if merge:
-                opts['merge_output_format'] = merge
+                opts = {
+                    'format': fmt,
+                    'outtmpl': tmpl,
+                    'cookiefile': str(self.cookies[uid]),
+                    'quiet': True, 'no_warnings': True,
+                    'socket_timeout': 120, 'retries': 50, 'fragment_retries': 50,
+                    'http_chunk_size': 5*1024*1024, 'throttled_rate': '100K',
+                    'no_mtime': True, 'merge_output_format': 'mp4',
+                    'progress_hooks': [lambda d: self._hook(d)],
+                }
+            else:  # audio
+                if HAS_FFMPEG:
+                    # Best quality MP3 with FFmpeg
+                    fmt = 'bestaudio[ext=m4a]/bestaudio'
+                    tmpl = str(DOWNLOADS_DIR / '%(id)s_a.%(ext)s')
+                    opts = {
+                        'format': fmt,
+                        'outtmpl': tmpl,
+                        'cookiefile': str(self.cookies[uid]),
+                        'quiet': True, 'no_warnings': True,
+                        'socket_timeout': 120, 'retries': 50, 'fragment_retries': 50,
+                        'http_chunk_size': 5*1024*1024, 'throttled_rate': '100K',
+                        'no_mtime': True,
+                        'progress_hooks': [lambda d: self._hook(d)],
+                        'postprocessors': [{
+                            'key': 'FFmpegExtractAudio',
+                            'preferredcodec': 'mp3',
+                            'preferredquality': '192',
+                        }],
+                    }
+                else:
+                    # M4A without FFmpeg (no conversion needed)
+                    fmt = 'bestaudio[ext=m4a]/bestaudio'
+                    tmpl = str(DOWNLOADS_DIR / '%(id)s_a.%(ext)s')
+                    opts = {
+                        'format': fmt,
+                        'outtmpl': tmpl,
+                        'cookiefile': str(self.cookies[uid]),
+                        'quiet': True, 'no_warnings': True,
+                        'socket_timeout': 120, 'retries': 50, 'fragment_retries': 50,
+                        'http_chunk_size': 5*1024*1024, 'throttled_rate': '100K',
+                        'no_mtime': True,
+                        'progress_hooks': [lambda d: self._hook(d)],
+                    }
             
             await status.edit_text(f"📥 Downloading {media_type}...")
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -467,15 +482,23 @@ class YouTubeDownloaderBot:
                 vid = info.get('id', '')
                 fp = ydl.prepare_filename(info)
                 
-                if media_type == 'audio':
+                # Audio with FFmpeg: extension changes to .mp3
+                if media_type == 'audio' and HAS_FFMPEG:
                     fp = str(Path(fp).with_suffix('.mp3'))
                 
                 found = None
                 if Path(fp).exists(): found = fp
                 else:
-                    for ext in ('.mp4', '.mp3', '.webm', '.m4a', '.mkv'):
+                    for ext in ('.mp4', '.mp3', '.m4a', '.webm', '.mkv', '.opus'):
                         alt = DOWNLOADS_DIR / f'{Path(fp).stem}{ext}'
                         if alt.exists(): found = str(alt); break
+                
+                if not found:
+                    # Search by video_id prefix
+                    for f in DOWNLOADS_DIR.iterdir():
+                        if f.is_file() and f.stem.startswith(vid):
+                            found = str(f)
+                            break
                 
                 if not found: raise FileNotFoundError(title)
                 mb = Path(found).stat().st_size / 1024 / 1024

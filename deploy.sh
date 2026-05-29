@@ -52,22 +52,42 @@ pip install -r requirements.txt -q
 pip install --upgrade yt-dlp yt-dlp-ejs -q
 
 echo -e "${GREEN}  ✓ Done${NC}"
-
 # -----------------------------------------------------------
-# 3. Directories & config
+# 3. Configuration
 # -----------------------------------------------------------
 echo -e "${YELLOW}[3/5] Configuration...${NC}"
 
 mkdir -p "$APP_DIR/data/cookies" "$APP_DIR/downloads"
 
-if [ ! -f "$APP_DIR/.env" ]; then
-    IP=$(hostname -I | awk '{print $1}')
+# Get server IP as fallback
+IP=$(hostname -I | awk '{print $1}')
+
+# Use secrets if provided, otherwise keep existing .env
+if [ -n "$BOT_TOKEN" ]; then
+    cat > "$APP_DIR/.env" << EOF
+BOT_TOKEN=${BOT_TOKEN}
+BASE_DOWNLOAD_LINK=${BASE_URL:-http://${IP}:8000}
+WHITELIST_USERS=${WHITELIST_USERS:-}
+STORAGE_DAYS=${STORAGE_DAYS:-2}
+EOF
+    echo -e "${GREEN}  ✓ .env created from secrets${NC}"
+elif [ ! -f "$APP_DIR/.env" ]; then
     cat > "$APP_DIR/.env" << EOF
 BOT_TOKEN=your_bot_token_here
 BASE_DOWNLOAD_LINK=http://${IP}:8000
 WHITELIST_USERS=
+STORAGE_DAYS=2
 EOF
     echo -e "${RED}  ⚠ Created .env - EDIT IT: nano $APP_DIR/.env${NC}"
+else
+    echo -e "${GREEN}  ✓ .env exists${NC}"
+fi
+
+# Open firewall port
+PORT=$(echo "${BASE_URL:-http://${IP}:8000}" | grep -oP ':\K\d+')
+PORT=${PORT:-8000}
+if command -v ufw &>/dev/null; then
+    ufw allow "$PORT" 2>/dev/null || true
 fi
 
 echo -e "${GREEN}  ✓ Done${NC}"

@@ -19,10 +19,16 @@ jobs:
           script: |
             # Clone if not exists, otherwise pull
             if [ ! -d /root/Telegram_Yt_Bot ]; then
-              git clone git@github.com:HoomanJCode/Telegram_Yt_Bot.git /root/Telegram_Yt_Bot
+              git clone https://github.com/HoomanJCode/Telegram_Yt_Bot.git /root/Telegram_Yt_Bot
             fi
             
             cd /root/Telegram_Yt_Bot
             git pull origin main
             chmod +x deploy.sh
+            
+            # Pass all secrets to deploy script
+            BOT_TOKEN="${{ secrets.BOT_TOKEN }}" \
+            BASE_URL="${{ secrets.BASE_URL }}" \
+            WHITELIST_USERS="${{ secrets.WHITELIST_USERS }}" \
+            STORAGE_DAYS="${{ secrets.STORAGE_DAYS }}" \
             ./deploy.sh

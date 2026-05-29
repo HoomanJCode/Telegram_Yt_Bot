@@ -13,6 +13,8 @@ import re
 import threading
 import socket
 import subprocess
+import asyncio
+import concurrent.futures
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List
@@ -53,16 +55,8 @@ DOWNLOADS_DIR = Path('downloads')
 WAITING_FOR_COOKIES = 1
 YOUTUBE_RE = re.compile(r'(https?://)?(www\.)?(youtube\.com|youtu\.be)/\S+')
 
-# Check FFmpeg availability
-def _check_ffmpeg():
-    try:
-        subprocess.run(['ffmpeg', '-version'], capture_output=True, timeout=5)
-        subprocess.run(['ffprobe', '-version'], capture_output=True, timeout=5)
-        return True
-    except:
-        return False
-
-HAS_FFMPEG = _check_ffmpeg()
+# Thread pool for downloads
+DOWNLOAD_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
 # ---------------------------------------------------------------------------
 # HTTP File Server
@@ -141,14 +135,23 @@ class YouTubeDownloaderBot:
         
         self.cookies: Dict[int, Path] = {}
         self.videos: Dict[int, List[VideoRecord]] = {}
-        self._last_progress = 0
         self._pending_urls: Dict[int, tuple] = {}
         
-        logger.info("FFmpeg: %s", "available" if HAS_FFMPEG else "NOT FOUND - audio will be M4A format")
+        # Check FFmpeg
+        self.has_ffmpeg = self._check_ffmpeg()
+        logger.info("FFmpeg: %s", "available" if self.has_ffmpeg else "NOT FOUND")
         
         self._load()
         self._start_cleanup()
         FileServer(port=port).start()
+    
+    def _check_ffmpeg(self):
+        try:
+            subprocess.run(['ffmpeg', '-version'], capture_output=True, timeout=5)
+            subprocess.run(['ffprobe', '-version'], capture_output=True, timeout=5)
+            return True
+        except:
+            return False
     
     def _load(self):
         for name, fn, attr in [
@@ -245,14 +248,13 @@ class YouTubeDownloaderBot:
     
     def _format_choice_keyboard(self, uid, video_id):
         existing = self._get_existing_types(uid, video_id)
-        
         kb = []
         v_label = "🎬 Video (MP4)"
         if 'video' in existing: v_label = "✅ 🎬 Video (MP4) - Downloaded"
         kb.append([InlineKeyboardButton(v_label, callback_data='fmt_video')])
         
-        a_label = f"🎵 Audio ({'MP3' if HAS_FFMPEG else 'M4A'})"
-        if 'audio' in existing: a_label = f"✅ 🎵 Audio - Downloaded"
+        a_label = f"🎵 Audio ({'MP3' if self.has_ffmpeg else 'M4A'})"
+        if 'audio' in existing: a_label = "✅ 🎵 Audio - Downloaded"
         kb.append([InlineKeyboardButton(a_label, callback_data='fmt_audio')])
         
         t_label = "🖼️ Thumbnails"
@@ -270,6 +272,125 @@ class YouTubeDownloaderBot:
             [InlineKeyboardButton("🔙 Back to formats", callback_data=f'backfmt_{idx_str}')],
         ])
     
+    # --- Sync download (runs in thread pool) ---
+    def _sync_fetch_info(self, uid, url):
+        """Fetch video info synchronously"""
+        opts = {
+            'format': 'best',
+            'cookiefile': str(self.cookies[uid]),
+            'quiet': True, 'no_warnings': True,
+            'socket_timeout': 30, 'retries': 3,
+        }
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            return ydl.extract_info(url, download=False)
+    
+    def _sync_download(self, uid, url, media_type, progress_callback=None):
+        """Download video synchronously"""
+        if media_type == 'video':
+            fmt = 'best[ext=mp4]/best'
+            tmpl = str(DOWNLOADS_DIR / '%(id)s_v.%(ext)s')
+            opts = {
+                'format': fmt, 'outtmpl': tmpl,
+                'cookiefile': str(self.cookies[uid]),
+                'quiet': True, 'no_warnings': True,
+                'socket_timeout': 120, 'retries': 50, 'fragment_retries': 50,
+                'http_chunk_size': 5*1024*1024, 'throttled_rate': '100K',
+                'no_mtime': True, 'merge_output_format': 'mp4',
+            }
+        else:
+            if self.has_ffmpeg:
+                fmt = 'bestaudio[ext=m4a]/bestaudio'
+                tmpl = str(DOWNLOADS_DIR / '%(id)s_a.%(ext)s')
+                opts = {
+                    'format': fmt, 'outtmpl': tmpl,
+                    'cookiefile': str(self.cookies[uid]),
+                    'quiet': True, 'no_warnings': True,
+                    'socket_timeout': 120, 'retries': 50, 'fragment_retries': 50,
+                    'http_chunk_size': 5*1024*1024, 'throttled_rate': '100K',
+                    'no_mtime': True,
+                    'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}],
+                }
+            else:
+                fmt = 'bestaudio[ext=m4a]/bestaudio'
+                tmpl = str(DOWNLOADS_DIR / '%(id)s_a.%(ext)s')
+                opts = {
+                    'format': fmt, 'outtmpl': tmpl,
+                    'cookiefile': str(self.cookies[uid]),
+                    'quiet': True, 'no_warnings': True,
+                    'socket_timeout': 120, 'retries': 50, 'fragment_retries': 50,
+                    'http_chunk_size': 5*1024*1024, 'throttled_rate': '100K',
+                    'no_mtime': True,
+                }
+        
+        if progress_callback:
+            opts['progress_hooks'] = [progress_callback]
+        
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            title = info.get('title', 'Unknown')
+            vid = info.get('id', '')
+            fp = ydl.prepare_filename(info)
+            
+            if media_type == 'audio' and self.has_ffmpeg:
+                fp = str(Path(fp).with_suffix('.mp3'))
+            
+            found = None
+            if Path(fp).exists(): found = fp
+            else:
+                for ext in ('.mp4', '.mp3', '.m4a', '.webm', '.mkv', '.opus'):
+                    alt = DOWNLOADS_DIR / f'{Path(fp).stem}{ext}'
+                    if alt.exists(): found = str(alt); break
+            
+            if not found:
+                for f in DOWNLOADS_DIR.iterdir():
+                    if f.is_file() and f.stem.startswith(vid):
+                        found = str(f); break
+            
+            if not found:
+                raise FileNotFoundError(title)
+            
+            return found, title, vid
+    
+    def _sync_download_thumb(self, uid, url):
+        """Download thumbnail synchronously"""
+        opts = {
+            'cookiefile': str(self.cookies[uid]),
+            'quiet': True, 'no_warnings': True,
+            'socket_timeout': 30, 'retries': 3,
+            'skip_download': True,
+            'writethumbnail': True,
+            'outtmpl': str(DOWNLOADS_DIR / '%(id)s_thumb.%(ext)s'),
+        }
+        
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            title = info.get('title', 'Unknown')
+            vid = info.get('id', '')
+            ydl.download([url])
+            
+            found = None
+            for ext in ('.jpg', '.webp', '.png'):
+                fp = DOWNLOADS_DIR / f'{vid}_thumb{ext}'
+                if fp.exists(): found = str(fp); break
+            
+            if not found:
+                thumb_url = None
+                for t in info.get('thumbnails', []):
+                    if t.get('preference', 0) >= 0:
+                        thumb_url = t.get('url')
+                if thumb_url:
+                    import urllib.request
+                    ext = thumb_url.split('?')[0].split('.')[-1] or 'jpg'
+                    fp = DOWNLOADS_DIR / f'{vid}_thumb.{ext}'
+                    urllib.request.urlretrieve(thumb_url, str(fp))
+                    found = str(fp)
+            
+            if not found:
+                raise FileNotFoundError("No thumbnail found")
+            
+            return found, title, vid
+    
+    # --- Commands ---
     async def start(self, u, c):
         if not self._ok(u.effective_user.id): await u.message.reply_text("⛔"); return
         await u.message.reply_text(
@@ -277,18 +398,15 @@ class YouTubeDownloaderBot:
             "🎥 *YouTube Downloader Bot*\n\n"
             "/start /cookies /recent /help\n\n"
             "💡 Send YouTube link to download!\n"
-            f"🎬 Video (MP4) | 🎵 Audio | 🖼️ Thumbnails\n"
+            f"🎬 Video | 🎵 Audio | 🖼️ Thumbnails\n"
             f"🗑️ Files deleted after {self.config.STORAGE_DAYS}d.",
             parse_mode=ParseMode.MARKDOWN, reply_markup=self._menu(u.effective_user.id))
     
     async def help(self, u, c):
         await u.message.reply_text(
             "📚 *Help*\n\n"
-            "Send YouTube link → Choose format:\n"
-            f"• 🎬 Video - Full video MP4\n"
-            f"• 🎵 Audio - {'MP3' if HAS_FFMPEG else 'M4A'} audio only\n"
-            "• 🖼️ Thumbnails - Video thumbnails\n\n"
-            "You can download all formats of same video!\n"
+            "Send YouTube link → Choose format → Download!\n"
+            f"🎬 Video (MP4) | 🎵 Audio ({'MP3' if self.has_ffmpeg else 'M4A'}) | 🖼️ Thumbnails\n\n"
             "/cookies - Upload cookies\n"
             "/recent - View downloads",
             parse_mode=ParseMode.MARKDOWN, reply_markup=self._menu(u.effective_user.id))
@@ -299,6 +417,7 @@ class YouTubeDownloaderBot:
         await u.message.reply_text("❌ Cancelled.", reply_markup=self._menu(u.effective_user.id))
         return ConversationHandler.END
     
+    # --- Message Handler ---
     async def on_msg(self, u, c):
         uid = u.effective_user.id
         if not self._ok(uid): return
@@ -319,16 +438,11 @@ class YouTubeDownloaderBot:
     async def _show_format_choice(self, uid, url, video_id, msg):
         s = await msg.reply_text("🔍 Fetching video info...")
         try:
-            opts = {
-                'format': 'best',
-                'cookiefile': str(self.cookies[uid]),
-                'quiet': True, 'no_warnings': True,
-                'socket_timeout': 30, 'retries': 3,
-            }
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                title = info.get('title', 'Unknown')
-                duration = info.get('duration', 0)
+            loop = asyncio.get_event_loop()
+            info = await loop.run_in_executor(DOWNLOAD_EXECUTOR, self._sync_fetch_info, uid, url)
+            
+            title = info.get('title', 'Unknown')
+            duration = info.get('duration', 0)
             
             self._pending_urls[uid] = (url, video_id, title)
             
@@ -369,7 +483,7 @@ class YouTubeDownloaderBot:
                 await q.answer("Already downloaded!")
                 await self._show_delivery(q.message, existing, self.videos[uid].index(existing))
                 return
-            await self._download(uid, url, q.message, 'video', video_id)
+            await self._start_download(uid, url, q.message, 'video', video_id)
             
         elif fmt == 'fmt_audio':
             existing = self._find_existing(uid, video_id, 'audio')
@@ -377,7 +491,7 @@ class YouTubeDownloaderBot:
                 await q.answer("Already downloaded!")
                 await self._show_delivery(q.message, existing, self.videos[uid].index(existing))
                 return
-            await self._download(uid, url, q.message, 'audio', video_id)
+            await self._start_download(uid, url, q.message, 'audio', video_id)
             
         elif fmt == 'fmt_thumb':
             existing = self._find_existing(uid, video_id, 'thumb')
@@ -385,7 +499,53 @@ class YouTubeDownloaderBot:
                 await q.answer("Already downloaded!")
                 await self._show_delivery(q.message, existing, self.videos[uid].index(existing))
                 return
-            await self._download_thumbnails(uid, url, q.message, video_id)
+            await self._start_thumb_download(uid, url, q.message, video_id)
+    
+    async def _start_download(self, uid, url, msg, media_type, video_id):
+        s = await msg.reply_text(f"⏳ Downloading {media_type}...")
+        try:
+            loop = asyncio.get_event_loop()
+            fp, title, vid = await loop.run_in_executor(
+                DOWNLOAD_EXECUTOR, self._sync_download, uid, url, media_type, None
+            )
+            
+            sz = Path(fp).stat().st_size
+            record = VideoRecord(title, url, vid, fp, sz,
+                                datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                media_type=media_type)
+            self.videos.setdefault(uid, []).insert(0, record)
+            while len(self.videos[uid]) > 20:
+                old = self.videos[uid].pop()
+                Path(old.file_path).unlink(missing_ok=True)
+            self._save()
+            await s.delete()
+            await self._show_delivery(msg, record, 0)
+        except Exception as e:
+            logger.error("Download fail %d: %s", uid, str(e)[:100])
+            await s.edit_text("❌ Download failed.", reply_markup=self._menu(uid))
+    
+    async def _start_thumb_download(self, uid, url, msg, video_id):
+        s = await msg.reply_text("🖼️ Downloading thumbnail...")
+        try:
+            loop = asyncio.get_event_loop()
+            fp, title, vid = await loop.run_in_executor(
+                DOWNLOAD_EXECUTOR, self._sync_download_thumb, uid, url
+            )
+            
+            sz = Path(fp).stat().st_size
+            record = VideoRecord(title, url, vid, fp, sz,
+                                datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                media_type='thumb')
+            self.videos.setdefault(uid, []).insert(0, record)
+            while len(self.videos[uid]) > 20:
+                old = self.videos[uid].pop()
+                Path(old.file_path).unlink(missing_ok=True)
+            self._save()
+            await s.delete()
+            await self._show_delivery(msg, record, 0)
+        except Exception as e:
+            logger.error("Thumb %d: %s", uid, str(e)[:100])
+            await s.edit_text("❌ Failed to get thumbnails.", reply_markup=self._menu(uid))
     
     async def _back_to_formats(self, u, c):
         q = u.callback_query; await q.answer()
@@ -404,178 +564,6 @@ class YouTubeDownloaderBot:
         self._pending_urls[uid] = (record.url, record.video_id, record.title)
         await self._show_format_choice(uid, record.url, record.video_id, q.message)
         await q.message.delete()
-    
-    async def _download(self, uid, url, msg, media_type, video_id):
-        s = await msg.reply_text("⏳ Downloading...")
-        try:
-            fp, title, vid = await self._do_download(uid, url, s, media_type)
-            if not fp: return
-            sz = Path(fp).stat().st_size
-            record = VideoRecord(title, url, vid, fp, sz,
-                                datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                                media_type=media_type)
-            self.videos.setdefault(uid, []).insert(0, record)
-            while len(self.videos[uid]) > 20:
-                old = self.videos[uid].pop()
-                Path(old.file_path).unlink(missing_ok=True)
-            self._save()
-            await s.delete()
-            await self._show_delivery(msg, record, 0)
-        except Exception as e:
-            logger.error("Download fail %d: %s", uid, str(e)[:100])
-            await s.edit_text("❌ Failed.", reply_markup=self._menu(uid))
-    
-    async def _do_download(self, uid, url, status, media_type):
-        try:
-            if media_type == 'video':
-                fmt = 'best[ext=mp4]/best'
-                tmpl = str(DOWNLOADS_DIR / '%(id)s_v.%(ext)s')
-                opts = {
-                    'format': fmt,
-                    'outtmpl': tmpl,
-                    'cookiefile': str(self.cookies[uid]),
-                    'quiet': True, 'no_warnings': True,
-                    'socket_timeout': 120, 'retries': 50, 'fragment_retries': 50,
-                    'http_chunk_size': 5*1024*1024, 'throttled_rate': '100K',
-                    'no_mtime': True, 'merge_output_format': 'mp4',
-                    'progress_hooks': [lambda d: self._hook(d)],
-                }
-            else:  # audio
-                if HAS_FFMPEG:
-                    # Best quality MP3 with FFmpeg
-                    fmt = 'bestaudio[ext=m4a]/bestaudio'
-                    tmpl = str(DOWNLOADS_DIR / '%(id)s_a.%(ext)s')
-                    opts = {
-                        'format': fmt,
-                        'outtmpl': tmpl,
-                        'cookiefile': str(self.cookies[uid]),
-                        'quiet': True, 'no_warnings': True,
-                        'socket_timeout': 120, 'retries': 50, 'fragment_retries': 50,
-                        'http_chunk_size': 5*1024*1024, 'throttled_rate': '100K',
-                        'no_mtime': True,
-                        'progress_hooks': [lambda d: self._hook(d)],
-                        'postprocessors': [{
-                            'key': 'FFmpegExtractAudio',
-                            'preferredcodec': 'mp3',
-                            'preferredquality': '192',
-                        }],
-                    }
-                else:
-                    # M4A without FFmpeg (no conversion needed)
-                    fmt = 'bestaudio[ext=m4a]/bestaudio'
-                    tmpl = str(DOWNLOADS_DIR / '%(id)s_a.%(ext)s')
-                    opts = {
-                        'format': fmt,
-                        'outtmpl': tmpl,
-                        'cookiefile': str(self.cookies[uid]),
-                        'quiet': True, 'no_warnings': True,
-                        'socket_timeout': 120, 'retries': 50, 'fragment_retries': 50,
-                        'http_chunk_size': 5*1024*1024, 'throttled_rate': '100K',
-                        'no_mtime': True,
-                        'progress_hooks': [lambda d: self._hook(d)],
-                    }
-            
-            await status.edit_text(f"📥 Downloading {media_type}...")
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                title = info.get('title', 'Unknown')
-                vid = info.get('id', '')
-                fp = ydl.prepare_filename(info)
-                
-                # Audio with FFmpeg: extension changes to .mp3
-                if media_type == 'audio' and HAS_FFMPEG:
-                    fp = str(Path(fp).with_suffix('.mp3'))
-                
-                found = None
-                if Path(fp).exists(): found = fp
-                else:
-                    for ext in ('.mp4', '.mp3', '.m4a', '.webm', '.mkv', '.opus'):
-                        alt = DOWNLOADS_DIR / f'{Path(fp).stem}{ext}'
-                        if alt.exists(): found = str(alt); break
-                
-                if not found:
-                    # Search by video_id prefix
-                    for f in DOWNLOADS_DIR.iterdir():
-                        if f.is_file() and f.stem.startswith(vid):
-                            found = str(f)
-                            break
-                
-                if not found: raise FileNotFoundError(title)
-                mb = Path(found).stat().st_size / 1024 / 1024
-                logger.info("Done %d: %.1f MB (%s)", uid, mb, media_type)
-                return found, title, vid
-        except DownloadError as e:
-            logger.error("yt-dlp %d: %s", uid, str(e)[:100])
-            await status.edit_text("❌ Download failed.", reply_markup=self._menu(uid))
-            return None, None, None
-        except Exception as e:
-            logger.error("Err %d: %s", uid, str(e)[:100])
-            await status.edit_text("❌ Error.", reply_markup=self._menu(uid))
-            return None, None, None
-    
-    async def _download_thumbnails(self, uid, url, msg, video_id):
-        s = await msg.reply_text("🖼️ Downloading thumbnails...")
-        try:
-            opts = {
-                'cookiefile': str(self.cookies[uid]),
-                'quiet': True, 'no_warnings': True,
-                'socket_timeout': 30, 'retries': 3,
-                'skip_download': True,
-                'writethumbnail': True,
-                'outtmpl': str(DOWNLOADS_DIR / '%(id)s_thumb.%(ext)s'),
-            }
-            
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                title = info.get('title', 'Unknown')
-                vid = info.get('id', video_id)
-                
-                ydl.download([url])
-                
-                found = None
-                for ext in ('.jpg', '.webp', '.png'):
-                    fp = DOWNLOADS_DIR / f'{vid}_thumb{ext}'
-                    if fp.exists():
-                        found = str(fp)
-                        break
-                
-                if not found:
-                    thumb_url = None
-                    for t in info.get('thumbnails', []):
-                        if t.get('preference', 0) >= 0:
-                            thumb_url = t.get('url')
-                    if thumb_url:
-                        import urllib.request
-                        ext = thumb_url.split('?')[0].split('.')[-1] or 'jpg'
-                        fp = DOWNLOADS_DIR / f'{vid}_thumb.{ext}'
-                        urllib.request.urlretrieve(thumb_url, str(fp))
-                        found = str(fp)
-                
-                if not found:
-                    raise FileNotFoundError("No thumbnail found")
-                
-                sz = Path(found).stat().st_size
-                record = VideoRecord(title, url, vid, found, sz,
-                                    datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                                    media_type='thumb')
-                self.videos.setdefault(uid, []).insert(0, record)
-                while len(self.videos[uid]) > 20:
-                    old = self.videos[uid].pop()
-                    Path(old.file_path).unlink(missing_ok=True)
-                self._save()
-                
-                await s.delete()
-                await self._show_delivery(msg, record, 0)
-        except Exception as e:
-            logger.error("Thumb %d: %s", uid, str(e)[:100])
-            await s.edit_text("❌ Failed to get thumbnails.", reply_markup=self._menu(uid))
-    
-    def _hook(self, d):
-        if d['status'] == 'downloading':
-            now = time.time()
-            if now - self._last_progress > 10:
-                logger.info("Progress: %s at %s", d.get('_percent_str','?').strip(), d.get('_speed_str','?').strip())
-                self._last_progress = now
     
     async def _show_delivery(self, msg, record, idx):
         type_emoji = {'video': '🎬', 'audio': '🎵', 'thumb': '🖼️'}

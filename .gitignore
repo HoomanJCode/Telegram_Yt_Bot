@@ -141,3 +141,13 @@ config.json
 *.secret
 *.key
 *.pem
+
+# Bot data
+*.pid
+bot.log
+data/
+downloads/
+
+# Cookies
+*.txt
+!requirements.txt

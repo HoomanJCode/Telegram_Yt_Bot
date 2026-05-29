@@ -44,7 +44,7 @@ This Telegram bot downloads YouTube content in multiple formats (Video, Audio, T
 - Python 3.8+
 - Linux (recommended) / macOS / Windows
 - FFmpeg (optional, for MP3 audio conversion)
-- Deno JavaScript runtime (for yt-dlp YouTube extraction)
+- Deno JavaScript runtime (for yt-dlp YouTube extraction) 
 - Telegram Bot Token from [@BotFather](https://t.me/BotFather)
 
 ### Install FFmpeg (recommended)

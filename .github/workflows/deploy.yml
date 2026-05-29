@@ -1,32 +1,202 @@
-name: Deploy to VPS
+name: Deploy TelegramYtBot to VPS
 
 on:
   push:
-    branches: [master]
+    branches:
+      - master
   workflow_dispatch:
+
+env:
+  PROJECT_DIR: /opt/TelegramYtBot
+  SERVICE_NAME: telegramytbot
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    name: 🚀 Deploy to VPS
+    
     steps:
-      - name: Deploy to VPS
-        uses: appleboy/ssh-action@v1.0.3
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+      
+      - name: 🔑 Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
         with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          port: ${{ secrets.VPS_PORT || 22 }}
-          script: |
-            if [ ! -d /root/Telegram_Yt_Bot ]; then
-              git clone https://github.com/HoomanJCode/Telegram_Yt_Bot.git /root/Telegram_Yt_Bot
-            fi
-            
-            cd /root/Telegram_Yt_Bot
-            git pull origin main
-            chmod +x deploy.sh
-            
-            BOT_TOKEN="${{ secrets.BOT_TOKEN }}" \
-            BASE_URL="${{ secrets.BASE_URL }}" \
-            WHITELIST_USERS="${{ secrets.WHITELIST_USERS }}" \
-            STORAGE_DAYS="${{ vars.STORAGE_DAYS }}" \
-            ./deploy.sh
+          ssh-private-key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+      
+      - name: 🔗 Add host key
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
+      
+      - name: 🚀 Deploy to VPS
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          BASE_URL: ${{ secrets.BASE_URL }}
+          WHITELIST_USERS: ${{ secrets.WHITELIST_USERS || '' }}
+          STORAGE_DAYS: ${{ vars.STORAGE_DAYS || '2' }}
+          MAX_TELEGRAM_SIZE_MB: ${{ vars.MAX_TELEGRAM_SIZE_MB || '50' }}
+        run: |
+          cat > /tmp/deploy_script.sh << 'SCRIPTEOF'
+          #!/bin/bash
+          set -e
+          
+          PROJECT_DIR="PROJECT_DIR_PLACEHOLDER"
+          SERVICE_NAME="SERVICE_NAME_PLACEHOLDER"
+          
+          echo "========================================"
+          echo "  TelegramYtBot Deployment"
+          echo "========================================"
+          
+          # Stop service
+          if systemctl is-active --quiet $SERVICE_NAME; then
+            echo "⏹️  Stopping $SERVICE_NAME..."
+            systemctl stop $SERVICE_NAME
+            sleep 2
+          fi
+          
+          # System dependencies
+          echo "📦 Installing dependencies..."
+          apt-get update -qq
+          apt-get install -y -qq python3 python3-pip python3-venv ffmpeg curl git
+          
+          # Deno for yt-dlp JS runtime
+          if ! command -v deno &>/dev/null; then
+            echo "🔧 Installing Deno..."
+            curl -fsSL https://deno.land/install.sh | sh
+          fi
+          export PATH="$HOME/.deno/bin:$PATH"
+          
+          # Clone/pull
+          if [ -d "$PROJECT_DIR/.git" ]; then
+            echo "📥 Pulling latest code..."
+            cd "$PROJECT_DIR"
+            git fetch origin
+            git reset --hard origin/main
+            git clean -fd
+          else
+            echo "📥 Cloning repository..."
+            rm -rf "$PROJECT_DIR"
+            git clone --branch main https://github.com/HoomanJCode/Telegram_Yt_Bot.git "$PROJECT_DIR"
+            cd "$PROJECT_DIR"
+          fi
+          
+          # Create .env
+          echo "⚙️  Creating .env..."
+          cat > "$PROJECT_DIR/.env" << EOF
+          BOT_TOKEN=BOT_TOKEN_PLACEHOLDER
+          BASE_DOWNLOAD_LINK=BASE_URL_PLACEHOLDER
+          WHITELIST_USERS=WHITELIST_USERS_PLACEHOLDER
+          STORAGE_DAYS=STORAGE_DAYS_PLACEHOLDER
+          MAX_TELEGRAM_FILE_SIZE=MAX_TELEGRAM_SIZE_PLACEHOLDER
+          EOF
+          chmod 600 "$PROJECT_DIR/.env"
+          
+          # Verify token
+          if grep -q "^BOT_TOKEN=$" "$PROJECT_DIR/.env" 2>/dev/null; then
+            echo "❌ ERROR: BOT_TOKEN is empty!"
+            exit 1
+          fi
+          
+          # Python setup
+          echo "🐍 Setting up Python..."
+          cd "$PROJECT_DIR"
+          [ -d venv ] && rm -rf venv
+          python3 -m venv venv
+          $PROJECT_DIR/venv/bin/pip install --upgrade pip -q
+          $PROJECT_DIR/venv/bin/pip install -r requirements.txt -q
+          $PROJECT_DIR/venv/bin/pip install --upgrade yt-dlp yt-dlp-ejs -q
+          
+          # Directories
+          mkdir -p "$PROJECT_DIR/data/cookies" "$PROJECT_DIR/downloads"
+          mkdir -p /var/log/$SERVICE_NAME
+          
+          # Test config
+          echo "🧪 Testing configuration..."
+          $PROJECT_DIR/venv/bin/python -c "
+          import sys; sys.path.insert(0, '$PROJECT_DIR')
+          from config import Config
+          c = Config()
+          print('Token:', 'SET' if c.BOT_TOKEN and 'YOUR_BOT_TOKEN' not in c.BOT_TOKEN else 'MISSING')
+          print('Base URL:', c.BASE_DOWNLOAD_LINK)
+          print('Storage:', c.STORAGE_DAYS)
+          "
+          
+          # Systemd service
+          echo "🔧 Creating service..."
+          cat > /etc/systemd/system/$SERVICE_NAME.service << SERVICEEOF
+          [Unit]
+          Description=TelegramYtBot - YouTube Downloader
+          After=network.target
+          
+          [Service]
+          Type=simple
+          User=root
+          WorkingDirectory=$PROJECT_DIR
+          Environment=PATH=$PROJECT_DIR/venv/bin:/usr/local/bin:/usr/bin:/bin:/root/.deno/bin
+          ExecStart=$PROJECT_DIR/venv/bin/python $PROJECT_DIR/bot.py
+          Restart=on-failure
+          RestartSec=10
+          StandardOutput=append:/var/log/$SERVICE_NAME/bot.log
+          StandardError=append:/var/log/$SERVICE_NAME/bot_error.log
+          
+          [Install]
+          WantedBy=multi-user.target
+          SERVICEEOF
+          
+          systemctl daemon-reload
+          systemctl enable $SERVICE_NAME
+          
+          # Start
+          echo "▶️  Starting service..."
+          systemctl start $SERVICE_NAME
+          sleep 5
+          
+          if systemctl is-active --quiet $SERVICE_NAME; then
+            echo "✅ Service is running!"
+            systemctl status $SERVICE_NAME --no-pager -l
+          else
+            echo "❌ Service failed!"
+            echo "=== Error Log ==="
+            tail -20 /var/log/$SERVICE_NAME/bot_error.log 2>/dev/null || true
+            echo "=== Journal ==="
+            journalctl -u $SERVICE_NAME -n 20 --no-pager || true
+            exit 1
+          fi
+          
+          echo "✅ Deployment Complete!"
+          SCRIPTEOF
+          
+          # Replace placeholders
+          sed -i "s|PROJECT_DIR_PLACEHOLDER|${{ env.PROJECT_DIR }}|g" /tmp/deploy_script.sh
+          sed -i "s|SERVICE_NAME_PLACEHOLDER|${{ env.SERVICE_NAME }}|g" /tmp/deploy_script.sh
+          sed -i "s|BOT_TOKEN_PLACEHOLDER|${BOT_TOKEN}|g" /tmp/deploy_script.sh
+          sed -i "s|BASE_URL_PLACEHOLDER|${BASE_URL}|g" /tmp/deploy_script.sh
+          sed -i "s|WHITELIST_USERS_PLACEHOLDER|${WHITELIST_USERS}|g" /tmp/deploy_script.sh
+          sed -i "s|STORAGE_DAYS_PLACEHOLDER|${STORAGE_DAYS}|g" /tmp/deploy_script.sh
+          sed -i "s|MAX_TELEGRAM_SIZE_PLACEHOLDER|${MAX_TELEGRAM_SIZE_MB}|g" /tmp/deploy_script.sh
+          
+          # Deploy to VPS
+          scp /tmp/deploy_script.sh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/tmp/deploy_script.sh
+          ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} "bash /tmp/deploy_script.sh"
+      
+      - name: ✅ Success
+        if: success()
+        uses: appleboy/telegram-action@master
+        with:
+          to: ${{ secrets.TELEGRAM_CHAT_ID }}
+          token: ${{ secrets.BOT_TOKEN }}
+          message: |
+            ✅ **TelegramYtBot Deployed!**
+            🖥️ ${{ secrets.VPS_HOST }}
+            📦 ${{ env.PROJECT_DIR }}
+      
+      - name: ❌ Failure
+        if: failure()
+        uses: appleboy/telegram-action@master
+        with:
+          to: ${{ secrets.TELEGRAM_CHAT_ID }}
+          token: ${{ secrets.BOT_TOKEN }}
+          message: |
+            ❌ **Deployment Failed!**
+            🔗 [View Logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})

@@ -1,146 +1,128 @@
 #!/bin/bash
+
+# ============================================
+# TelegramYtBot - Manual Deployment Script
+# ============================================
+# Usage: bash deploy.sh [branch]
+# Example: bash deploy.sh main
+
 set -e
 
-# ============================================================
-# YouTube Downloader Bot - Deploy Script
-# Run by GitHub Actions or manually on VPS
-# ============================================================
+BRANCH=${1:-main}
+PROJECT_DIR="/opt/TelegramYtBot"
+SERVICE_NAME="telegramytbot"
+REPO_URL="https://github.com/HoomanJCode/Telegram_Yt_Bot.git"
 
-APP_DIR="/root/Telegram_Yt_Bot"
-SERVICE_NAME="yt-bot"
-VENV_DIR="$APP_DIR/venv"
-LOG_FILE="/var/log/yt_bot.log"
+echo "========================================"
+echo "  TelegramYtBot Deployment"
+echo "========================================"
+echo "📦 Repository: $REPO_URL"
+echo "🌿 Branch: $BRANCH"
+echo "📁 Directory: $PROJECT_DIR"
+echo "========================================"
 
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-NC='\033[0m'
-
-echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN}  YouTube Bot Deploy${NC}"
-echo -e "${GREEN}========================================${NC}"
-
-# -----------------------------------------------------------
-# 1. Install system dependencies
-# -----------------------------------------------------------
-echo -e "${YELLOW}[1/5] System dependencies...${NC}"
-
-if [ -f /etc/debian_version ]; then
-    apt-get update -qq
-    apt-get install -y -qq python3 python3-venv python3-pip ffmpeg curl 2>/dev/null
+# Stop service
+if systemctl is-active --quiet $SERVICE_NAME; then
+    echo "⏹️  Stopping $SERVICE_NAME..."
+    systemctl stop $SERVICE_NAME
+    sleep 2
 fi
+
+# Backup
+if [ -d "$PROJECT_DIR" ]; then
+    BACKUP="${PROJECT_DIR}_backup_$(date +%Y%m%d_%H%M%S)"
+    cp -r "$PROJECT_DIR" "$BACKUP"
+    echo "💾 Backup: $BACKUP"
+    ls -dt ${PROJECT_DIR}_backup_* 2>/dev/null | tail -n +4 | xargs -r rm -rf
+fi
+
+# System dependencies
+echo "📦 Installing system dependencies..."
+apt-get update -qq
+apt-get install -y -qq python3 python3-pip python3-venv ffmpeg curl git
 
 # Deno
 if ! command -v deno &>/dev/null; then
+    echo "🔧 Installing Deno..."
     curl -fsSL https://deno.land/install.sh | sh
-    grep -q "deno/bin" ~/.bashrc || echo 'export PATH="$HOME/.deno/bin:$PATH"' >> ~/.bashrc
 fi
 export PATH="$HOME/.deno/bin:$PATH"
 
-echo -e "${GREEN}  ✓ Done${NC}"
+# Clone/pull
+if [ -d "$PROJECT_DIR/.git" ]; then
+    echo "📥 Pulling latest code..."
+    cd "$PROJECT_DIR"
+    git fetch origin
+    git reset --hard origin/$BRANCH
+else
+    echo "📥 Cloning repository..."
+    rm -rf "$PROJECT_DIR"
+    git clone --branch $BRANCH --single-branch $REPO_URL "$PROJECT_DIR"
+    cd "$PROJECT_DIR"
+fi
 
-# -----------------------------------------------------------
-# 2. Python environment
-# -----------------------------------------------------------
-echo -e "${YELLOW}[2/5] Python environment...${NC}"
-
-cd "$APP_DIR"
-[ ! -d "$VENV_DIR" ] && python3 -m venv "$VENV_DIR"
-source "$VENV_DIR/bin/activate"
+# Python setup
+echo "🐍 Setting up Python..."
+[ -d venv ] && rm -rf venv
+python3 -m venv venv
+source venv/bin/activate
 pip install --upgrade pip -q
 pip install -r requirements.txt -q
 pip install --upgrade yt-dlp yt-dlp-ejs -q
 
-echo -e "${GREEN}  ✓ Done${NC}"
-# -----------------------------------------------------------
-# 3. Configuration
-# -----------------------------------------------------------
-echo -e "${YELLOW}[3/5] Configuration...${NC}"
-
-mkdir -p "$APP_DIR/data/cookies" "$APP_DIR/downloads"
-
-# Get server IP as fallback
-IP=$(hostname -I | awk '{print $1}')
-
-# Use secrets if provided, otherwise keep existing .env
-if [ -n "$BOT_TOKEN" ]; then
-    cat > "$APP_DIR/.env" << EOF
-BOT_TOKEN=${BOT_TOKEN}
-BASE_DOWNLOAD_LINK=${BASE_URL:-http://${IP}:8000}
-WHITELIST_USERS=${WHITELIST_USERS:-}
-STORAGE_DAYS=${STORAGE_DAYS:-2}
-EOF
-    echo -e "${GREEN}  ✓ .env created from secrets${NC}"
-elif [ ! -f "$APP_DIR/.env" ]; then
-    cat > "$APP_DIR/.env" << EOF
+# Create .env if not exists
+if [ ! -f ".env" ]; then
+    IP=$(hostname -I | awk '{print $1}')
+    cat > .env << EOF
 BOT_TOKEN=your_bot_token_here
 BASE_DOWNLOAD_LINK=http://${IP}:8000
 WHITELIST_USERS=
 STORAGE_DAYS=2
 EOF
-    echo -e "${RED}  ⚠ Created .env - EDIT IT: nano $APP_DIR/.env${NC}"
-else
-    echo -e "${GREEN}  ✓ .env exists${NC}"
+    echo "⚠️  .env created - edit it: nano $PROJECT_DIR/.env"
 fi
 
-# Open firewall port
-PORT=$(echo "${BASE_URL:-http://${IP}:8000}" | grep -oP ':\K\d+')
-PORT=${PORT:-8000}
-if command -v ufw &>/dev/null; then
-    ufw allow "$PORT" 2>/dev/null || true
-fi
+# Directories
+mkdir -p data/cookies downloads /var/log/$SERVICE_NAME
 
-echo -e "${GREEN}  ✓ Done${NC}"
-
-# -----------------------------------------------------------
-# 4. Systemd service
-# -----------------------------------------------------------
-echo -e "${YELLOW}[4/5] Systemd service...${NC}"
-
-cat > "/etc/systemd/system/${SERVICE_NAME}.service" << EOF
+# Systemd service
+cat > /etc/systemd/system/$SERVICE_NAME.service << EOF
 [Unit]
-Description=YouTube Downloader Telegram Bot
+Description=TelegramYtBot - YouTube Downloader
 After=network.target
 
 [Service]
 Type=simple
 User=root
-WorkingDirectory=$APP_DIR
-Environment=PATH=$VENV_DIR/bin:/usr/local/bin:/usr/bin:/bin:/root/.deno/bin
-ExecStart=$VENV_DIR/bin/python bot.py
+WorkingDirectory=$PROJECT_DIR
+Environment=PATH=$PROJECT_DIR/venv/bin:/usr/local/bin:/usr/bin:/bin:/root/.deno/bin
+ExecStart=$PROJECT_DIR/venv/bin/python $PROJECT_DIR/bot.py
 Restart=always
 RestartSec=10
-StandardOutput=append:$LOG_FILE
-StandardError=append:$LOG_FILE
+StandardOutput=append:/var/log/$SERVICE_NAME/bot.log
+StandardError=append:/var/log/$SERVICE_NAME/bot_error.log
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable "$SERVICE_NAME" 2>/dev/null || true
+systemctl enable $SERVICE_NAME
+systemctl start $SERVICE_NAME
 
-echo -e "${GREEN}  ✓ Done${NC}"
+sleep 5
 
-# -----------------------------------------------------------
-# 5. Restart
-# -----------------------------------------------------------
-echo -e "${YELLOW}[5/5] Restarting bot...${NC}"
-
-systemctl stop "$SERVICE_NAME" 2>/dev/null || true
-sleep 2
-systemctl start "$SERVICE_NAME"
-sleep 3
-
-if systemctl is-active --quiet "$SERVICE_NAME"; then
-    echo -e "${GREEN}========================================${NC}"
-    echo -e "${GREEN}  ✅ Bot running!${NC}"
-    echo -e "${GREEN}  systemctl status $SERVICE_NAME${NC}"
-    echo -e "${GREEN}========================================${NC}"
+if systemctl is-active --quiet $SERVICE_NAME; then
+    echo ""
+    echo "✅ TelegramYtBot deployed successfully!"
+    echo ""
+    echo "📋 Commands:"
+    echo "   systemctl status $SERVICE_NAME"
+    echo "   journalctl -u $SERVICE_NAME -f"
+    echo "   tail -f /var/log/$SERVICE_NAME/bot.log"
+    echo "   systemctl restart $SERVICE_NAME"
 else
-    echo -e "${RED}========================================${NC}"
-    echo -e "${RED}  ❌ Failed!${NC}"
-    journalctl -u "$SERVICE_NAME" -n 20 --no-pager
-    echo -e "${RED}========================================${NC}"
+    echo "❌ Failed to start!"
+    journalctl -u $SERVICE_NAME -n 20 --no-pager
     exit 1
 fi

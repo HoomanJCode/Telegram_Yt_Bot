@@ -19,7 +19,7 @@ jobs:
           script: |
             # Clone if not exists, otherwise pull
             if [ ! -d /root/Telegram_Yt_Bot ]; then
-              git clone git@github.com:HoomanJCode/youtube-downloader-bot.git /root/Telegram_Yt_Bot
+              git clone git@github.com:HoomanJCode/Telegram_Yt_Bot.git /root/Telegram_Yt_Bot
             fi
             
             cd /root/Telegram_Yt_Bot

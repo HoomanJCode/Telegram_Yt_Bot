@@ -4,11 +4,11 @@
 # TelegramYtBot - Manual Deployment Script
 # ============================================
 # Usage: bash deploy.sh [branch]
-# Example: bash deploy.sh main
+# Example: bash deploy.sh master
 
 set -e
 
-BRANCH=${1:-main}
+BRANCH=${1:-master}
 PROJECT_DIR="/opt/TelegramYtBot"
 SERVICE_NAME="telegramytbot"
 REPO_URL="https://github.com/HoomanJCode/Telegram_Yt_Bot.git"
@@ -21,14 +21,12 @@ echo "🌿 Branch: $BRANCH"
 echo "📁 Directory: $PROJECT_DIR"
 echo "========================================"
 
-# Stop service
 if systemctl is-active --quiet $SERVICE_NAME; then
     echo "⏹️  Stopping $SERVICE_NAME..."
     systemctl stop $SERVICE_NAME
     sleep 2
 fi
 
-# Backup
 if [ -d "$PROJECT_DIR" ]; then
     BACKUP="${PROJECT_DIR}_backup_$(date +%Y%m%d_%H%M%S)"
     cp -r "$PROJECT_DIR" "$BACKUP"
@@ -36,19 +34,16 @@ if [ -d "$PROJECT_DIR" ]; then
     ls -dt ${PROJECT_DIR}_backup_* 2>/dev/null | tail -n +4 | xargs -r rm -rf
 fi
 
-# System dependencies
 echo "📦 Installing system dependencies..."
 apt-get update -qq
 apt-get install -y -qq python3 python3-pip python3-venv ffmpeg curl git
 
-# Deno
 if ! command -v deno &>/dev/null; then
     echo "🔧 Installing Deno..."
     curl -fsSL https://deno.land/install.sh | sh
 fi
 export PATH="$HOME/.deno/bin:$PATH"
 
-# Clone/pull
 if [ -d "$PROJECT_DIR/.git" ]; then
     echo "📥 Pulling latest code..."
     cd "$PROJECT_DIR"
@@ -61,7 +56,6 @@ else
     cd "$PROJECT_DIR"
 fi
 
-# Python setup
 echo "🐍 Setting up Python..."
 [ -d venv ] && rm -rf venv
 python3 -m venv venv
@@ -70,7 +64,6 @@ pip install --upgrade pip -q
 pip install -r requirements.txt -q
 pip install --upgrade yt-dlp yt-dlp-ejs -q
 
-# Create .env if not exists
 if [ ! -f ".env" ]; then
     IP=$(hostname -I | awk '{print $1}')
     cat > .env << EOF
@@ -82,10 +75,8 @@ EOF
     echo "⚠️  .env created - edit it: nano $PROJECT_DIR/.env"
 fi
 
-# Directories
 mkdir -p data/cookies downloads /var/log/$SERVICE_NAME
 
-# Systemd service
 cat > /etc/systemd/system/$SERVICE_NAME.service << EOF
 [Unit]
 Description=TelegramYtBot - YouTube Downloader

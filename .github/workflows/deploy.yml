@@ -48,40 +48,35 @@ jobs:
           echo "  TelegramYtBot Deployment"
           echo "========================================"
           
-          # Stop service
           if systemctl is-active --quiet $SERVICE_NAME; then
             echo "⏹️  Stopping $SERVICE_NAME..."
             systemctl stop $SERVICE_NAME
             sleep 2
           fi
           
-          # System dependencies
           echo "📦 Installing dependencies..."
           apt-get update -qq
           apt-get install -y -qq python3 python3-pip python3-venv ffmpeg curl git
           
-          # Deno for yt-dlp JS runtime
           if ! command -v deno &>/dev/null; then
             echo "🔧 Installing Deno..."
             curl -fsSL https://deno.land/install.sh | sh
           fi
           export PATH="$HOME/.deno/bin:$PATH"
           
-          # Clone/pull
           if [ -d "$PROJECT_DIR/.git" ]; then
             echo "📥 Pulling latest code..."
             cd "$PROJECT_DIR"
             git fetch origin
-            git reset --hard origin/main
+            git reset --hard origin/master
             git clean -fd
           else
             echo "📥 Cloning repository..."
             rm -rf "$PROJECT_DIR"
-            git clone --branch main https://github.com/HoomanJCode/Telegram_Yt_Bot.git "$PROJECT_DIR"
+            git clone --branch master https://github.com/HoomanJCode/Telegram_Yt_Bot.git "$PROJECT_DIR"
             cd "$PROJECT_DIR"
           fi
           
-          # Create .env
           echo "⚙️  Creating .env..."
           cat > "$PROJECT_DIR/.env" << EOF
           BOT_TOKEN=BOT_TOKEN_PLACEHOLDER
@@ -92,13 +87,11 @@ jobs:
           EOF
           chmod 600 "$PROJECT_DIR/.env"
           
-          # Verify token
           if grep -q "^BOT_TOKEN=$" "$PROJECT_DIR/.env" 2>/dev/null; then
             echo "❌ ERROR: BOT_TOKEN is empty!"
             exit 1
           fi
           
-          # Python setup
           echo "🐍 Setting up Python..."
           cd "$PROJECT_DIR"
           [ -d venv ] && rm -rf venv
@@ -107,11 +100,9 @@ jobs:
           $PROJECT_DIR/venv/bin/pip install -r requirements.txt -q
           $PROJECT_DIR/venv/bin/pip install --upgrade yt-dlp yt-dlp-ejs -q
           
-          # Directories
           mkdir -p "$PROJECT_DIR/data/cookies" "$PROJECT_DIR/downloads"
           mkdir -p /var/log/$SERVICE_NAME
           
-          # Test config
           echo "🧪 Testing configuration..."
           $PROJECT_DIR/venv/bin/python -c "
           import sys; sys.path.insert(0, '$PROJECT_DIR')
@@ -122,7 +113,6 @@ jobs:
           print('Storage:', c.STORAGE_DAYS)
           "
           
-          # Systemd service
           echo "🔧 Creating service..."
           cat > /etc/systemd/system/$SERVICE_NAME.service << SERVICEEOF
           [Unit]
@@ -147,7 +137,6 @@ jobs:
           systemctl daemon-reload
           systemctl enable $SERVICE_NAME
           
-          # Start
           echo "▶️  Starting service..."
           systemctl start $SERVICE_NAME
           sleep 5
@@ -167,7 +156,6 @@ jobs:
           echo "✅ Deployment Complete!"
           SCRIPTEOF
           
-          # Replace placeholders
           sed -i "s|PROJECT_DIR_PLACEHOLDER|${{ env.PROJECT_DIR }}|g" /tmp/deploy_script.sh
           sed -i "s|SERVICE_NAME_PLACEHOLDER|${{ env.SERVICE_NAME }}|g" /tmp/deploy_script.sh
           sed -i "s|BOT_TOKEN_PLACEHOLDER|${BOT_TOKEN}|g" /tmp/deploy_script.sh
@@ -176,27 +164,5 @@ jobs:
           sed -i "s|STORAGE_DAYS_PLACEHOLDER|${STORAGE_DAYS}|g" /tmp/deploy_script.sh
           sed -i "s|MAX_TELEGRAM_SIZE_PLACEHOLDER|${MAX_TELEGRAM_SIZE_MB}|g" /tmp/deploy_script.sh
           
-          # Deploy to VPS
           scp /tmp/deploy_script.sh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/tmp/deploy_script.sh
           ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} "bash /tmp/deploy_script.sh"
-      
-      - name: ✅ Success
-        if: success()
-        uses: appleboy/telegram-action@master
-        with:
-          to: ${{ secrets.TELEGRAM_CHAT_ID }}
-          token: ${{ secrets.BOT_TOKEN }}
-          message: |
-            ✅ **TelegramYtBot Deployed!**
-            🖥️ ${{ secrets.VPS_HOST }}
-            📦 ${{ env.PROJECT_DIR }}
-      
-      - name: ❌ Failure
-        if: failure()
-        uses: appleboy/telegram-action@master
-        with:
-          to: ${{ secrets.TELEGRAM_CHAT_ID }}
-          token: ${{ secrets.BOT_TOKEN }}
-          message: |
-            ❌ **Deployment Failed!**
-            🔗 [View Logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})

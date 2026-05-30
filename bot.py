@@ -19,6 +19,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Optional, List
 from urllib.parse import quote, unquote
 from http.server import HTTPServer, SimpleHTTPRequestHandler
+from socketserver import ThreadingMixIn
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -55,26 +56,68 @@ WAITING_FOR_COOKIES = 1
 YOUTUBE_RE = re.compile(r'(https?://)?(www\.)?(youtube\.com|youtu\.be)/\S+')
 
 # ---------------------------------------------------------------------------
-# HTTP File Server
+# Threaded HTTP File Server with buffering
 # ---------------------------------------------------------------------------
-class FileServerHandler(SimpleHTTPRequestHandler):
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    """Handle requests in separate threads"""
+    daemon_threads = True
+    allow_reuse_address = True
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+
+class BufferedFileHandler(SimpleHTTPRequestHandler):
+    """File handler with large buffer and error suppression"""
+    
+    # 1MB buffer for file transfers
+    bufsize = 1024 * 1024
+    
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(DOWNLOADS_DIR), **kwargs)
     
     def handle(self):
         try: super().handle()
-        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError): pass
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError): pass
     
     def handle_one_request(self):
         try: super().handle_one_request()
-        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError): pass
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError): pass
     
     def copyfile(self, source, outputfile):
-        try: super().copyfile(source, outputfile)
-        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError): pass
+        """Copy file with large buffer"""
+        try:
+            while True:
+                buf = source.read(self.bufsize)
+                if not buf: break
+                try:
+                    outputfile.write(buf)
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    break
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError): pass
+    
+    def send_header(self, keyword, value):
+        """Add cache and CORS headers"""
+        if keyword == 'Content-Type':
+            ext = self.path.split('.')[-1].lower() if '.' in self.path else ''
+            mime_types = {
+                'mp4': 'video/mp4', 'webm': 'video/webm', 'mkv': 'video/x-matroska',
+                'mp3': 'audio/mpeg', 'm4a': 'audio/mp4', 'opus': 'audio/opus',
+                'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png', 'webp': 'image/webp',
+            }
+            value = mime_types.get(ext, 'application/octet-stream')
+        
+        super().send_header(keyword, value)
+    
+    def end_headers(self):
+        self.send_header('Cache-Control', 'public, max-age=86400')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Accept-Ranges', 'bytes')
+        super().end_headers()
     
     def log_message(self, format, *args):
-        pass  # Silent
+        pass  # Silent - no request logging
 
 class FileServer:
     def __init__(self, port=8000):
@@ -82,10 +125,10 @@ class FileServer:
     
     def start(self):
         try:
-            s = HTTPServer(('0.0.0.0', self.port), FileServerHandler)
-            s.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            threading.Thread(target=s.serve_forever, daemon=True).start()
-            logger.info("File server on port %d", self.port)
+            server = ThreadedHTTPServer(('0.0.0.0', self.port), BufferedFileHandler)
+            server.request_queue_size = 10
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            logger.info("File server on port %d (threaded)", self.port)
         except Exception as e:
             logger.error("File server: %s", e)
 
@@ -264,7 +307,6 @@ class YouTubeDownloaderBot:
             [InlineKeyboardButton("🔙 Back to formats", callback_data=f'backfmt_{idx_str}')],
         ])
     
-    # --- Sync download helpers (run in thread) ---
     def _do_fetch_info(self, uid, url):
         opts = {
             'format': 'best', 'cookiefile': str(self.cookies[uid]),
@@ -283,8 +325,9 @@ class YouTubeDownloaderBot:
                 'cookiefile': str(self.cookies[uid]),
                 'quiet': True, 'no_warnings': True,
                 'socket_timeout': 120, 'retries': 50, 'fragment_retries': 50,
-                'http_chunk_size': 5*1024*1024, 'throttled_rate': '100K',
+                'http_chunk_size': 10*1024*1024, 'throttled_rate': '500K',
                 'no_mtime': True, 'merge_output_format': 'mp4',
+                'concurrent_fragment_downloads': 4,
             }
         else:
             fmt = 'bestaudio[ext=m4a]/bestaudio'
@@ -294,8 +337,8 @@ class YouTubeDownloaderBot:
                 'cookiefile': str(self.cookies[uid]),
                 'quiet': True, 'no_warnings': True,
                 'socket_timeout': 120, 'retries': 50, 'fragment_retries': 50,
-                'http_chunk_size': 5*1024*1024, 'throttled_rate': '100K',
-                'no_mtime': True,
+                'http_chunk_size': 10*1024*1024, 'throttled_rate': '500K',
+                'no_mtime': True, 'concurrent_fragment_downloads': 4,
             }
             if self.has_ffmpeg:
                 opts['postprocessors'] = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}]
@@ -363,7 +406,6 @@ class YouTubeDownloaderBot:
             
             return found, title, vid
     
-    # --- Commands ---
     async def start(self, u, c):
         if not self._ok(u.effective_user.id): await u.message.reply_text("⛔"); return
         await u.message.reply_text(
@@ -371,17 +413,14 @@ class YouTubeDownloaderBot:
             "🎥 *YouTube Downloader Bot*\n\n"
             "/start /cookies /recent /help\n\n"
             "💡 Send YouTube link to download!\n"
-            f"🎬 Video | 🎵 Audio | 🖼️ Thumbnails\n"
             f"🗑️ Files deleted after {self.config.STORAGE_DAYS}d.",
             parse_mode=ParseMode.MARKDOWN, reply_markup=self._menu(u.effective_user.id))
     
     async def help(self, u, c):
         await u.message.reply_text(
-            "📚 *Help*\n\n"
-            "Send YouTube link → Choose format → Download!\n"
+            "📚 *Help*\n\nSend YouTube link → Choose format → Download!\n"
             f"🎬 Video | 🎵 Audio | 🖼️ Thumbnails\n\n"
-            "/cookies - Upload cookies\n"
-            "/recent - View downloads",
+            "/cookies /recent",
             parse_mode=ParseMode.MARKDOWN, reply_markup=self._menu(u.effective_user.id))
     
     async def recent(self, u, c): await self._show_recent(u, c)
@@ -390,7 +429,6 @@ class YouTubeDownloaderBot:
         await u.message.reply_text("❌ Cancelled.", reply_markup=self._menu(u.effective_user.id))
         return ConversationHandler.END
     
-    # --- Message Handler ---
     async def on_msg(self, u, c):
         uid = u.effective_user.id
         if not self._ok(uid): return
@@ -411,9 +449,7 @@ class YouTubeDownloaderBot:
     async def _show_format_choice(self, uid, url, video_id, msg):
         s = await msg.reply_text("🔍 Fetching video info...")
         try:
-            # Use default executor (asyncio.to_thread would be better but needs Python 3.9+)
             info = await asyncio.get_event_loop().run_in_executor(None, self._do_fetch_info, uid, url)
-            
             title = info.get('title', 'Unknown')
             duration = info.get('duration', 0)
             self._pending_urls[uid] = (url, video_id, title)
@@ -442,9 +478,7 @@ class YouTubeDownloaderBot:
         uid = u.effective_user.id
         fmt = q.data
         
-        if uid not in self._pending_urls:
-            await q.message.reply_text("❌ Expired. Send link again.")
-            return
+        if uid not in self._pending_urls: return
         
         url, video_id, title = self._pending_urls[uid]
         
@@ -455,7 +489,6 @@ class YouTubeDownloaderBot:
                 await self._show_delivery(q.message, existing, self.videos[uid].index(existing))
                 return
             await self._start_download(uid, url, q.message, 'video')
-            
         elif fmt == 'fmt_audio':
             existing = self._find_existing(uid, video_id, 'audio')
             if existing:
@@ -463,7 +496,6 @@ class YouTubeDownloaderBot:
                 await self._show_delivery(q.message, existing, self.videos[uid].index(existing))
                 return
             await self._start_download(uid, url, q.message, 'audio')
-            
         elif fmt == 'fmt_thumb':
             existing = self._find_existing(uid, video_id, 'thumb')
             if existing:
@@ -478,7 +510,6 @@ class YouTubeDownloaderBot:
             fp, title, vid = await asyncio.get_event_loop().run_in_executor(
                 None, self._do_download, uid, url, media_type
             )
-            
             sz = Path(fp).stat().st_size
             record = VideoRecord(title, url, vid, fp, sz,
                                 datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -500,7 +531,6 @@ class YouTubeDownloaderBot:
             fp, title, vid = await asyncio.get_event_loop().run_in_executor(
                 None, self._do_download_thumb, uid, url
             )
-            
             sz = Path(fp).stat().st_size
             record = VideoRecord(title, url, vid, fp, sz,
                                 datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -528,7 +558,6 @@ class YouTubeDownloaderBot:
             record = self.videos.get(uid, [None])[idx]
         
         if not record: return
-        
         self._pending_urls[uid] = (record.url, record.video_id, record.title)
         await self._show_format_choice(uid, record.url, record.video_id, q.message)
         await q.message.delete()
@@ -543,9 +572,7 @@ class YouTubeDownloaderBot:
             f"🕒 {record.download_time}\n\n"
             "Choose delivery:"
         )
-        await msg.reply_text(
-            txt, parse_mode=ParseMode.MARKDOWN,
-            reply_markup=self._delivery_keyboard(msg.chat.id, idx))
+        await msg.reply_text(txt, parse_mode=ParseMode.MARKDOWN, reply_markup=self._delivery_keyboard(msg.chat.id, idx))
     
     async def _send_telegram(self, u, c):
         q = u.callback_query; await q.answer()
@@ -650,8 +677,7 @@ class YouTubeDownloaderBot:
     
     async def _select_video(self, u, c):
         q = u.callback_query; await q.answer()
-        uid = u.effective_user.id
-        idx = int(q.data.split('_')[1])
+        uid = u.effective_user.id; idx = int(q.data.split('_')[1])
         videos = self.videos.get(uid, [])
         if 0 <= idx < len(videos):
             await self._show_delivery(q.message, videos[idx], idx)

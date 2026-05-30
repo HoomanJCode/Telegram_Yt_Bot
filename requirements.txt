@@ -2,3 +2,4 @@ python-telegram-bot==20.7
 yt-dlp
 yt-dlp-ejs
 python-dotenv==1.0.0
+aiohttp==3.9.5

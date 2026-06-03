@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 YouTube Downloader Telegram Bot
-Cookies held in RAM only - never written to disk
+Cookies: Telegram file_id on disk, content in RAM only
 """
 
 import os
@@ -80,8 +80,7 @@ class FileServer:
         range_header = request.headers.get('Range', '')
         if range_header.startswith('bytes='):
             try:
-                range_str = range_header[6:]
-                start, end = range_str.split('-')
+                start, end = range_header[6:].split('-')
                 start = int(start) if start else 0
                 end = int(end) if end else filepath.stat().st_size - 1
                 response.set_status(206)
@@ -93,20 +92,17 @@ class FileServer:
             start, end = 0, filepath.stat().st_size - 1
         
         await response.prepare(request)
-        
         try:
             with open(filepath, 'rb') as f:
                 f.seek(start)
                 remaining = end - start + 1
-                chunk_size = 1024 * 1024
                 while remaining > 0:
-                    chunk = f.read(min(chunk_size, remaining))
+                    chunk = f.read(min(1024*1024, remaining))
                     if not chunk: break
                     await response.write(chunk)
                     remaining -= len(chunk)
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
             pass
-        
         return response
     
     def _get_mime(self, ext):
@@ -166,10 +162,13 @@ class YouTubeDownloaderBot:
         for d in (DATA_DIR, DOWNLOADS_DIR):
             d.mkdir(parents=True, exist_ok=True)
         
-        # Cookies stored IN MEMORY ONLY - never written to disk
-        # Dict of user_id -> temp file path (in /tmp, cleared on reboot)
-        self._cookie_data: Dict[int, bytes] = {}  # user_id -> cookie file content
-        self._cookie_tmpfiles: Dict[int, str] = {}  # user_id -> temp file path
+        # Cookies: store Telegram file_id on disk, content in RAM
+        self._cookie_file_ids: Dict[int, str] = {}  # user_id -> telegram file_id (persisted)
+        self._cookie_data: Dict[int, bytes] = {}     # user_id -> cookie content (RAM only)
+        self._cookie_tmpfiles: Dict[int, str] = {}    # user_id -> temp file path
+        
+        # Bot instance reference for cookie re-download (set after app created)
+        self._bot = None
         
         self.videos: Dict[int, List[VideoRecord]] = {}
         self._pending_urls: Dict[int, tuple] = {}
@@ -189,7 +188,8 @@ class YouTubeDownloaderBot:
             return False
     
     def _load(self):
-        """Load video records only (cookies are in-memory only)"""
+        """Load video records and cookie file_ids from disk"""
+        # Load videos
         try:
             fp = DATA_DIR / 'user_videos.json'
             if fp.exists():
@@ -198,14 +198,57 @@ class YouTubeDownloaderBot:
                 logger.info("Loaded videos: %d users", len(self.videos))
         except Exception as e:
             logger.error("Load videos: %s", e)
+        
+        # Load cookie file_ids (not the actual cookies)
+        try:
+            fp = DATA_DIR / 'cookie_file_ids.json'
+            if fp.exists():
+                self._cookie_file_ids = {int(k): v for k, v in json.loads(fp.read_text()).items()}
+                logger.info("Loaded cookie IDs: %d users", len(self._cookie_file_ids))
+        except Exception as e:
+            logger.error("Load cookie IDs: %s", e)
     
     def _save(self):
-        """Save video records only (cookies never saved to disk)"""
+        """Save video records and cookie file_ids to disk"""
+        # Save videos
         try:
-            fp = DATA_DIR / 'user_videos.json'
-            fp.write_text(json.dumps({str(k): [v.to_dict() for v in vs] for k, vs in self.videos.items()}, indent=2))
+            (DATA_DIR / 'user_videos.json').write_text(
+                json.dumps({str(k): [v.to_dict() for v in vs] for k, vs in self.videos.items()}, indent=2))
         except Exception as e:
             logger.error("Save videos: %s", e)
+        
+        # Save cookie file_ids
+        try:
+            (DATA_DIR / 'cookie_file_ids.json').write_text(
+                json.dumps({str(k): v for k, v in self._cookie_file_ids.items()}, indent=2))
+        except Exception as e:
+            logger.error("Save cookie IDs: %s", e)
+    
+    async def _load_cookies_from_telegram(self, uid: int) -> bool:
+        """Try to re-download cookies from Telegram using stored file_id"""
+        if uid not in self._cookie_file_ids or not self._bot:
+            return False
+        
+        try:
+            file_id = self._cookie_file_ids[uid]
+            file = await self._bot.get_file(file_id)
+            cookie_bytes = await file.download_as_bytearray()
+            self._cookie_data[uid] = bytes(cookie_bytes)
+            
+            # Clean old temp file
+            if uid in self._cookie_tmpfiles:
+                try: os.unlink(self._cookie_tmpfiles[uid])
+                except: pass
+                del self._cookie_tmpfiles[uid]
+            
+            logger.info("Re-downloaded cookies for user %d", uid)
+            return True
+        except Exception as e:
+            logger.warning("Failed to re-download cookies for %d: %s", uid, str(e)[:50])
+            # File probably deleted from Telegram, remove stale file_id
+            del self._cookie_file_ids[uid]
+            self._save()
+            return False
     
     def _start_cleanup(self):
         def w():
@@ -225,12 +268,20 @@ class YouTubeDownloaderBot:
             if not self.videos[uid]: del self.videos[uid]
         self._save()
     
-    def _has_cookies(self, uid): return uid in self._cookie_data
+    def _has_cookies(self, uid): 
+        return uid in self._cookie_data or uid in self._cookie_file_ids
+    
+    async def _ensure_cookies(self, uid: int) -> bool:
+        """Ensure cookies are loaded in RAM, re-download from Telegram if needed"""
+        if uid in self._cookie_data:
+            return True
+        if uid in self._cookie_file_ids:
+            return await self._load_cookies_from_telegram(uid)
+        return False
     
     def _get_cookie_file(self, uid):
         """Get or create temp file for cookies"""
         if uid not in self._cookie_tmpfiles or not os.path.exists(self._cookie_tmpfiles[uid]):
-            # Create temp file with cookie content
             tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
             tmp.write(self._cookie_data[uid].decode('utf-8', errors='replace'))
             tmp.close()
@@ -278,7 +329,7 @@ class YouTubeDownloaderBot:
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("📹 Recent Downloads", callback_data='r')],
             [InlineKeyboardButton("🍪 Upload Cookies", callback_data='c')],
-            [InlineKeyboardButton(f"🍪 {'✅' if has else '❌'} (RAM only)", callback_data='cs'),
+            [InlineKeyboardButton(f"🍪 {'✅' if has else '❌'}", callback_data='cs'),
              InlineKeyboardButton(f"📦 {vc} files", callback_data='vc')],
         ])
     
@@ -389,14 +440,14 @@ class YouTubeDownloaderBot:
             "🎥 *YouTube Downloader Bot*\n\n"
             "💡 Send YouTube link → Choose format → Download!\n"
             f"🗑️ Files deleted after {self.config.STORAGE_DAYS}d.\n\n"
-            "🔒 *Privacy:* Cookies stored in RAM only.\n"
-            "Lost on bot restart/update. No disk storage.",
+            "🔒 *Cookies:* Content in RAM, file_id on disk.\n"
+            "Auto-restores after restart.",
             parse_mode=ParseMode.MARKDOWN, reply_markup=self._menu(u.effective_user.id))
     
     async def help_cmd(self, u, c):
         await u.message.reply_text(
             "📚 Send YouTube link to download.\n/cookies /recent\n\n"
-            "🔒 Cookies in RAM - re-upload after bot restart.",
+            "🔒 Cookies auto-restore after restart.",
             parse_mode=ParseMode.MARKDOWN, reply_markup=self._menu(u.effective_user.id))
     
     async def recent_cmd(self, u, c): await self._show_recent(u, c)
@@ -410,12 +461,18 @@ class YouTubeDownloaderBot:
         if not self._ok(uid): return
         url = self._extract_url(u.message.text)
         if not url: return
-        if not self._has_cookies(uid):
-            await u.message.reply_text(
-                "❌ Upload cookies first!\n\n"
-                "🔒 Cookies are stored in RAM only.\n"
-                "You'll need to re-upload after bot restarts.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🍪 Upload Cookies", callback_data='c')]]))
+        
+        # Try to load cookies from Telegram if not in RAM
+        if not await self._ensure_cookies(uid):
+            if uid in self._cookie_file_ids:
+                await u.message.reply_text(
+                    "⚠️ Failed to restore cookies.\n"
+                    "Please re-upload with /cookies",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🍪 Upload Cookies", callback_data='c')]]))
+            else:
+                await u.message.reply_text(
+                    "❌ Upload cookies first! /cookies",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🍪 Upload Cookies", callback_data='c')]]))
             return
         
         video_id = self._extract_video_id(url)
@@ -609,11 +666,10 @@ class YouTubeDownloaderBot:
         if not self._ok(u.effective_user.id): return ConversationHandler.END
         msg = u.callback_query.message if u.callback_query else u.message
         await msg.reply_text(
-            "🔒 *Cookie Privacy Notice*\n\n"
-            "• Cookies stored in RAM only\n"
-            "• Never written to disk\n"
-            "• Lost on bot restart/update\n"
-            "• You must re-upload after each update\n\n"
+            "🔒 *Cookie Info*\n\n"
+            "• Cookie content: RAM only\n"
+            "• File ID saved: auto-restore after restart\n"
+            "• Telegram stores the file\n\n"
             "📤 Send your cookies.txt file:",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Cancel", callback_data='b')]]))
@@ -626,21 +682,28 @@ class YouTubeDownloaderBot:
             await u.message.reply_text("❌ Send .txt file.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Cancel", callback_data='b')]]))
             return WAITING_FOR_COOKIES
         try:
-            f = await c.bot.get_file(u.message.document.file_id)
-            # Download to bytes in memory
+            doc = u.message.document
+            
+            # Store Telegram file_id on disk for auto-restore
+            self._cookie_file_ids[uid] = doc.file_id
+            
+            # Download content to RAM
+            f = await c.bot.get_file(doc.file_id)
             cookie_bytes = await f.download_as_bytearray()
             self._cookie_data[uid] = bytes(cookie_bytes)
             
-            # Clean up old temp file if exists
+            # Clean old temp file
             if uid in self._cookie_tmpfiles:
                 try: os.unlink(self._cookie_tmpfiles[uid])
                 except: pass
                 del self._cookie_tmpfiles[uid]
             
+            self._save()
+            
             await u.message.reply_text(
-                "✅ Cookies loaded in RAM!\n\n"
-                "🔒 *Not saved to disk.*\n"
-                "Will be lost on bot restart.",
+                "✅ Cookies saved!\n\n"
+                "🔒 Content in RAM, auto-restore enabled.\n"
+                "Survives bot restarts.",
                 parse_mode=ParseMode.MARKDOWN, reply_markup=self._menu(uid))
             return ConversationHandler.END
         except Exception as e:
@@ -656,7 +719,7 @@ class YouTubeDownloaderBot:
             'r': lambda: self._show_recent(u, c),
             'c': lambda: self._ask_cookies(u, c),
             'cs': lambda: q.message.reply_text(
-                "✅ Cookies in RAM" if self._has_cookies(uid) else "❌ Upload with /cookies\n🔒 RAM only - lost on restart"),
+                "✅ Cookies ready" if self._has_cookies(uid) else "❌ Upload with /cookies"),
             'vc': lambda: q.message.reply_text(f"📦 {len(self.videos.get(uid,[]))} files"),
         }
         
@@ -674,6 +737,7 @@ class YouTubeDownloaderBot:
     
     def run(self):
         app = Application.builder().token(self.config.BOT_TOKEN).build()
+        self._bot = app.bot  # Store bot reference for cookie re-download
         
         app.add_handler(CommandHandler('start', self.start_cmd))
         app.add_handler(CommandHandler('help', self.help_cmd))
@@ -691,7 +755,7 @@ class YouTubeDownloaderBot:
         loop = asyncio.get_event_loop()
         loop.create_task(self._start_file_server())
         
-        logger.info("Bot starting (cookies in RAM only)...")
+        logger.info("Bot starting (cookies: file_id on disk, content in RAM)...")
         app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':

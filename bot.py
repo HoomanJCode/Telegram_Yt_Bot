@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 YouTube Downloader Telegram Bot
-Async file server with aiohttp, non-blocking downloads via thread pool
+Cookies held in RAM only - never written to disk
 """
 
 import os
@@ -14,6 +14,7 @@ import re
 import threading
 import subprocess
 import asyncio
+import tempfile
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List
@@ -49,7 +50,6 @@ logger.propagate = False
 # Constants
 # ---------------------------------------------------------------------------
 DATA_DIR = Path('data')
-COOKIES_DIR = DATA_DIR / 'cookies'
 DOWNLOADS_DIR = Path('downloads')
 WAITING_FOR_COOKIES = 1
 YOUTUBE_RE = re.compile(r'(https?://)?(www\.)?(youtube\.com|youtu\.be)/\S+')
@@ -62,19 +62,7 @@ class FileServer:
         self.port = port
         self.app = web.Application()
         self.app.router.add_get('/{filename}', self._handle_download)
-        self.app.router.add_get('/', self._handle_index)
         self._runner = None
-    
-    async def _handle_index(self, request):
-        files = []
-        for f in sorted(DOWNLOADS_DIR.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
-            if f.is_file():
-                files.append({
-                    'name': f.name,
-                    'size': f.stat().st_size,
-                    'mtime': datetime.fromtimestamp(f.stat().st_mtime).isoformat()
-                })
-        return web.json_response({'files': files[:50]})
     
     async def _handle_download(self, request):
         filename = request.match_info['filename']
@@ -83,14 +71,12 @@ class FileServer:
         if not filepath.exists() or not filepath.is_file():
             raise web.HTTPNotFound()
         
-        # Stream file with large chunks
         response = web.StreamResponse()
         response.headers['Content-Type'] = self._get_mime(filepath.suffix)
         response.headers['Content-Length'] = str(filepath.stat().st_size)
         response.headers['Cache-Control'] = 'public, max-age=86400'
         response.headers['Accept-Ranges'] = 'bytes'
         
-        # Handle Range requests for resumable downloads
         range_header = request.headers.get('Range', '')
         if range_header.startswith('bytes='):
             try:
@@ -112,11 +98,10 @@ class FileServer:
             with open(filepath, 'rb') as f:
                 f.seek(start)
                 remaining = end - start + 1
-                chunk_size = 1024 * 1024  # 1MB chunks
+                chunk_size = 1024 * 1024
                 while remaining > 0:
                     chunk = f.read(min(chunk_size, remaining))
-                    if not chunk:
-                        break
+                    if not chunk: break
                     await response.write(chunk)
                     remaining -= len(chunk)
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
@@ -137,7 +122,7 @@ class FileServer:
         await self._runner.setup()
         site = web.TCPSite(self._runner, '0.0.0.0', self.port)
         await site.start()
-        logger.info("File server on port %d (aiohttp)", self.port)
+        logger.info("File server on port %d", self.port)
     
     async def stop(self):
         if self._runner:
@@ -178,10 +163,14 @@ class YouTubeDownloaderBot:
         try: port = int(self.base_url.split(':')[-1]) if ':' in self.base_url.split('/')[2] else 8000
         except: port = 8000
         
-        for d in (DATA_DIR, COOKIES_DIR, DOWNLOADS_DIR):
+        for d in (DATA_DIR, DOWNLOADS_DIR):
             d.mkdir(parents=True, exist_ok=True)
         
-        self.cookies: Dict[int, Path] = {}
+        # Cookies stored IN MEMORY ONLY - never written to disk
+        # Dict of user_id -> temp file path (in /tmp, cleared on reboot)
+        self._cookie_data: Dict[int, bytes] = {}  # user_id -> cookie file content
+        self._cookie_tmpfiles: Dict[int, str] = {}  # user_id -> temp file path
+        
         self.videos: Dict[int, List[VideoRecord]] = {}
         self._pending_urls: Dict[int, tuple] = {}
         self._download_tasks: Dict[int, asyncio.Task] = {}
@@ -200,29 +189,23 @@ class YouTubeDownloaderBot:
             return False
     
     def _load(self):
-        for name, fn, attr in [
-            ('cookies', 'user_cookies.json', self.cookies),
-            ('videos', 'user_videos.json', self.videos),
-        ]:
-            try:
-                fp = DATA_DIR / fn
-                if fp.exists():
-                    data = json.loads(fp.read_text())
-                    if name == 'videos':
-                        attr.update({int(k): [VideoRecord.from_dict(v) for v in vs] for k, vs in data.items()})
-                    else:
-                        attr.update({int(k): v for k, v in data.items()})
-            except Exception as e:
-                logger.error("Load %s: %s", name, e)
+        """Load video records only (cookies are in-memory only)"""
+        try:
+            fp = DATA_DIR / 'user_videos.json'
+            if fp.exists():
+                data = json.loads(fp.read_text())
+                self.videos = {int(k): [VideoRecord.from_dict(v) for v in vs] for k, vs in data.items()}
+                logger.info("Loaded videos: %d users", len(self.videos))
+        except Exception as e:
+            logger.error("Load videos: %s", e)
     
     def _save(self):
-        data = {
-            DATA_DIR / 'user_cookies.json': {str(k): str(v) for k, v in self.cookies.items()},
-            DATA_DIR / 'user_videos.json': {str(k): [v.to_dict() for v in vs] for k, vs in self.videos.items()},
-        }
-        for fp, d in data.items():
-            try: fp.write_text(json.dumps(d, indent=2))
-            except Exception as e: logger.error("Save %s: %s", fp.name, e)
+        """Save video records only (cookies never saved to disk)"""
+        try:
+            fp = DATA_DIR / 'user_videos.json'
+            fp.write_text(json.dumps({str(k): [v.to_dict() for v in vs] for k, vs in self.videos.items()}, indent=2))
+        except Exception as e:
+            logger.error("Save videos: %s", e)
     
     def _start_cleanup(self):
         def w():
@@ -242,7 +225,18 @@ class YouTubeDownloaderBot:
             if not self.videos[uid]: del self.videos[uid]
         self._save()
     
-    def _cookie_path(self, uid): return COOKIES_DIR / f'{uid}.txt'
+    def _has_cookies(self, uid): return uid in self._cookie_data
+    
+    def _get_cookie_file(self, uid):
+        """Get or create temp file for cookies"""
+        if uid not in self._cookie_tmpfiles or not os.path.exists(self._cookie_tmpfiles[uid]):
+            # Create temp file with cookie content
+            tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
+            tmp.write(self._cookie_data[uid].decode('utf-8', errors='replace'))
+            tmp.close()
+            self._cookie_tmpfiles[uid] = tmp.name
+        return self._cookie_tmpfiles[uid]
+    
     def _ok(self, uid): return not self.config.get_whitelist() or uid in self.config.get_whitelist()
     
     def _extract_url(self, text):
@@ -279,12 +273,12 @@ class YouTubeDownloaderBot:
         return text
     
     def _menu(self, uid):
-        has = uid in self.cookies
+        has = self._has_cookies(uid)
         vc = len(self.videos.get(uid, []))
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("📹 Recent Downloads", callback_data='r')],
             [InlineKeyboardButton("🍪 Upload Cookies", callback_data='c')],
-            [InlineKeyboardButton(f"🍪 {'✅' if has else '❌'}", callback_data='cs'),
+            [InlineKeyboardButton(f"🍪 {'✅' if has else '❌'} (RAM only)", callback_data='cs'),
              InlineKeyboardButton(f"📦 {vc} files", callback_data='vc')],
         ])
     
@@ -314,10 +308,10 @@ class YouTubeDownloaderBot:
             [InlineKeyboardButton("🔙 Back to formats", callback_data=f'backfmt_{idx_str}')],
         ])
     
-    # --- Sync helpers (run in executor) ---
+    # --- Sync helpers ---
     def _sync_fetch_info(self, uid, url):
         opts = {
-            'format': 'best', 'cookiefile': str(self.cookies[uid]),
+            'format': 'best', 'cookiefile': self._get_cookie_file(uid),
             'quiet': True, 'no_warnings': True, 'socket_timeout': 30, 'retries': 3,
         }
         with yt_dlp.YoutubeDL(opts) as ydl:
@@ -325,30 +319,25 @@ class YouTubeDownloaderBot:
     
     def _sync_download(self, uid, url, media_type):
         base_opts = {
-            'cookiefile': str(self.cookies[uid]),
+            'cookiefile': self._get_cookie_file(uid),
             'quiet': True, 'no_warnings': True,
             'socket_timeout': 120, 'retries': 50, 'fragment_retries': 50,
-            'concurrent_fragment_downloads': 8,
-            'no_mtime': True,
+            'concurrent_fragment_downloads': 8, 'no_mtime': True,
         }
         
         if media_type == 'video':
             opts = {**base_opts, 'format': 'best[ext=mp4]/best',
-                    'outtmpl': str(DOWNLOADS_DIR / '%(id)s_v.%(ext)s'),
-                    'merge_output_format': 'mp4'}
+                    'outtmpl': str(DOWNLOADS_DIR / '%(id)s_v.%(ext)s'), 'merge_output_format': 'mp4'}
         else:
             opts = {**base_opts, 'format': 'bestaudio[ext=m4a]/bestaudio',
                     'outtmpl': str(DOWNLOADS_DIR / '%(id)s_a.%(ext)s')}
             if self.has_ffmpeg:
-                opts['postprocessors'] = [{'key': 'FFmpegExtractAudio', 
-                    'preferredcodec': 'mp3', 'preferredquality': '192'}]
+                opts['postprocessors'] = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}]
         
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            title = info.get('title', 'Unknown')
-            vid = info.get('id', '')
+            title, vid = info.get('title', 'Unknown'), info.get('id', '')
             fp = ydl.prepare_filename(info)
-            
             if media_type == 'audio' and self.has_ffmpeg:
                 fp = str(Path(fp).with_suffix('.mp3'))
             
@@ -358,17 +347,15 @@ class YouTubeDownloaderBot:
                 for ext in ('.mp4', '.mp3', '.m4a', '.webm', '.mkv', '.opus'):
                     alt = DOWNLOADS_DIR / f'{Path(fp).stem}{ext}'
                     if alt.exists(): found = str(alt); break
-            
             if not found:
                 for f in DOWNLOADS_DIR.iterdir():
                     if f.is_file() and f.stem.startswith(vid): found = str(f); break
-            
             if not found: raise FileNotFoundError(title)
             return found, title, vid
     
     def _sync_download_thumb(self, uid, url):
         opts = {
-            'cookiefile': str(self.cookies[uid]),
+            'cookiefile': self._get_cookie_file(uid),
             'quiet': True, 'no_warnings': True,
             'socket_timeout': 30, 'retries': 3,
             'skip_download': True, 'writethumbnail': True,
@@ -376,15 +363,13 @@ class YouTubeDownloaderBot:
         }
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
-            title = info.get('title', 'Unknown')
-            vid = info.get('id', '')
+            title, vid = info.get('title', 'Unknown'), info.get('id', '')
             ydl.download([url])
             
             found = None
             for ext in ('.jpg', '.webp', '.png'):
                 fp = DOWNLOADS_DIR / f'{vid}_thumb{ext}'
                 if fp.exists(): found = str(fp); break
-            
             if not found:
                 for t in info.get('thumbnails', []):
                     if t.get('url'):
@@ -393,22 +378,25 @@ class YouTubeDownloaderBot:
                         fp = DOWNLOADS_DIR / f'{vid}_thumb.{ext}'
                         urllib.request.urlretrieve(t['url'], str(fp))
                         found = str(fp); break
-            
             if not found: raise FileNotFoundError("No thumbnail")
             return found, title, vid
     
-    # --- Async handlers ---
+    # --- Commands ---
     async def start_cmd(self, u, c):
         if not self._ok(u.effective_user.id): return
         await u.message.reply_text(
             f"👋 Welcome {u.effective_user.first_name}!\n\n"
             "🎥 *YouTube Downloader Bot*\n\n"
             "💡 Send YouTube link → Choose format → Download!\n"
-            f"🗑️ Files deleted after {self.config.STORAGE_DAYS}d.",
+            f"🗑️ Files deleted after {self.config.STORAGE_DAYS}d.\n\n"
+            "🔒 *Privacy:* Cookies stored in RAM only.\n"
+            "Lost on bot restart/update. No disk storage.",
             parse_mode=ParseMode.MARKDOWN, reply_markup=self._menu(u.effective_user.id))
     
     async def help_cmd(self, u, c):
-        await u.message.reply_text("📚 Send YouTube link to download.\n/cookies /recent",
+        await u.message.reply_text(
+            "📚 Send YouTube link to download.\n/cookies /recent\n\n"
+            "🔒 Cookies in RAM - re-upload after bot restart.",
             parse_mode=ParseMode.MARKDOWN, reply_markup=self._menu(u.effective_user.id))
     
     async def recent_cmd(self, u, c): await self._show_recent(u, c)
@@ -422,9 +410,12 @@ class YouTubeDownloaderBot:
         if not self._ok(uid): return
         url = self._extract_url(u.message.text)
         if not url: return
-        if uid not in self.cookies:
-            await u.message.reply_text("❌ Upload cookies first! /cookies",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🍪 Upload", callback_data='c')]]))
+        if not self._has_cookies(uid):
+            await u.message.reply_text(
+                "❌ Upload cookies first!\n\n"
+                "🔒 Cookies are stored in RAM only.\n"
+                "You'll need to re-upload after bot restarts.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🍪 Upload Cookies", callback_data='c')]]))
             return
         
         video_id = self._extract_video_id(url)
@@ -465,13 +456,10 @@ class YouTubeDownloaderBot:
                     await q.answer("Already downloaded!")
                     await self._show_delivery(q.message, existing, self.videos[uid].index(existing))
                     return
-                
-                # Start download in background task - non-blocking
                 task = asyncio.create_task(self._download_task(uid, url, q.message, media_type))
                 self._download_tasks[uid] = task
     
     async def _download_task(self, uid, url, msg, media_type):
-        """Background download task"""
         s = await msg.reply_text(f"⏳ Downloading {media_type}...")
         try:
             if media_type == 'thumb':
@@ -522,7 +510,12 @@ class YouTubeDownloaderBot:
         
         if record.telegram_file_id:
             try:
-                await self._resend_by_id(q, record)
+                if record.media_type == 'thumb':
+                    await q.message.reply_photo(photo=record.telegram_file_id, caption=f"🖼️ {record.title}")
+                elif record.media_type == 'audio':
+                    await q.message.reply_audio(audio=record.telegram_file_id, title=record.title)
+                else:
+                    await q.message.reply_video(video=record.telegram_file_id, caption=f"🎬 {record.title}", supports_streaming=True)
                 await q.message.delete(); return
             except: record.telegram_file_id = None; self._save()
         
@@ -550,14 +543,6 @@ class YouTubeDownloaderBot:
         except Exception as e:
             logger.error("Upload %d: %s", uid, str(e)[:50])
             await s.edit_text("❌ Upload failed.")
-    
-    async def _resend_by_id(self, q, record):
-        if record.media_type == 'thumb':
-            await q.message.reply_photo(photo=record.telegram_file_id, caption=f"🖼️ {record.title}")
-        elif record.media_type == 'audio':
-            await q.message.reply_audio(audio=record.telegram_file_id, title=record.title)
-        else:
-            await q.message.reply_video(video=record.telegram_file_id, caption=f"🎬 {record.title}", supports_streaming=True)
     
     async def _send_link(self, u, c):
         q = u.callback_query; await q.answer()
@@ -623,7 +608,14 @@ class YouTubeDownloaderBot:
     async def _ask_cookies(self, u, c):
         if not self._ok(u.effective_user.id): return ConversationHandler.END
         msg = u.callback_query.message if u.callback_query else u.message
-        await msg.reply_text("⚠️ Send cookies.txt file.", parse_mode=ParseMode.MARKDOWN,
+        await msg.reply_text(
+            "🔒 *Cookie Privacy Notice*\n\n"
+            "• Cookies stored in RAM only\n"
+            "• Never written to disk\n"
+            "• Lost on bot restart/update\n"
+            "• You must re-upload after each update\n\n"
+            "📤 Send your cookies.txt file:",
+            parse_mode=ParseMode.MARKDOWN,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Cancel", callback_data='b')]]))
         return WAITING_FOR_COOKIES
     
@@ -635,9 +627,21 @@ class YouTubeDownloaderBot:
             return WAITING_FOR_COOKIES
         try:
             f = await c.bot.get_file(u.message.document.file_id)
-            await f.download_to_drive(str(self._cookie_path(uid)))
-            self.cookies[uid] = self._cookie_path(uid); self._save()
-            await u.message.reply_text("✅ Cookies saved!", reply_markup=self._menu(uid))
+            # Download to bytes in memory
+            cookie_bytes = await f.download_as_bytearray()
+            self._cookie_data[uid] = bytes(cookie_bytes)
+            
+            # Clean up old temp file if exists
+            if uid in self._cookie_tmpfiles:
+                try: os.unlink(self._cookie_tmpfiles[uid])
+                except: pass
+                del self._cookie_tmpfiles[uid]
+            
+            await u.message.reply_text(
+                "✅ Cookies loaded in RAM!\n\n"
+                "🔒 *Not saved to disk.*\n"
+                "Will be lost on bot restart.",
+                parse_mode=ParseMode.MARKDOWN, reply_markup=self._menu(uid))
             return ConversationHandler.END
         except Exception as e:
             logger.error("Cookie %d: %s", uid, e)
@@ -651,7 +655,8 @@ class YouTubeDownloaderBot:
             'b': lambda: q.message.reply_text("📋 Menu:", reply_markup=self._menu(uid)),
             'r': lambda: self._show_recent(u, c),
             'c': lambda: self._ask_cookies(u, c),
-            'cs': lambda: q.message.reply_text("✅ Ready!" if uid in self.cookies else "❌ Use /cookies"),
+            'cs': lambda: q.message.reply_text(
+                "✅ Cookies in RAM" if self._has_cookies(uid) else "❌ Upload with /cookies\n🔒 RAM only - lost on restart"),
             'vc': lambda: q.message.reply_text(f"📦 {len(self.videos.get(uid,[]))} files"),
         }
         
@@ -664,7 +669,6 @@ class YouTubeDownloaderBot:
         elif d.startswith('d_'): await self._delete_video(u, c)
         elif d.startswith('p_'): await self._show_recent(u, c, int(d.split('_')[1]))
     
-    # --- Run ---
     async def _start_file_server(self):
         await self.file_server.start()
     
@@ -684,11 +688,10 @@ class YouTubeDownloaderBot:
         app.add_handler(CallbackQueryHandler(self._router))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_msg))
         
-        # Start file server alongside bot
         loop = asyncio.get_event_loop()
         loop.create_task(self._start_file_server())
         
-        logger.info("Bot starting with aiohttp file server...")
+        logger.info("Bot starting (cookies in RAM only)...")
         app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':

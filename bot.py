@@ -691,27 +691,32 @@ class YouTubeDownloaderBot:
             return WAITING_FOR_COOKIES
         try:
             doc = u.message.document
-            self._cookie_file_ids[uid] = doc.file_id
             
+            # Download content to RAM first
             f = await c.bot.get_file(doc.file_id)
             cookie_bytes = await f.download_as_bytearray()
             self._cookie_data[uid] = bytes(cookie_bytes)
             
+            # Store file_id on disk after successful download
+            self._cookie_file_ids[uid] = doc.file_id
+            self._save()
+            
+            # Clean old temp file
             if uid in self._cookie_tmpfiles:
                 try: os.unlink(self._cookie_tmpfiles[uid])
                 except: pass
                 del self._cookie_tmpfiles[uid]
             
-            self._save()
-            
+            logger.info("User %d cookies saved to RAM", uid)
             await u.message.reply_text(
-                f"✅ Cookies saved!\n\n"
-                f"🔒 Content in RAM, auto-restore enabled.\n"
-                f"Survives bot restarts.",
+                "✅ Cookies saved!\n\n"
+                "🔒 Content in RAM, auto-restore enabled.\n"
+                "Survives bot restarts.",
                 reply_markup=self._menu(uid))
             return ConversationHandler.END
         except Exception as e:
             logger.error("Cookie %d: %s", uid, e)
+            await u.message.reply_text("❌ Failed to save cookies.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Cancel", callback_data='b')]]))
             return WAITING_FOR_COOKIES
     
     async def _router(self, u, c):

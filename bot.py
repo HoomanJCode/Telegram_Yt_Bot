@@ -485,7 +485,8 @@ class YouTubeDownloaderBot:
     async def _send_telegram(self, u, c):
         q = u.callback_query; await q.answer(); uid = u.effective_user.id; data = q.data
         record = self.videos[uid][0] if 'new' in data else self.videos.get(uid, [None])[int(data.split('_')[1])]
-        if not record: return        if record.telegram_file_id:
+        if not record: return
+        if record.telegram_file_id:
             try:
                 if record.media_type == 'thumb': await q.message.reply_photo(photo=record.telegram_file_id, caption=f"🖼️ {record.title}")
                 elif record.media_type == 'audio': await q.message.reply_audio(audio=record.telegram_file_id, title=record.title)
@@ -503,7 +504,7 @@ class YouTubeDownloaderBot:
                 else: sent = await q.message.reply_video(video=f, caption=f"🎬 {record.title}", supports_streaming=True); record.telegram_file_id = sent.video.file_id
             self._save(); await s.delete(); await q.message.delete()
         except Exception as e: logger.error("Upload %d: %s", uid, str(e)[:50]); await s.edit_text("❌ Upload failed.")
-
+        
     async def _send_link(self, u, c):
         q = u.callback_query; await q.answer(); uid = u.effective_user.id; data = q.data
         record = self.videos[uid][0] if 'new' in data else self.videos.get(uid, [None])[int(data.split('_')[1])]

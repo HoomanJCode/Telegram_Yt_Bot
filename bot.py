@@ -186,6 +186,13 @@ class YouTubeDownloaderBot:
         except:
             return False
     
+    def _is_cookie_expired(self, uid):
+        if self.config.COOKIE_TTL_HOURS == 0:
+            return False
+        last_used = self._cookie_last_used.get(uid, 0)
+        ttl_seconds = self.config.COOKIE_TTL_HOURS * 3600
+        return time.time() - last_used >= ttl_seconds
+    
     def _load(self):
         try:
             fp = DATA_DIR / 'user_videos.json'
@@ -258,26 +265,22 @@ class YouTubeDownloaderBot:
             self.videos[uid] = [v for v in self.videos[uid] if Path(v.file_path).exists()]
             if not self.videos[uid]: del self.videos[uid]
         
-        ttl_seconds = self.config.COOKIE_TTL_HOURS * 3600
-        now = time.time()
-        expired = [uid for uid, ts in self._cookie_last_used.items() if now - ts >= ttl_seconds]
-        for uid in expired:
-            self._cookie_data.pop(uid, None)
-            self._cookie_last_used.pop(uid, None)
-            if uid in self._cookie_tmpfiles:
-                try: os.unlink(self._cookie_tmpfiles[uid])
-                except: pass
-                del self._cookie_tmpfiles[uid]
+        if self.config.COOKIE_TTL_HOURS > 0:
+            now = time.time()
+            expired = [uid for uid in self._cookie_last_used if self._is_cookie_expired(uid)]
+            for uid in expired:
+                self._cookie_data.pop(uid, None)
+                self._cookie_last_used.pop(uid, None)
+                if uid in self._cookie_tmpfiles:
+                    try: os.unlink(self._cookie_tmpfiles[uid])
+                    except: pass
+                    del self._cookie_tmpfiles[uid]
         
         self._save()
     
     def _has_cookies(self, uid):
         if uid in self._cookie_data:
-            last_used = self._cookie_last_used.get(uid, 0)
-            ttl_seconds = self.config.COOKIE_TTL_HOURS * 3600
-            if time.time() - last_used < ttl_seconds:
-                return True
-            else:
+            if self._is_cookie_expired(uid):
                 del self._cookie_data[uid]
                 self._cookie_last_used.pop(uid, None)
                 if uid in self._cookie_tmpfiles:
@@ -285,22 +288,21 @@ class YouTubeDownloaderBot:
                     except: pass
                     del self._cookie_tmpfiles[uid]
                 return False
+            return True
         return uid in self._cookie_file_ids
     
     async def _ensure_cookies(self, uid: int) -> bool:
         if uid in self._cookie_data:
-            last_used = self._cookie_last_used.get(uid, 0)
-            ttl_seconds = self.config.COOKIE_TTL_HOURS * 3600
-            if time.time() - last_used < ttl_seconds:
-                self._cookie_last_used[uid] = time.time()
-                return True
-            else:
+            if self._is_cookie_expired(uid):
                 del self._cookie_data[uid]
                 self._cookie_last_used.pop(uid, None)
                 if uid in self._cookie_tmpfiles:
                     try: os.unlink(self._cookie_tmpfiles[uid])
                     except: pass
                     del self._cookie_tmpfiles[uid]
+            else:
+                self._cookie_last_used[uid] = time.time()
+                return True
         
         if uid in self._cookie_file_ids:
             success = await self._load_cookies_from_telegram(uid)
@@ -463,40 +465,43 @@ class YouTubeDownloaderBot:
     
     # --- Inline Query Handler ---
     async def _inline_query(self, u: Update, c: ContextTypes.DEFAULT_TYPE):
-        query = u.inline_query.query.strip()
-        if not query: return
-        
-        url = self._extract_url(query)
-        if not url: return
-        
-        uid = u.effective_user.id
-        if not self._ok(uid): return
-        
-        if not self._has_cookies(uid):
-            await u.inline_query.answer([], switch_pm_text="Upload cookies first", switch_pm_parameter="cookies")
-            return
-        
-        results = [
-            InlineQueryResultArticle(
-                id=str(uuid4()),
-                title="🎬 Download Video (MP4)",
-                description="Download video in MP4 format",
-                input_message_content=InputTextMessageContent(f"{url} #video"),
-            ),
-            InlineQueryResultArticle(
-                id=str(uuid4()),
-                title="🎵 Download Audio (MP3/M4A)",
-                description="Extract audio only",
-                input_message_content=InputTextMessageContent(f"{url} #audio"),
-            ),
-            InlineQueryResultArticle(
-                id=str(uuid4()),
-                title="🖼️ Download Thumbnail",
-                description="Get video thumbnail image",
-                input_message_content=InputTextMessageContent(f"{url} #thumb"),
-            ),
-        ]
-        await u.inline_query.answer(results, cache_time=0)
+        try:
+            query = u.inline_query.query.strip()
+            if not query: return
+            
+            url = self._extract_url(query)
+            if not url: return
+            
+            uid = u.effective_user.id
+            if not self._ok(uid): return
+            
+            if not self._has_cookies(uid):
+                await u.inline_query.answer([], switch_pm_text="Upload cookies first", switch_pm_parameter="cookies")
+                return
+            
+            results = [
+                InlineQueryResultArticle(
+                    id=str(uuid4()),
+                    title="🎬 Download Video (MP4)",
+                    description="Download video in MP4 format",
+                    input_message_content=InputTextMessageContent(f"{url} #video"),
+                ),
+                InlineQueryResultArticle(
+                    id=str(uuid4()),
+                    title="🎵 Download Audio (MP3/M4A)",
+                    description="Extract audio only",
+                    input_message_content=InputTextMessageContent(f"{url} #audio"),
+                ),
+                InlineQueryResultArticle(
+                    id=str(uuid4()),
+                    title="🖼️ Download Thumbnail",
+                    description="Get video thumbnail image",
+                    input_message_content=InputTextMessageContent(f"{url} #thumb"),
+                ),
+            ]
+            await u.inline_query.answer(results, cache_time=0)
+        except Exception as e:
+            logger.warning("Inline query error: %s", str(e)[:50])
     
     # --- Commands ---
     async def start_cmd(self, u, c):
@@ -792,12 +797,13 @@ class YouTubeDownloaderBot:
     async def _ask_cookies(self, u, c):
         if not self._ok(u.effective_user.id): return ConversationHandler.END
         msg = u.callback_query.message if u.callback_query else u.message
+        ttl_text = f"• TTL: {self.config.COOKIE_TTL_HOURS}h in RAM" if self.config.COOKIE_TTL_HOURS > 0 else "• TTL: Until restart"
         await msg.reply_text(
             f"🔒 Cookie Info\n\n"
             f"• Cookie content: RAM only\n"
             f"• File ID saved: auto-restore after restart\n"
             f"• Telegram stores the file\n"
-            f"• TTL: {self.config.COOKIE_TTL_HOURS}h in RAM\n\n"
+            f"{ttl_text}\n\n"
             f"📤 Send your cookies.txt file:",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Cancel", callback_data='b')]]))
         return WAITING_FOR_COOKIES
@@ -823,10 +829,11 @@ class YouTubeDownloaderBot:
                 del self._cookie_tmpfiles[uid]
             
             logger.info("User %d cookies saved", uid)
+            ttl_text = f"⏱ TTL: {self.config.COOKIE_TTL_HOURS}h" if self.config.COOKIE_TTL_HOURS > 0 else "⏱ TTL: Until restart"
             await u.message.reply_text(
                 f"✅ Cookies saved!\n\n"
                 f"🔒 Content in RAM, auto-restore enabled.\n"
-                f"⏱ TTL: {self.config.COOKIE_TTL_HOURS}h\n"
+                f"{ttl_text}\n"
                 f"Survives bot restarts.",
                 reply_markup=self._menu(uid))
             return ConversationHandler.END
@@ -839,12 +846,17 @@ class YouTubeDownloaderBot:
         q = u.callback_query; await q.answer()
         d, uid = q.data, u.effective_user.id
         
+        if self.config.COOKIE_TTL_HOURS > 0:
+            ttl_info = f"TTL: {self.config.COOKIE_TTL_HOURS}h"
+        else:
+            ttl_info = "Until restart"
+        
         routes = {
             'b': lambda: q.message.reply_text("📋 Menu:", reply_markup=self._menu(uid)),
             'r': lambda: self._show_recent(u, c),
             'c': lambda: self._ask_cookies(u, c),
             'cs': lambda: q.message.reply_text(
-                f"✅ Cookies active (TTL: {self.config.COOKIE_TTL_HOURS}h)" if self._has_cookies(uid) 
+                f"✅ Cookies active ({ttl_info})" if self._has_cookies(uid) 
                 else "❌ Upload with /cookies"),
             'vc': lambda: q.message.reply_text(f"📦 {len(self.videos.get(uid,[]))} files"),
             'clear_all': lambda: self._clear_all(u, c),
@@ -883,7 +895,7 @@ class YouTubeDownloaderBot:
         loop = asyncio.get_event_loop()
         loop.create_task(self._start_file_server())
         
-        logger.info("Bot starting (inline mode, cookie TTL %dh)...", self.config.COOKIE_TTL_HOURS)
+        logger.info("Bot starting...")
         app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':

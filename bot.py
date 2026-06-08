@@ -171,7 +171,7 @@ class YouTubeDownloaderBot:
         
         self.videos: Dict[int, List[VideoRecord]] = {}
         self._pending_urls: Dict[int, tuple] = {}
-        self._download_tasks: Dict[int, asyncio.Task] = {}
+        self._download_tasks: Dict[int, list] = {}
         
         self.has_ffmpeg = self._check_ffmpeg()
         self.file_server = FileServer(port=port)
@@ -258,7 +258,6 @@ class YouTubeDownloaderBot:
             self.videos[uid] = [v for v in self.videos[uid] if Path(v.file_path).exists()]
             if not self.videos[uid]: del self.videos[uid]
         
-        # Clean expired cookies from RAM
         ttl_seconds = self.config.COOKIE_TTL_HOURS * 3600
         now = time.time()
         expired = [uid for uid, ts in self._cookie_last_used.items() if now - ts >= ttl_seconds]
@@ -473,7 +472,6 @@ class YouTubeDownloaderBot:
         uid = u.effective_user.id
         if not self._ok(uid): return
         
-        # Check if cookies exist
         if not self._has_cookies(uid):
             await u.inline_query.answer([], switch_pm_text="Upload cookies first", switch_pm_parameter="cookies")
             return
@@ -532,7 +530,6 @@ class YouTubeDownloaderBot:
         if not self._ok(uid): return
         text = u.message.text
         
-        # Check for inline hashtags
         media_type = None
         if text.endswith(' #video'):
             media_type = 'video'
@@ -556,13 +553,14 @@ class YouTubeDownloaderBot:
             await u.message.reply_text("❌ Invalid URL."); return
         
         if media_type:
-            # Skip format choice, start download directly
             existing = self._find_existing(uid, video_id, media_type)
             if existing:
                 await self._show_delivery(u.message, existing, self.videos[uid].index(existing))
             else:
                 task = asyncio.create_task(self._download_task(uid, url, u.message, media_type))
-                self._download_tasks[uid] = task
+                if uid not in self._download_tasks:
+                    self._download_tasks[uid] = []
+                self._download_tasks[uid].append(task)
         else:
             await self._show_format_choice(uid, url, video_id, u.message)
     
@@ -603,7 +601,9 @@ class YouTubeDownloaderBot:
                     await self._show_delivery(q.message, existing, self.videos[uid].index(existing))
                     return
                 task = asyncio.create_task(self._download_task(uid, url, q.message, media_type))
-                self._download_tasks[uid] = task
+                if uid not in self._download_tasks:
+                    self._download_tasks[uid] = []
+                self._download_tasks[uid].append(task)
     
     async def _download_task(self, uid, url, msg, media_type):
         s = await msg.reply_text(f"⏳ Downloading {media_type}...")
@@ -626,7 +626,10 @@ class YouTubeDownloaderBot:
             logger.error("Download %d: %s", uid, str(e)[:100])
             await s.edit_text("❌ Failed.", reply_markup=self._menu(uid))
         finally:
-            self._download_tasks.pop(uid, None)
+            if uid in self._download_tasks:
+                self._download_tasks[uid] = [t for t in self._download_tasks[uid] if not t.done()]
+                if not self._download_tasks[uid]:
+                    del self._download_tasks[uid]
     
     async def _back_to_formats(self, u, c):
         q = u.callback_query; await q.answer()
@@ -748,7 +751,6 @@ class YouTubeDownloaderBot:
                 idx = page*pp + (i-page*pp-1)
                 kb.append([InlineKeyboardButton(f"{emoji_map.get(v.media_type,'📹')} {i}. {v.title[:40]}", callback_data=f'sel_{idx}')])
         
-        # Clear All button
         kb.append([InlineKeyboardButton("🗑️ Clear All Files", callback_data='clear_all')])
         
         nav = []
@@ -762,11 +764,12 @@ class YouTubeDownloaderBot:
         q = u.callback_query; await q.answer()
         uid = u.effective_user.id
         videos = self.videos.get(uid, [])
+        count = len(videos)
         for v in videos:
             Path(v.file_path).unlink(missing_ok=True)
         self.videos.pop(uid, None)
         self._save()
-        await q.message.reply_text("🗑️ All files cleared.", reply_markup=self._menu(uid))
+        await q.message.reply_text(f"🗑️ {count} files cleared.", reply_markup=self._menu(uid))
     
     async def _select_video(self, u, c):
         q = u.callback_query; await q.answer()

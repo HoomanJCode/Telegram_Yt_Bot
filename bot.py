@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
 YouTube Downloader Telegram Bot
+- Inline downloads only start when user clicks a specific format
+- Cookies auto-restore from Telegram on demand
 """
 
 import os, sys, logging, json, time, shutil, re, threading, subprocess, asyncio, tempfile, secrets
@@ -107,16 +109,16 @@ class YouTubeDownloaderBot:
         try: port = int(self.base_url.split(':')[-1]) if ':' in self.base_url.split('/')[2] else 8000
         except: port = 8000
         for d in (DATA_DIR, DOWNLOADS_DIR): d.mkdir(parents=True, exist_ok=True)
-        self._cookie_file_ids: Dict[int, str] = {}
-        self._cookie_data: Dict[int, bytes] = {}
-        self._cookie_tmpfiles: Dict[int, str] = {}
+        self._cookie_file_ids: Dict[int, str] = {}     # user_id -> Telegram file_id
+        self._cookie_data: Dict[int, bytes] = {}        # user_id -> cookie content (RAM)
+        self._cookie_tmpfiles: Dict[int, str] = {}      # user_id -> temp file path
         self._bot = None; self._bot_username = None
         self.videos: Dict[int, List[VideoRecord]] = {}
         self._pending_urls: Dict[int, tuple] = {}
-        self._download_tasks: Dict[int, list] = {}
         self._nav_stack: Dict[int, List[Tuple[str, any]]] = {}
-        self._shared_requests: Dict[str, dict] = {}
+        self._shared_requests: Dict[str, dict] = {}     # request_id -> info
         self._group_admins: Dict[int, set] = {}
+        self._download_semaphore = asyncio.Semaphore(1) # only one download at a time
         self.has_ffmpeg = self._check_ffmpeg()
         self.file_server = FileServer(port=port)
         self._load()
@@ -144,6 +146,29 @@ class YouTubeDownloaderBot:
     async def _get_bot_username(self):
         if not self._bot_username and self._bot: me = await self._bot.get_me(); self._bot_username = me.username
         return self._bot_username
+
+    async def _load_cookies_from_telegram(self, uid: int) -> bool:
+        """Re-download cookies from Telegram using stored file_id"""
+        if uid not in self._cookie_file_ids or not self._bot: return False
+        try:
+            file = await self._bot.get_file(self._cookie_file_ids[uid])
+            cookie_bytes = await file.download_as_bytearray()
+            self._cookie_data[uid] = bytes(cookie_bytes)
+            if uid in self._cookie_tmpfiles:
+                try: os.unlink(self._cookie_tmpfiles[uid]); del self._cookie_tmpfiles[uid]
+                except: pass
+            logger.info("Cookies restored for user %d", uid)
+            return True
+        except Exception as e:
+            logger.warning("Cookie restore fail %d: %s", uid, str(e)[:50])
+            del self._cookie_file_ids[uid]; self._save()
+            return False
+
+    async def _ensure_cookies(self, uid: int) -> bool:
+        """Ensure cookies are in RAM, loading from Telegram if needed"""
+        if uid in self._cookie_data: return True
+        if uid in self._cookie_file_ids: return await self._load_cookies_from_telegram(uid)
+        return False
 
     def _get_cookie_file(self, uid):
         if uid not in self._cookie_tmpfiles or not os.path.exists(self._cookie_tmpfiles[uid]):
@@ -246,6 +271,7 @@ class YouTubeDownloaderBot:
             [InlineKeyboardButton("📋 Get Download Link", callback_data=f'lk_{idx_str}')],
         ])
 
+    # --- Sync download helpers (run in executor) ---
     def _sync_fetch_info(self, uid, url):
         opts = {'format': 'best', 'cookiefile': self._get_cookie_file(uid), 'quiet': True, 'no_warnings': True, 'socket_timeout': 30, 'retries': 3}
         with yt_dlp.YoutubeDL(opts) as ydl: return ydl.extract_info(url, download=False)
@@ -283,26 +309,30 @@ class YouTubeDownloaderBot:
                     fp = DOWNLOADS_DIR / f'{vid}_thumb.{ext}'; urllib.request.urlretrieve(t['url'], str(fp)); return str(fp), title, vid
             raise FileNotFoundError("No thumbnail")
 
-    # --- Shared Download ---
-    async def _process_shared_download(self, request_id: str):
-        req = self._shared_requests.get(request_id)
-        if not req: return
-        req['status'] = 'downloading'
-        uid, url, media_type = req['uid'], req['url'], req['media_type']
-        try:
-            if media_type == 'thumb': fp, title, vid = await asyncio.get_event_loop().run_in_executor(None, self._sync_download_thumb, uid, url)
-            else: fp, title, vid = await asyncio.get_event_loop().run_in_executor(None, self._sync_download, uid, url, media_type)
-            req['status'] = 'completed'; req['file_path'] = fp; req['title'] = title
-            sz = Path(fp).stat().st_size
-            record = VideoRecord(title, url, vid, fp, sz, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), media_type=media_type)
-            self.videos.setdefault(uid, []).insert(0, record)
-            while len(self.videos.get(uid, [])) > 20: old = self.videos[uid].pop(); Path(old.file_path).unlink(missing_ok=True)
-            self._save()
-        except Exception as e:
-            logger.error("Shared dl %s: %s", request_id, str(e)[:100])
-            req['status'] = 'failed'; req['error'] = str(e)[:200]
+    # --- Shared Download (called when user clicks inline button) ---
+    async def _start_shared_download(self, request_id: str):
+        """Actually perform the download, limited by semaphore"""
+        async with self._download_semaphore:
+            req = self._shared_requests.get(request_id)
+            if not req: return
+            req['status'] = 'downloading'
+            uid, url, media_type = req['uid'], req['url'], req['media_type']
+            try:
+                if media_type == 'thumb':
+                    fp, title, vid = await asyncio.get_event_loop().run_in_executor(None, self._sync_download_thumb, uid, url)
+                else:
+                    fp, title, vid = await asyncio.get_event_loop().run_in_executor(None, self._sync_download, uid, url, media_type)
+                req['status'] = 'completed'; req['file_path'] = fp; req['title'] = title
+                sz = Path(fp).stat().st_size
+                record = VideoRecord(title, url, vid, fp, sz, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), media_type=media_type)
+                self.videos.setdefault(uid, []).insert(0, record)
+                while len(self.videos.get(uid, [])) > 20: old = self.videos[uid].pop(); Path(old.file_path).unlink(missing_ok=True)
+                self._save()
+            except Exception as e:
+                logger.error("Shared dl %s: %s", request_id, str(e)[:100])
+                req['status'] = 'failed'; req['error'] = str(e)[:200]
 
-    # --- Inline Query ---
+    # --- Inline Query (no downloads started) ---
     async def _inline_query(self, u: Update, c: ContextTypes.DEFAULT_TYPE):
         try:
             query = u.inline_query.query.strip()
@@ -311,8 +341,9 @@ class YouTubeDownloaderBot:
             if not url: return
             uid = u.effective_user.id
             if not self._ok(uid): return
-            if uid not in self._cookie_data:
-                await u.inline_query.answer([], switch_pm_text="Upload cookies first", switch_pm_parameter="cookies"); return
+            if not await self._ensure_cookies(uid):
+                await u.inline_query.answer([], switch_pm_text="Upload cookies first", switch_pm_parameter="cookies")
+                return
 
             video_id = self._extract_video_id(url)
             bot_username = await self._get_bot_username()
@@ -323,6 +354,7 @@ class YouTubeDownloaderBot:
             ]:
                 existing = self._find_existing(uid, video_id, media_type)
 
+                # Already cached with file_id -> instant inline
                 if existing and existing.telegram_file_id:
                     try:
                         if media_type == 'video': results.append(InlineQueryResultCachedVideo(id=str(uuid4()), video_file_id=existing.telegram_file_id, title=existing.title, description=f"📦 {existing.file_size/1024/1024:.1f} MB"))
@@ -331,39 +363,78 @@ class YouTubeDownloaderBot:
                         continue
                     except: pass
 
+                # Cached on disk but no file_id -> start link
                 if existing and Path(existing.file_path).exists():
-                    results.append(InlineQueryResultArticle(id=str(uuid4()), title=f"{emoji} {label} - Ready", description=f"Click to receive: {existing.title[:50]}", input_message_content=InputTextMessageContent(f"{emoji} {existing.title}"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📥 Get File", url=f"https://t.me/{bot_username}?start=dl_{uid}_{video_id}_{media_type}")]])))
+                    results.append(InlineQueryResultArticle(
+                        id=str(uuid4()), title=f"{emoji} {label} - Ready",
+                        description=f"Click to receive: {existing.title[:50]}",
+                        input_message_content=InputTextMessageContent(f"{emoji} {existing.title}"),
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("📥 Get File", url=f"https://t.me/{bot_username}?start=dl_{uid}_{video_id}_{media_type}")
+                        ]])
+                    ))
                     continue
 
+                # Not cached -> create pending request (download not started yet)
                 request_id = secrets.token_hex(8)
-                self._shared_requests[request_id] = {'uid': uid, 'url': url, 'media_type': media_type, 'status': 'pending', 'file_path': None, 'title': None, 'created_at': time.time()}
-                asyncio.create_task(self._process_shared_download(request_id))
-                results.append(InlineQueryResultArticle(id=str(uuid4()), title=f"{emoji} Download {label}", description="We're preparing your file. Click to check & receive.", input_message_content=InputTextMessageContent(f"⏳ Preparing {label}...\nClick the button below to receive your file.\n🔄 Not ready? Click again in a few seconds."), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📥 Check & Receive", url=f"https://t.me/{bot_username}?start=dl_{request_id}")]])))
+                self._shared_requests[request_id] = {
+                    'uid': uid, 'url': url, 'media_type': media_type,
+                    'status': 'pending', 'file_path': None, 'title': None,
+                    'created_at': time.time()
+                }
+                results.append(InlineQueryResultArticle(
+                    id=str(uuid4()),
+                    title=f"{emoji} Download {label}",
+                    description="Click to start download & receive",
+                    input_message_content=InputTextMessageContent(
+                        f"⏳ Click the button below to start downloading {label}.\n"
+                        f"🔄 The file will be sent when ready."
+                    ),
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("📥 Start Download", url=f"https://t.me/{bot_username}?start=dl_{request_id}")
+                    ]])
+                ))
 
             await u.inline_query.answer(results, cache_time=0)
         except Exception as e: logger.warning("Inline: %s", str(e)[:100])
 
+    # --- Handle /start dl_xxx ---
     async def _handle_shared_start(self, uid, param, msg):
         bot_username = await self._get_bot_username()
         parts = param.split('_', 2)
+
+        # Direct cached: dl_OWNERUID_VIDEOID_TYPE
         if len(parts) == 3 and parts[0].isdigit():
             owner_uid, video_id, media_type = int(parts[0]), parts[1], parts[2]
             existing = self._find_existing(owner_uid, video_id, media_type)
-            if existing and Path(existing.file_path).exists(): await self._send_file_direct(msg, existing)
-            else: await msg.reply_text("❌ File expired or not found.\nPlease try again from inline mode.")
+            if existing and Path(existing.file_path).exists():
+                await self._send_file_direct(msg, existing)
+            else:
+                await msg.reply_text("❌ File expired or not found.\nPlease try again from inline mode.")
             return
 
+        # Pending request: dl_REQUESTID
         request_id = parts[0] if len(parts) == 1 else param[3:]
         req = self._shared_requests.get(request_id)
+
         if not req:
             await msg.reply_text("❌ Download request expired.\nPlease try again from inline mode."); return
+
         if req['status'] == 'pending':
-            await msg.reply_text("⏳ Download starting...", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Try Again", url=f"https://t.me/{bot_username}?start=dl_{request_id}")]]))
+            # Start the download now!
+            await msg.reply_text("⏳ Starting download...", reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔄 Check Progress", url=f"https://t.me/{bot_username}?start=dl_{request_id}")
+            ]]))
+            asyncio.create_task(self._start_shared_download(request_id))
         elif req['status'] == 'downloading':
-            await msg.reply_text("⏳ Still downloading...", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Try Again", url=f"https://t.me/{bot_username}?start=dl_{request_id}")]]))
+            await msg.reply_text("⏳ Still downloading...", reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔄 Try Again", url=f"https://t.me/{bot_username}?start=dl_{request_id}")
+            ]]))
         elif req['status'] == 'completed':
-            if req['file_path'] and Path(req['file_path']).exists(): await self._send_file_direct(msg, req)
-            else: await msg.reply_text("❌ File was deleted from server.\nPlease try again from inline mode.")
+            if req['file_path'] and Path(req['file_path']).exists():
+                await self._send_file_direct(msg, req)
+            else:
+                await msg.reply_text("❌ File was deleted from server.\nPlease try again from inline mode.")
         elif req['status'] == 'failed':
             await msg.reply_text(f"❌ Download failed.\n\nPossible reasons:\n• Video is private/age-restricted\n• Cookies expired\n• Network issue\n\nPlease try again or upload fresh cookies with /cookies")
 
@@ -391,14 +462,18 @@ class YouTubeDownloaderBot:
         self._nav_stack.pop(uid, None)
         await u.message.reply_text(await self._welcome_text(), reply_markup=self._menu(uid))
 
-    async def help_cmd(self, u, c): await u.message.reply_text("📚 Send YouTube link.\n📱 Inline: @botname <link>\n/cookies /recent", reply_markup=self._menu(u.effective_user.id))
-    async def recent_cmd(self, u, c): self._nav_stack.pop(u.effective_user.id, None); await self._show_recent(u, c)
+    async def help_cmd(self, u, c):
+        await u.message.reply_text("📚 Send YouTube link.\n📱 Inline: @botname <link>\n/cookies /recent", reply_markup=self._menu(u.effective_user.id))
+
+    async def recent_cmd(self, u, c):
+        self._nav_stack.pop(u.effective_user.id, None); await self._show_recent(u, c)
 
     async def cancel_cmd(self, u, c):
         self._nav_stack.pop(u.effective_user.id, None)
         await u.message.reply_text("❌ Cancelled.", reply_markup=self._menu(u.effective_user.id))
         return ConversationHandler.END
 
+    # --- Message Handler ---
     async def on_msg(self, u, c):
         uid = u.effective_user.id; msg = u.message
         is_private = self._is_private(msg); is_group = self._is_group(msg)
@@ -408,12 +483,16 @@ class YouTubeDownloaderBot:
         video_id = self._extract_video_id(url)
         if not video_id:
             if is_private: await msg.reply_text("❌ Invalid URL."); return
+
         if is_group:
             if not await self._check_group_allowed(msg.chat_id, c.bot): return
-            if uid not in self._cookie_data: return
-            task = asyncio.create_task(self._group_download_task(uid, url, msg, 'video', video_id))
-            self._download_tasks.setdefault(uid, []).append(task); return
-        if uid not in self._cookie_data: await msg.reply_text("❌ Upload cookies first! /cookies"); return
+            if not await self._ensure_cookies(uid): return
+            async with self._download_semaphore:
+                task = asyncio.create_task(self._group_download_task(uid, url, msg, 'video', video_id))
+            return
+
+        if not await self._ensure_cookies(uid):
+            await msg.reply_text("❌ Upload cookies first! /cookies"); return
         self._nav_stack.pop(uid, None); await self._show_format_choice(uid, url, video_id, msg)
 
     async def _group_download_task(self, uid, url, msg, media_type, video_id):
@@ -449,8 +528,8 @@ class YouTubeDownloaderBot:
             if fmt == fmt_key:
                 existing = self._find_existing(uid, video_id, media_type)
                 if existing: await q.answer("Already downloaded!"); await self._show_delivery(q.message, existing, self.videos[uid].index(existing)); return
-                task = asyncio.create_task(self._download_task(uid, url, q.message, media_type))
-                self._download_tasks.setdefault(uid, []).append(task)
+                async with self._download_semaphore:
+                    task = asyncio.create_task(self._download_task(uid, url, q.message, media_type))
 
     async def _download_task(self, uid, url, msg, media_type):
         s = await msg.reply_text(f"⏳ Downloading {media_type}...")
@@ -463,10 +542,6 @@ class YouTubeDownloaderBot:
             while len(self.videos.get(uid, [])) > 20: old = self.videos[uid].pop(); Path(old.file_path).unlink(missing_ok=True)
             self._save(); await s.delete(); await self._show_delivery(msg, record, 0)
         except Exception as e: logger.error("Download %d: %s", uid, str(e)[:100]); await s.edit_text("❌ Failed.", reply_markup=self._menu(uid))
-        finally:
-            if uid in self._download_tasks:
-                self._download_tasks[uid] = [t for t in self._download_tasks[uid] if not t.done()]
-                if not self._download_tasks[uid]: del self._download_tasks[uid]
 
     async def _back_to_formats(self, u, c):
         q = u.callback_query; await q.answer(); uid = u.effective_user.id; data = q.data
@@ -504,7 +579,7 @@ class YouTubeDownloaderBot:
                 else: sent = await q.message.reply_video(video=f, caption=f"🎬 {record.title}", supports_streaming=True); record.telegram_file_id = sent.video.file_id
             self._save(); await s.delete(); await q.message.delete()
         except Exception as e: logger.error("Upload %d: %s", uid, str(e)[:50]); await s.edit_text("❌ Upload failed.")
-        
+
     async def _send_link(self, u, c):
         q = u.callback_query; await q.answer(); uid = u.effective_user.id; data = q.data
         record = self.videos[uid][0] if 'new' in data else self.videos.get(uid, [None])[int(data.split('_')[1])]
@@ -565,7 +640,7 @@ class YouTubeDownloaderBot:
     async def _ask_cookies(self, u, c):
         if not self._ok(u.effective_user.id): return ConversationHandler.END
         msg = u.callback_query.message if u.callback_query else u.message
-        await msg.reply_text("🔒 Cookie Info\n\n• RAM only - never saved to disk\n• File ID saved for auto-restore\n• Lost on bot restart if not restored\n\n📤 Send your cookies.txt file:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Cancel", callback_data='b')]]))
+        await msg.reply_text("🔒 Cookie Info\n\n• RAM only - never saved to disk\n• File ID saved for auto-restore\n\n📤 Send your cookies.txt file:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Cancel", callback_data='b')]]))
         return WAITING_FOR_COOKIES
 
     async def _recv_cookies(self, u, c):

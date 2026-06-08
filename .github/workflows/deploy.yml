@@ -35,6 +35,7 @@ jobs:
           BASE_URL: ${{ secrets.BASE_URL }}
           WHITELIST_USERS: ${{ secrets.WHITELIST_USERS || '' }}
           STORAGE_DAYS: ${{ vars.STORAGE_DAYS || '2' }}
+          COOKIE_TTL_HOURS: ${{ vars.COOKIE_TTL_HOURS || '0' }}
           MAX_TELEGRAM_SIZE_MB: ${{ vars.MAX_TELEGRAM_SIZE_MB || '50' }}
         run: |
           cat > /tmp/deploy_script.sh << 'SCRIPTEOF'
@@ -83,6 +84,7 @@ jobs:
           BASE_DOWNLOAD_LINK=BASE_URL_PLACEHOLDER
           WHITELIST_USERS=WHITELIST_USERS_PLACEHOLDER
           STORAGE_DAYS=STORAGE_DAYS_PLACEHOLDER
+          COOKIE_TTL_HOURS=COOKIE_TTL_HOURS_PLACEHOLDER
           MAX_TELEGRAM_FILE_SIZE=MAX_TELEGRAM_SIZE_PLACEHOLDER
           EOF
           chmod 600 "$PROJECT_DIR/.env"
@@ -98,9 +100,9 @@ jobs:
           python3 -m venv venv
           $PROJECT_DIR/venv/bin/pip install --upgrade pip -q
           $PROJECT_DIR/venv/bin/pip install -r requirements.txt -q
-          $PROJECT_DIR/venv/bin/pip install --upgrade yt-dlp yt-dlp-ejs -q
+          $PROJECT_DIR/venv/bin/pip install --upgrade yt-dlp yt-dlp-ejs aiohttp -q
           
-          mkdir -p "$PROJECT_DIR/data/cookies" "$PROJECT_DIR/downloads"
+          mkdir -p "$PROJECT_DIR/data" "$PROJECT_DIR/downloads"
           mkdir -p /var/log/$SERVICE_NAME
           
           echo "🧪 Testing configuration..."
@@ -110,7 +112,8 @@ jobs:
           c = Config()
           print('Token:', 'SET' if c.BOT_TOKEN and 'YOUR_BOT_TOKEN' not in c.BOT_TOKEN else 'MISSING')
           print('Base URL:', c.BASE_DOWNLOAD_LINK)
-          print('Storage:', c.STORAGE_DAYS)
+          print('Storage:', c.STORAGE_DAYS, 'days')
+          print('Cookie TTL:', c.COOKIE_TTL_HOURS, 'hours (0=until restart)')
           "
           
           echo "🔧 Creating service..."
@@ -162,6 +165,7 @@ jobs:
           sed -i "s|BASE_URL_PLACEHOLDER|${BASE_URL}|g" /tmp/deploy_script.sh
           sed -i "s|WHITELIST_USERS_PLACEHOLDER|${WHITELIST_USERS}|g" /tmp/deploy_script.sh
           sed -i "s|STORAGE_DAYS_PLACEHOLDER|${STORAGE_DAYS}|g" /tmp/deploy_script.sh
+          sed -i "s|COOKIE_TTL_HOURS_PLACEHOLDER|${COOKIE_TTL_HOURS}|g" /tmp/deploy_script.sh
           sed -i "s|MAX_TELEGRAM_SIZE_PLACEHOLDER|${MAX_TELEGRAM_SIZE_MB}|g" /tmp/deploy_script.sh
           
           scp /tmp/deploy_script.sh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/tmp/deploy_script.sh

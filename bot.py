@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 YouTube Downloader Telegram Bot
+- Global file_id cache to prevent re-uploading same media
 - Short unique tokens for shared links
 - Inline downloads only start on user click
 - Cookies auto-restore from Telegram on demand
@@ -113,8 +114,9 @@ class YouTubeDownloaderBot:
         self.videos: Dict[int, List[VideoRecord]] = {}
         self._pending_urls: Dict[int, tuple] = {}
         self._nav_stack: Dict[int, List[Tuple[str, any]]] = {}
-        self._tokens: Dict[str, dict] = {}          # short_token -> download info
+        self._tokens: Dict[str, dict] = {}
         self._group_admins: Dict[int, set] = {}
+        self._global_file_ids: Dict[str, str] = {}  # video_id:media_type -> telegram_file_id
         self._download_semaphore = asyncio.Semaphore(1)
         self.has_ffmpeg = self._check_ffmpeg()
         self.file_server = FileServer(port=port)
@@ -133,12 +135,18 @@ class YouTubeDownloaderBot:
             fp = DATA_DIR / 'cookie_file_ids.json'
             if fp.exists(): self._cookie_file_ids = {int(k): v for k, v in json.loads(fp.read_text()).items()}
         except Exception as e: logger.error("Load cookie IDs: %s", e)
+        try:
+            fp = DATA_DIR / 'global_file_ids.json'
+            if fp.exists(): self._global_file_ids = json.loads(fp.read_text())
+        except: pass
 
     def _save(self):
         try: (DATA_DIR / 'user_videos.json').write_text(json.dumps({str(k): [v.to_dict() for v in vs] for k, vs in self.videos.items()}, indent=2))
         except Exception as e: logger.error("Save videos: %s", e)
         try: (DATA_DIR / 'cookie_file_ids.json').write_text(json.dumps({str(k): v for k, v in self._cookie_file_ids.items()}, indent=2))
         except Exception as e: logger.error("Save cookie IDs: %s", e)
+        try: (DATA_DIR / 'global_file_ids.json').write_text(json.dumps(self._global_file_ids, indent=2))
+        except Exception as e: logger.error("Save global IDs: %s", e)
 
     async def _get_bot_username(self):
         if not self._bot_username and self._bot: me = await self._bot.get_me(); self._bot_username = me.username
@@ -306,7 +314,6 @@ class YouTubeDownloaderBot:
 
     # --- Token-based shared download ---
     async def _do_shared_download(self, token: str):
-        """Perform download for a token, limited by semaphore"""
         async with self._download_semaphore:
             req = self._tokens.get(token)
             if not req: return
@@ -317,7 +324,7 @@ class YouTubeDownloaderBot:
                     fp, title, vid = await asyncio.get_event_loop().run_in_executor(None, self._sync_download_thumb, uid, url)
                 else:
                     fp, title, vid = await asyncio.get_event_loop().run_in_executor(None, self._sync_download, uid, url, media_type)
-                req['status'] = 'completed'; req['file_path'] = fp; req['title'] = title
+                req['status'] = 'completed'; req['file_path'] = fp; req['title'] = title; req['video_id'] = vid
                 sz = Path(fp).stat().st_size
                 record = VideoRecord(title, url, vid, fp, sz, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), media_type=media_type)
                 self.videos.setdefault(uid, []).insert(0, record)
@@ -328,10 +335,9 @@ class YouTubeDownloaderBot:
                 req['status'] = 'failed'; req['error'] = str(e)[:200]
 
     def _make_token(self, uid, url, video_id, media_type, existing=None):
-        """Create a short token for a download request"""
-        token = secrets.token_hex(4)  # 8 chars
+        token = secrets.token_hex(4)
         self._tokens[token] = {
-            'uid': uid, 'url': url, 'media_type': media_type,
+            'uid': uid, 'url': url, 'video_id': video_id, 'media_type': media_type,
             'status': 'completed' if existing and Path(existing.file_path).exists() else 'pending',
             'file_path': existing.file_path if existing and Path(existing.file_path).exists() else None,
             'title': existing.title if existing else None,
@@ -359,18 +365,31 @@ class YouTubeDownloaderBot:
             for media_type, emoji, label in [
                 ('video', '🎬', 'Video (MP4)'), ('audio', '🎵', f"Audio ({'MP3' if self.has_ffmpeg else 'M4A'})"), ('thumb', '🖼️', 'Thumbnail')
             ]:
-                existing = self._find_existing(uid, video_id, media_type)
+                cache_key = f"{video_id}:{media_type}"
 
-                # Already cached with file_id -> instant inline
+                # Check global file_id cache first
+                if cache_key in self._global_file_ids:
+                    try:
+                        file_id = self._global_file_ids[cache_key]
+                        if media_type == 'video': results.append(InlineQueryResultCachedVideo(id=str(uuid4()), video_file_id=file_id, title=f"Cached {label}", description="Instant delivery"))
+                        elif media_type == 'audio': results.append(InlineQueryResultCachedAudio(id=str(uuid4()), audio_file_id=file_id, title=f"Cached {label}"))
+                        else: results.append(InlineQueryResultCachedPhoto(id=str(uuid4()), photo_file_id=file_id, title=f"Cached {label}"))
+                        continue
+                    except: pass
+
+                # Check per-user cache
+                existing = self._find_existing(uid, video_id, media_type)
                 if existing and existing.telegram_file_id:
                     try:
                         if media_type == 'video': results.append(InlineQueryResultCachedVideo(id=str(uuid4()), video_file_id=existing.telegram_file_id, title=existing.title, description=f"📦 {existing.file_size/1024/1024:.1f} MB"))
                         elif media_type == 'audio': results.append(InlineQueryResultCachedAudio(id=str(uuid4()), audio_file_id=existing.telegram_file_id, title=existing.title))
                         else: results.append(InlineQueryResultCachedPhoto(id=str(uuid4()), photo_file_id=existing.telegram_file_id, title=existing.title))
+                        # Also update global cache
+                        self._global_file_ids[cache_key] = existing.telegram_file_id; self._save()
                         continue
                     except: pass
 
-                # Create token for this format (cached or new)
+                # Create token
                 token = self._make_token(uid, url, video_id, media_type, existing)
 
                 if existing and Path(existing.file_path).exists():
@@ -384,13 +403,9 @@ class YouTubeDownloaderBot:
                     ))
                 else:
                     results.append(InlineQueryResultArticle(
-                        id=str(uuid4()),
-                        title=f"{emoji} Download {label}",
+                        id=str(uuid4()), title=f"{emoji} Download {label}",
                         description="Click to start download & receive",
-                        input_message_content=InputTextMessageContent(
-                            f"⏳ Click the button below to start downloading {label}.\n"
-                            f"🔄 The file will be sent when ready."
-                        ),
+                        input_message_content=InputTextMessageContent(f"⏳ Click to start downloading {label}."),
                         reply_markup=InlineKeyboardMarkup([[
                             InlineKeyboardButton("📥 Start Download", url=f"https://t.me/{bot_username}?start=dl_{token}")
                         ]])
@@ -406,8 +421,12 @@ class YouTubeDownloaderBot:
         req = self._tokens.get(token)
 
         if not req:
-            # Try searching all videos by video_id if token looks like one (11 chars)
             if len(token) == 11:
+                for media_type in ('video', 'audio', 'thumb'):
+                    cache_key = f"{token}:{media_type}"
+                    if cache_key in self._global_file_ids:
+                        await self._send_file_direct(msg, {'file_path': None, 'title': 'Cached', 'media_type': media_type, 'video_id': token}, use_global_cache=True)
+                        return
                 for user_videos in self.videos.values():
                     for v in user_videos:
                         if v.video_id == token and Path(v.file_path).exists():
@@ -432,26 +451,73 @@ class YouTubeDownloaderBot:
         elif req['status'] == 'failed':
             await msg.reply_text("❌ Download failed.\nPlease try again from inline mode.")
 
-    async def _send_file_direct(self, msg, record_or_req):
+    async def _send_file_direct(self, msg, record_or_req, use_global_cache=False):
         if isinstance(record_or_req, VideoRecord):
-            fp, title, media_type = record_or_req.file_path, record_or_req.title, record_or_req.media_type
+            record = record_or_req
+            fp, title, media_type, video_id = record.file_path, record.title, record.media_type, record.video_id
         else:
+            record = None
             fp = record_or_req.get('file_path')
             title = record_or_req.get('title', 'Unknown')
             media_type = record_or_req.get('media_type', 'video')
+            video_id = record_or_req.get('video_id', '')
+
+        cache_key = f"{video_id}:{media_type}" if video_id else None
+
+        # Check global cache for file_id
+        if cache_key and cache_key in self._global_file_ids:
+            try:
+                file_id = self._global_file_ids[cache_key]
+                if media_type == 'thumb': await msg.reply_photo(photo=file_id, caption=f"🖼️ {title}")
+                elif media_type == 'audio': await msg.reply_audio(audio=file_id, title=title)
+                else: await msg.reply_video(video=file_id, caption=f"🎬 {title}", supports_streaming=True)
+                return
+            except:
+                del self._global_file_ids[cache_key]; self._save()
+
+        # Check per-user record file_id
+        if record and record.telegram_file_id:
+            try:
+                if media_type == 'thumb': await msg.reply_photo(photo=record.telegram_file_id, caption=f"🖼️ {title}")
+                elif media_type == 'audio': await msg.reply_audio(audio=record.telegram_file_id, title=title)
+                else: await msg.reply_video(video=record.telegram_file_id, caption=f"🎬 {title}", supports_streaming=True)
+                return
+            except: record.telegram_file_id = None; self._save()
+
         if not fp or not Path(fp).exists():
             await msg.reply_text("❌ File deleted from server."); return
+
         mb = Path(fp).stat().st_size / 1024 / 1024
         if mb > self.config.MAX_TELEGRAM_FILE_SIZE:
             await msg.reply_text(f"⚠️ Too large ({mb:.1f}MB)\n📥 `{self.base_url}/{quote(Path(fp).name)}`", parse_mode=ParseMode.MARKDOWN); return
+
         s = await msg.reply_text("📤 Sending...")
         try:
             with open(fp, 'rb') as f:
-                if media_type == 'thumb': await msg.reply_photo(photo=f, caption=f"🖼️ {title}")
-                elif media_type == 'audio': await msg.reply_audio(audio=f, title=title, performer="YouTube")
-                else: await msg.reply_video(video=f, caption=f"🎬 {title}", supports_streaming=True)
+                if media_type == 'thumb':
+                    sent = await msg.reply_photo(photo=f, caption=f"🖼️ {title}")
+                    file_id = sent.photo[-1].file_id
+                elif media_type == 'audio':
+                    sent = await msg.reply_audio(audio=f, title=title, performer="YouTube")
+                    file_id = sent.audio.file_id
+                else:
+                    sent = await msg.reply_video(video=f, caption=f"🎬 {title}", supports_streaming=True)
+                    file_id = sent.video.file_id
+
+            # Save to global cache
+            if cache_key:
+                self._global_file_ids[cache_key] = file_id
+                self._save()
+
+            # Save to per-user record
+            if record:
+                record.telegram_file_id = file_id
+                self._save()
+
             await s.delete()
-        except Exception as e: logger.error("Send: %s", str(e)[:50]); await s.edit_text("❌ Failed.")
+        except Exception as e:
+            logger.error("Send: %s", str(e)[:50])
+            await s.edit_text("❌ Failed.")
 
     # --- Commands ---
     async def start_cmd(self, u, c):
@@ -472,7 +538,6 @@ class YouTubeDownloaderBot:
         await u.message.reply_text("❌ Cancelled.", reply_markup=self._menu(u.effective_user.id))
         return ConversationHandler.END
 
-    # --- Message Handler ---
     async def on_msg(self, u, c):
         uid = u.effective_user.id; msg = u.message
         is_private = self._is_private(msg); is_group = self._is_group(msg)
@@ -560,6 +625,21 @@ class YouTubeDownloaderBot:
         q = u.callback_query; await q.answer(); uid = u.effective_user.id; data = q.data
         record = self.videos[uid][0] if 'new' in data else self.videos.get(uid, [None])[int(data.split('_')[1])]
         if not record: return
+
+        cache_key = f"{record.video_id}:{record.media_type}"
+
+        # Check global cache
+        if cache_key in self._global_file_ids:
+            try:
+                file_id = self._global_file_ids[cache_key]
+                if record.media_type == 'thumb': await q.message.reply_photo(photo=file_id, caption=f"🖼️ {record.title}")
+                elif record.media_type == 'audio': await q.message.reply_audio(audio=file_id, title=record.title)
+                else: await q.message.reply_video(video=file_id, caption=f"🎬 {record.title}", supports_streaming=True)
+                record.telegram_file_id = file_id; self._save()
+                await q.message.delete(); return
+            except: pass
+
+        # Check per-user cache
         if record.telegram_file_id:
             try:
                 if record.media_type == 'thumb': await q.message.reply_photo(photo=record.telegram_file_id, caption=f"🖼️ {record.title}")
@@ -567,16 +647,29 @@ class YouTubeDownloaderBot:
                 else: await q.message.reply_video(video=record.telegram_file_id, caption=f"🎬 {record.title}", supports_streaming=True)
                 await q.message.delete(); return
             except: record.telegram_file_id = None; self._save()
+
         fp = record.file_path
         if not Path(fp).exists(): await q.message.reply_text("❌ File deleted."); return
         if Path(fp).stat().st_size / 1024 / 1024 > self.config.MAX_TELEGRAM_FILE_SIZE: await q.message.reply_text("⚠️ Too large."); return
+
         s = await q.message.reply_text("📤 Uploading...")
         try:
             with open(fp, 'rb') as f:
-                if record.media_type == 'thumb': sent = await q.message.reply_photo(photo=f, caption=f"🖼️ {record.title}"); record.telegram_file_id = sent.photo[-1].file_id
-                elif record.media_type == 'audio': sent = await q.message.reply_audio(audio=f, title=record.title, performer="YouTube"); record.telegram_file_id = sent.audio.file_id
-                else: sent = await q.message.reply_video(video=f, caption=f"🎬 {record.title}", supports_streaming=True); record.telegram_file_id = sent.video.file_id
-            self._save(); await s.delete(); await q.message.delete()
+                if record.media_type == 'thumb':
+                    sent = await q.message.reply_photo(photo=f, caption=f"🖼️ {record.title}")
+                    file_id = sent.photo[-1].file_id
+                elif record.media_type == 'audio':
+                    sent = await q.message.reply_audio(audio=f, title=record.title, performer="YouTube")
+                    file_id = sent.audio.file_id
+                else:
+                    sent = await q.message.reply_video(video=f, caption=f"🎬 {record.title}", supports_streaming=True)
+                    file_id = sent.video.file_id
+
+            # Save globally and per-user
+            self._global_file_ids[cache_key] = file_id
+            record.telegram_file_id = file_id
+            self._save()
+            await s.delete(); await q.message.delete()
         except Exception as e: logger.error("Upload %d: %s", uid, str(e)[:50]); await s.edit_text("❌ Upload failed.")
 
     async def _send_link(self, u, c):

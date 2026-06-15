@@ -1,0 +1,50 @@
+"""Synchronous yt-dlp download functions"""
+import tempfile, os
+from pathlib import Path
+import yt_dlp
+
+DOWNLOADS_DIR = Path('downloads')
+
+def fetch_info(bot, uid, url):
+    opts = {'format': 'best', 'cookiefile': _cookie_file(bot, uid), 'quiet': True, 'no_warnings': True, 'socket_timeout': 30, 'retries': 3}
+    with yt_dlp.YoutubeDL(opts) as ydl: return ydl.extract_info(url, download=False)
+
+def download(bot, uid, url, media_type):
+    base_opts = {'cookiefile': _cookie_file(bot, uid), 'quiet': True, 'no_warnings': True, 'socket_timeout': 120, 'retries': 50, 'fragment_retries': 50, 'concurrent_fragment_downloads': 2, 'no_mtime': True}
+    if media_type == 'video':
+        opts = {**base_opts, 'format': 'best[ext=mp4]/best', 'outtmpl': str(DOWNLOADS_DIR / '%(id)s_v.%(ext)s'), 'merge_output_format': 'mp4'}
+    else:
+        opts = {**base_opts, 'format': 'bestaudio[ext=m4a]/bestaudio', 'outtmpl': str(DOWNLOADS_DIR / '%(id)s_a.%(ext)s')}
+        if bot.has_ffmpeg: opts['postprocessors'] = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}]
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=True); title, vid = info.get('title', 'Unknown'), info.get('id', '')
+        fp = ydl.prepare_filename(info)
+        if media_type == 'audio' and bot.has_ffmpeg: fp = str(Path(fp).with_suffix('.mp3'))
+        if Path(fp).exists(): return fp, title, vid
+        for ext in ('.mp4', '.mp3', '.m4a', '.webm', '.mkv', '.opus'):
+            alt = DOWNLOADS_DIR / f'{Path(fp).stem}{ext}'
+            if alt.exists(): return str(alt), title, vid
+        for f in DOWNLOADS_DIR.iterdir():
+            if f.is_file() and f.stem.startswith(vid): return str(f), title, vid
+        raise FileNotFoundError(title)
+
+def download_thumb(bot, uid, url):
+    opts = {'cookiefile': _cookie_file(bot, uid), 'quiet': True, 'no_warnings': True, 'socket_timeout': 30, 'retries': 3, 'skip_download': True, 'writethumbnail': True, 'outtmpl': str(DOWNLOADS_DIR / '%(id)s_thumb.%(ext)s')}
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=False); title, vid = info.get('title', 'Unknown'), info.get('id', ''); ydl.download([url])
+        for ext in ('.jpg', '.webp', '.png'):
+            fp = DOWNLOADS_DIR / f'{vid}_thumb{ext}'
+            if fp.exists(): return str(fp), title, vid
+        for t in info.get('thumbnails', []):
+            if t.get('url'):
+                import urllib.request
+                ext = t['url'].split('?')[0].split('.')[-1] or 'jpg'
+                fp = DOWNLOADS_DIR / f'{vid}_thumb.{ext}'; urllib.request.urlretrieve(t['url'], str(fp)); return str(fp), title, vid
+        raise FileNotFoundError("No thumbnail")
+
+def _cookie_file(bot, uid):
+    if uid not in bot._cookie_tmpfiles or not os.path.exists(bot._cookie_tmpfiles[uid]):
+        tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
+        tmp.write(bot._cookie_data[uid].decode('utf-8', errors='replace')); tmp.close()
+        bot._cookie_tmpfiles[uid] = tmp.name
+    return bot._cookie_tmpfiles[uid]

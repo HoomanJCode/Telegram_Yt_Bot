@@ -25,8 +25,8 @@ async def cancel_cmd(bot, u, c):
     from app.handlers.navigation import nav_clear, menu
     nav_clear(bot, u.effective_user.id)
     await u.message.reply_text("❌ Cancelled.", reply_markup=menu(bot, u.effective_user.id))
-    from app import WAITING_FOR_COOKIES
-    return WAITING_FOR_COOKIES  # Actually returns ConversationHandler.END equivalent
+    from telegram.ext import ConversationHandler      # <-- CHANGE
+    return ConversationHandler.END                      # <-- END instead of WAITING_FOR_COOKIES
 
 def _menu(bot, uid):
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup

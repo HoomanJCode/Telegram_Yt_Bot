@@ -6,7 +6,8 @@ from telegram.constants import ParseMode, ChatType
 from app.models import VideoRecord
 from app.downloader import download, fetch_info
 from app.utils import extract_url, extract_video_id, find_existing, esc, ok
-from app.handlers.navigation import nav_clear, show_format_choice, show_delivery, menu
+from app.handlers.navigation import nav_clear, show_format_choice, menu
+from app.handlers.formats import show_delivery
 
 async def on_msg(bot, u, c):
     uid = u.effective_user.id; msg = u.message
@@ -55,7 +56,9 @@ async def download_task(bot, uid, url, msg, media_type):
         record = VideoRecord(title, url, vid, fp, sz, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), media_type=media_type)
         bot.videos.setdefault(uid, []).insert(0, record)
         while len(bot.videos.get(uid, [])) > 20: old = bot.videos[uid].pop(); Path(old.file_path).unlink(missing_ok=True)
-        bot.save(); await s.delete(); await show_delivery(bot, msg, record, 0)
+        bot.save(); await s.delete()
+        from app.handlers.formats import show_delivery  # <-- ADD THIS LINE
+        await show_delivery(bot, msg, record, 0)
     except Exception as e: await s.edit_text("❌ Failed.", reply_markup=menu(bot, uid))
 
 async def _ensure(bot, uid):

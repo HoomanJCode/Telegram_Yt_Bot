@@ -14,17 +14,22 @@ async def choose_format(bot, u, c):
     for mt, fk in [('video', 'fmt_video'), ('audio', 'fmt_audio'), ('thumb', 'fmt_thumb')]:
         if fmt == fk:
             existing = find_existing(bot, uid, video_id, mt)
-            if existing: await q.answer("Already downloaded!"); await show_delivery(bot, q.message, existing, bot.videos[uid].index(existing)); return
-            async with bot._download_semaphore: await download_task(bot, uid, url, q.message, mt)
+            if existing:
+                await q.answer("Already downloaded!")
+                await show_delivery(bot, q.message, existing, bot.videos[uid].index(existing))
+                return
+            async with bot._download_semaphore:
+                await download_task(bot, uid, url, q.message, mt)
 
 async def show_delivery(bot, msg, record, idx):
     emoji = {'video': '🎬', 'audio': '🎵', 'thumb': '🖼️'}.get(record.media_type, '📹')
     mb = record.file_size / 1024 / 1024
     nav_push(bot, msg.chat.id, NAV_FORMAT, (record.url, record.video_id))
-    is_group = msg.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
     from app.handlers.messages import _group_delivery_kb
-    kb = _group_delivery_kb(bot, msg.chat.id) if is_group else delivery_kb(bot, msg.chat.id, idx)
-    await msg.reply_text(f"{emoji} *{esc(record.title[:200])}*\n📦 {mb:.2f} MB | {record.media_type}\n🕒 {record.download_time}\n\nChoose delivery:", parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+    kb = _group_delivery_kb(bot, msg.chat.id) if msg.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP) else delivery_kb(bot, msg.chat.id, idx)
+    await msg.reply_text(
+        f"{emoji} *{esc(record.title[:200])}*\n📦 {mb:.2f} MB | {record.media_type}\n🕒 {record.download_time}\n\nChoose delivery:",
+        parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
 
 def delivery_kb(bot, uid, idx=None):
     idx_str = str(idx) if idx is not None else 'new'
@@ -39,7 +44,8 @@ async def send_telegram(bot, u, c):
     record = bot.videos[uid][0] if 'new' in data else bot.videos.get(uid, [None])[int(data.split('_')[1])]
     if not record: return
     from app.handlers.tokens import send_file
-    await send_file(bot, q.message, record); await q.message.delete()
+    await send_file(bot, q.message, record)
+    await q.message.delete()
 
 async def send_link(bot, u, c):
     q = u.callback_query; await q.answer(); uid = u.effective_user.id; data = q.data
@@ -47,7 +53,10 @@ async def send_link(bot, u, c):
     if not record or not Path(record.file_path).exists(): return
     from urllib.parse import quote
     url = f"{bot.base_url}/{quote(Path(record.file_path).name)}"
-    await q.message.reply_text(f"✅ *{esc(record.title[:200])}*\n\n📥 `{url}`\n\n⚠️ {bot.config.STORAGE_DAYS}d retention.", parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📥 Download", url=url)], [InlineKeyboardButton("🔙 Menu", callback_data='b')]]))
+    await q.message.reply_text(
+        f"✅ *{esc(record.title[:200])}*\n\n📥 `{url}`\n\n⚠️ {bot.config.STORAGE_DAYS}d retention.",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📥 Download", url=url)], [InlineKeyboardButton("🔙 Menu", callback_data='b')]]))
     await q.message.delete()
 
 async def back_to_formats(bot, u, c):
@@ -56,4 +65,5 @@ async def back_to_formats(bot, u, c):
     if not record: return
     bot._pending_urls[uid] = (record.url, record.video_id, record.title)
     from app.handlers.navigation import show_format_choice
-    await show_format_choice(bot, uid, record.url, record.video_id, q.message); await q.message.delete()
+    await show_format_choice(bot, uid, record.url, record.video_id, q.message)
+    await q.message.delete()

@@ -1,5 +1,6 @@
 """Navigation stack, menus, back button"""
 import asyncio
+import traceback
 from pathlib import Path
 from datetime import datetime
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -28,7 +29,8 @@ def menu(bot, uid):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📹 Recent Downloads", callback_data='r')],
         [InlineKeyboardButton("🍪 Upload Cookies", callback_data='c')],
-        [InlineKeyboardButton(f"🍪 {'✅' if has else '❌'}", callback_data='cs'), InlineKeyboardButton(f"📦 {vc} files", callback_data='vc')],
+        [InlineKeyboardButton(f"🍪 {'✅' if has else '❌'}", callback_data='cs'),
+         InlineKeyboardButton(f"📦 {vc} files", callback_data='vc')],
     ])
 
 async def welcome_text(bot):
@@ -48,7 +50,9 @@ async def show_format_choice(bot, uid, url, video_id, msg):
         mins, secs = divmod(duration, 60) if duration else (0, 0)
         from app.handlers.formats import format_choice_kb
         await s.edit_text(f"📹 *{esc(title[:200])}*\n⏱ {mins}:{secs:02d}\n\nChoose format:", parse_mode=ParseMode.MARKDOWN, reply_markup=format_choice_kb(bot, uid, video_id))
-    except: await s.edit_text("❌ Failed.", reply_markup=menu(bot, uid))
+    except Exception as e:
+        traceback.print_exc()
+        await s.edit_text("❌ Failed.", reply_markup=menu(bot, uid))
 
 async def show_recent(bot, u, c, page=0):
     uid = u.effective_user.id; msg = u.callback_query.message if u.callback_query else u.message

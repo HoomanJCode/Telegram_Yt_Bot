@@ -4,11 +4,10 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 from app.models import VideoRecord
 from app.fileserver import FileServer
-from app.utils import ok, load_data, save_data, check_ffmpeg
+from app.utils import check_ffmpeg, load_data, save_data
 
 DATA_DIR = Path('data')
 DOWNLOADS_DIR = Path('downloads')
-NAV_MAIN = 'main'
 
 class YouTubeDownloaderBot:
     def __init__(self):

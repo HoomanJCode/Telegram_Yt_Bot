@@ -7,7 +7,6 @@ from telegram.ext import (
     ConversationHandler, filters, InlineQueryHandler
 )
 from telegram.constants import ParseMode
-from config import Config
 from app.fileserver import FileServer
 from app.bot import YouTubeDownloaderBot
 from app.handlers.commands import start_cmd, help_cmd, recent_cmd, cancel_cmd

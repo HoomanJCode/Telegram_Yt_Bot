@@ -3,14 +3,16 @@ import os
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 async def ask_cookies(bot, u, c):
+    from app import WAITING_FOR_COOKIES
     from app.utils import ok
-    if not ok(bot, u.effective_user.id): return ConversationHandler.END
+    if not ok(bot, u.effective_user.id): return WAITING_FOR_COOKIES
     msg = u.callback_query.message if u.callback_query else u.message
     await msg.reply_text("🔒 Cookie Info\n\n• RAM only\n• File ID saved for auto-restore\n\n📤 Send cookies.txt:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Cancel", callback_data='b')]]))
-    from app import WAITING_FOR_COOKIES
     return WAITING_FOR_COOKIES
 
 async def recv_cookies(bot, u, c):
+    from app import WAITING_FOR_COOKIES
+    from telegram.ext import ConversationHandler
     from app.utils import ok
     from app.handlers.navigation import menu
     uid = u.effective_user.id

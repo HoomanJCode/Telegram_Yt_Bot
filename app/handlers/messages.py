@@ -1,13 +1,13 @@
 """Message handler for private chats and groups"""
-import asyncio
+import asyncio, os
 from datetime import datetime
 from pathlib import Path
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode, ChatType
 from app.models import VideoRecord
 from app.downloader import download, fetch_info
 from app.utils import extract_url, extract_video_id, find_existing, esc, ok
 from app.handlers.navigation import nav_clear, show_format_choice, menu
-from app.handlers.formats import show_delivery
 
 async def on_msg(bot, u, c):
     uid = u.effective_user.id; msg = u.message
@@ -57,7 +57,7 @@ async def download_task(bot, uid, url, msg, media_type):
         bot.videos.setdefault(uid, []).insert(0, record)
         while len(bot.videos.get(uid, [])) > 20: old = bot.videos[uid].pop(); Path(old.file_path).unlink(missing_ok=True)
         bot.save(); await s.delete()
-        from app.handlers.formats import show_delivery  # <-- ADD THIS LINE
+        from app.handlers.formats import show_delivery
         await show_delivery(bot, msg, record, 0)
     except Exception as e: await s.edit_text("❌ Failed.", reply_markup=menu(bot, uid))
 
@@ -73,7 +73,7 @@ async def _load_cookies(bot, uid):
         cookie_bytes = await file.download_as_bytearray()
         bot._cookie_data[uid] = bytes(cookie_bytes)
         if uid in bot._cookie_tmpfiles:
-            try: import os; os.unlink(bot._cookie_tmpfiles[uid]); del bot._cookie_tmpfiles[uid]
+            try: os.unlink(bot._cookie_tmpfiles[uid]); del bot._cookie_tmpfiles[uid]
             except: pass
         return True
     except:
@@ -88,7 +88,6 @@ async def _check_group(bot, chat_id, bot_client):
     except: return False
 
 def _group_delivery_kb(bot, uid):
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📤 Send via Telegram", callback_data='tg_new')],
         [InlineKeyboardButton("📋 Get Download Link", callback_data='lk_new')],

@@ -5,6 +5,21 @@ from telegram.constants import ParseMode, ChatType
 from app.handlers.navigation import nav_push, NAV_FORMAT
 from app.utils import esc
 
+def format_choice_kb(bot, uid, video_id):
+    existing = {v.media_type for v in bot.videos.get(uid, []) if v.video_id == video_id and Path(v.file_path).exists()}
+    kb = []
+    v_label = "🎬 Video (MP4)"
+    if 'video' in existing: v_label = "✅ 🎬 Video - Downloaded"
+    kb.append([InlineKeyboardButton(v_label, callback_data='fmt_video')])
+    a_label = f"🎵 Audio ({'MP3' if bot.has_ffmpeg else 'M4A'})"
+    if 'audio' in existing: a_label = "✅ 🎵 Audio - Downloaded"
+    kb.append([InlineKeyboardButton(a_label, callback_data='fmt_audio')])
+    t_label = "🖼️ Thumbnails"
+    if 'thumb' in existing: t_label = "✅ 🖼️ Thumbnails - Downloaded"
+    kb.append([InlineKeyboardButton(t_label, callback_data='fmt_thumb')])
+    kb.append([InlineKeyboardButton("🔙 Back", callback_data='b')])
+    return InlineKeyboardMarkup(kb)
+
 async def choose_format(bot, u, c):
     q = u.callback_query; await q.answer(); uid, fmt = u.effective_user.id, q.data
     if uid not in bot._pending_urls: return

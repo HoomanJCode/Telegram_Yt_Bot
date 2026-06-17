@@ -8,7 +8,7 @@ DOWNLOADS_DIR = Path('downloads')
 def _sanitize_filename(title):
     """Keep only alphanumeric, spaces, and basic punctuation"""
     # Replace unsafe chars, keep spaces and basic chars
-    name = re.sub(r'[^\w\s\-\.\(\)\[\]\,\!\&\'\-]', '', title)
+    name = re.sub(r"[^\w\s\-\.\(\)\[\],!&'-]", '', title)
     # Limit length
     return name[:100].strip()
 

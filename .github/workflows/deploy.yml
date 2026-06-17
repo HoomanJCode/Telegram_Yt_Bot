@@ -74,7 +74,7 @@ jobs:
             echo "  ✓ QuickJS-NG installed"
           fi
           
-          # Install & Setup Cloudflare Warp
+          # Install Cloudflare Warp if missing
           if ! command -v warp-cli &>/dev/null; then
             echo "🔧 Installing Cloudflare Warp..."
             curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
@@ -83,19 +83,24 @@ jobs:
             apt-get install -y -qq cloudflare-warp
           fi
           
-          echo "🔧 Configuring Cloudflare Warp..."
-          systemctl stop warp-svc 2>/dev/null || true
-          systemctl disable warp-svc 2>/dev/null || true
-          pkill -9 warp-svc 2>/dev/null || true
-          pkill -9 warp-cli 2>/dev/null || true
-          sleep 2
-          rm -f /run/cloudflare-warp/warp_service
-          warp-svc --accept-tos &
-          sleep 3
-          echo "y" | warp-cli registration new 2>/dev/null || true
-          warp-cli mode proxy
-          warp-cli connect
-          echo "  ✓ Warp ready"
+          # Setup Warp only if proxy not working
+          if ! curl --proxy http://127.0.0.1:40000 --max-time 3 https://ifconfig.me 2>/dev/null | grep -q .; then
+            echo "🔧 Configuring Cloudflare Warp..."
+            systemctl stop warp-svc 2>/dev/null || true
+            systemctl disable warp-svc 2>/dev/null || true
+            pkill -9 warp-svc 2>/dev/null || true
+            pkill -9 warp-cli 2>/dev/null || true
+            sleep 2
+            rm -f /run/cloudflare-warp/warp_service
+            nohup warp-svc --accept-tos > /dev/null 2>&1 &
+            sleep 3
+            echo "y" | warp-cli registration new 2>/dev/null || true
+            warp-cli mode proxy
+            warp-cli connect
+            echo "  ✓ Warp ready"
+          else
+            echo "  ✓ Warp already running"
+          fi
           
           if [ -d "$PROJECT_DIR/.git" ]; then
             echo "📥 Pulling latest code..."

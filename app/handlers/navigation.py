@@ -1,6 +1,5 @@
 """Navigation stack, menus, back button"""
 import asyncio
-import traceback
 from pathlib import Path
 from datetime import datetime
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -25,7 +24,8 @@ def nav_pop(bot, uid):
 def nav_clear(bot, uid): bot._nav_stack.pop(uid, None)
 
 def menu(bot, uid):
-    has = uid in bot._cookie_data; vc = len(bot.videos.get(uid, []))
+    has = uid in bot._cookie_data
+    vc = len(bot.videos.get(uid, []))
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📹 Recent Downloads", callback_data='r')],
         [InlineKeyboardButton("🍪 Upload Cookies", callback_data='c')],
@@ -42,6 +42,10 @@ async def _username(bot):
     return bot._bot_username or "botname"
 
 async def show_format_choice(bot, uid, url, video_id, msg):
+    from app.handlers.messages import _ensure
+    if not await _ensure(bot, uid):
+        await msg.reply_text("❌ Cookies expired. Upload with /cookies")
+        return
     s = await msg.reply_text("🔍 Fetching info...")
     try:
         info = await asyncio.get_event_loop().run_in_executor(None, fetch_info, bot, uid, url)
@@ -51,7 +55,9 @@ async def show_format_choice(bot, uid, url, video_id, msg):
         from app.handlers.formats import format_choice_kb
         await s.edit_text(f"📹 *{esc(title[:200])}*\n⏱ {mins}:{secs:02d}\n\nChoose format:", parse_mode=ParseMode.MARKDOWN, reply_markup=format_choice_kb(bot, uid, video_id))
     except Exception as e:
-        traceback.print_exc()
+        import logging
+        logger = logging.getLogger('yt_bot')
+        logger.error("Format choice error: %s", str(e)[:200])
         await s.edit_text("❌ Failed.", reply_markup=menu(bot, uid))
 
 async def show_recent(bot, u, c, page=0):

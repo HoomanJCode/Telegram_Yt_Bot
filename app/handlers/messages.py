@@ -1,5 +1,5 @@
 """Message handler for private chats and groups"""
-import asyncio, os
+import asyncio, os, logging
 from datetime import datetime
 from pathlib import Path
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -8,6 +8,8 @@ from app.models import VideoRecord
 from app.downloader import download, fetch_info
 from app.utils import extract_url, extract_video_id, find_existing, esc, ok
 from app.handlers.navigation import nav_clear, show_format_choice, menu
+
+logger = logging.getLogger('yt_bot')
 
 async def on_msg(bot, u, c):
     uid = u.effective_user.id; msg = u.message
@@ -67,7 +69,10 @@ async def _ensure(bot, uid):
     return False
 
 async def _load_cookies(bot, uid):
-    if not bot._bot: return False
+    logger.info("Restoring cookies for user %d", uid)
+    if not bot._bot:
+        logger.warning("No bot reference for cookie restore")
+        return False
     try:
         file = await bot._bot.get_file(bot._cookie_file_ids[uid])
         cookie_bytes = await file.download_as_bytearray()
@@ -75,9 +80,12 @@ async def _load_cookies(bot, uid):
         if uid in bot._cookie_tmpfiles:
             try: os.unlink(bot._cookie_tmpfiles[uid]); del bot._cookie_tmpfiles[uid]
             except: pass
+        logger.info("Cookies restored for user %d", uid)
         return True
-    except:
-        del bot._cookie_file_ids[uid]; bot.save(); return False
+    except Exception as e:
+        logger.error("Cookie restore failed %d: %s", uid, str(e)[:100])
+        del bot._cookie_file_ids[uid]; bot.save()
+        return False
 
 async def _check_group(bot, chat_id, bot_client):
     if chat_id in bot._group_admins and bot._group_admins[chat_id]: return True

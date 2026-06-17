@@ -55,7 +55,7 @@ class FileServer:
                     f.seek(start)
                     remaining = length
                     while remaining > 0:
-                        chunk = f.read(min(1024 * 1024, remaining))
+                        chunk = f.read(min(8 * 1024 * 1024, remaining))
                         if not chunk: break
                         await response.write(chunk)
                         remaining -= len(chunk)
@@ -70,7 +70,7 @@ class FileServer:
         
         try:
             with open(filepath, 'rb') as f:
-                while chunk := f.read(1024 * 1024):
+                while chunk := f.read(8 * 1024 * 1024):
                     await response.write(chunk)
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
             pass

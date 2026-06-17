@@ -20,6 +20,7 @@ class YouTubeDownloaderBot:
         self._cookie_file_ids: Dict[int, str] = {}
         self._cookie_data: Dict[int, bytes] = {}
         self._cookie_tmpfiles: Dict[int, str] = {}
+        self._user_langs: Dict[int, str] = {}
         self._bot = None
         self._bot_username = None
         self.videos: Dict[int, List[VideoRecord]] = {}

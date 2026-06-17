@@ -8,7 +8,7 @@ from app.utils import esc
 def format_choice_kb(bot, uid, video_id):
     existing = {v.media_type for v in bot.videos.get(uid, []) if v.video_id == video_id and Path(v.file_path).exists()}
     kb = []
-    v_label = "🎬 Video (MP4)"
+    v_label = "🎬 Video (MKV)"
     if 'video' in existing: v_label = "✅ 🎬 Video - Downloaded"
     kb.append([InlineKeyboardButton(v_label, callback_data='fmt_video')])
     a_label = f"🎵 Audio ({'MP3' if bot.has_ffmpeg else 'M4A'})"

@@ -7,9 +7,7 @@ DOWNLOADS_DIR = Path('downloads')
 
 def _sanitize_filename(title):
     """Keep only alphanumeric, spaces, and basic punctuation"""
-    # Replace unsafe chars, keep spaces and basic chars
     name = re.sub(r"[^\w\s\-\.\(\)\[\],!&'-]", '', title)
-    # Limit length
     return name[:100].strip()
 
 def fetch_info(bot, uid, url):
@@ -18,11 +16,27 @@ def fetch_info(bot, uid, url):
 
 def download(bot, uid, url, media_type):
     base_opts = {'cookiefile': _cookie_file(bot, uid), 'quiet': True, 'no_warnings': True, 'socket_timeout': 120, 'retries': 50, 'fragment_retries': 50, 'concurrent_fragment_downloads': 2, 'no_mtime': True}
+    
     if media_type == 'video':
-        opts = {**base_opts, 'format': 'best[ext=mp4]/best', 'outtmpl': str(DOWNLOADS_DIR / '%(title)s_v.%(ext)s'), 'merge_output_format': 'mp4'}
+        user_lang = bot._user_langs.get(uid, 'en')
+        sub_langs = ['en']
+        if user_lang != 'en':
+            sub_langs.append(user_lang)
+        
+        opts = {
+            **base_opts,
+            'format': 'best[ext=mp4]/best',
+            'outtmpl': str(DOWNLOADS_DIR / '%(title)s_v.%(ext)s'),
+            'merge_output_format': 'mkv',
+            'writesubtitles': True,
+            'writeautomaticsub': True,
+            'subtitleslangs': sub_langs,
+            'embedsubs': True,
+        }
     else:
         opts = {**base_opts, 'format': 'bestaudio[ext=m4a]/bestaudio', 'outtmpl': str(DOWNLOADS_DIR / '%(title)s_a.%(ext)s')}
         if bot.has_ffmpeg: opts['postprocessors'] = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}]
+    
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
         title = info.get('title', 'Unknown')
@@ -30,11 +44,9 @@ def download(bot, uid, url, media_type):
         fp = ydl.prepare_filename(info)
         if media_type == 'audio' and bot.has_ffmpeg: fp = str(Path(fp).with_suffix('.mp3'))
         
-        # Rename to sanitized title
         ext = Path(fp).suffix
         safe_title = _sanitize_filename(title)
         new_path = DOWNLOADS_DIR / f"{safe_title}{ext}"
-        # Handle duplicates
         counter = 1
         while new_path.exists() and str(new_path) != fp:
             new_path = DOWNLOADS_DIR / f"{safe_title}_{counter}{ext}"
@@ -45,7 +57,7 @@ def download(bot, uid, url, media_type):
             fp = str(new_path)
         
         if Path(fp).exists(): return fp, title, vid
-        for ext_check in ('.mp4', '.mp3', '.m4a', '.webm', '.mkv', '.opus'):
+        for ext_check in ('.mkv', '.mp4', '.mp3', '.m4a', '.webm', '.opus'):
             alt = DOWNLOADS_DIR / f'{Path(fp).stem}{ext_check}'
             if alt.exists(): return str(alt), title, vid
         for f in DOWNLOADS_DIR.iterdir():

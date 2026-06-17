@@ -26,9 +26,11 @@ def nav_clear(bot, uid): bot._nav_stack.pop(uid, None)
 def menu(bot, uid):
     has = uid in bot._cookie_data
     vc = len(bot.videos.get(uid, []))
+    lang = bot._user_langs.get(uid, 'en')
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📹 Recent Downloads", callback_data='r')],
         [InlineKeyboardButton("🍪 Upload Cookies", callback_data='c')],
+        [InlineKeyboardButton(f"🌐 Language: {lang.upper()}", callback_data='lang')],
         [InlineKeyboardButton(f"🍪 {'✅' if has else '❌'}", callback_data='cs'),
          InlineKeyboardButton(f"📦 {vc} files", callback_data='vc')],
     ])
@@ -95,6 +97,9 @@ async def router(bot, u, c):
     q = u.callback_query; await q.answer(); d, uid = q.data, u.effective_user.id
     if d == 'b': await handle_back(bot, u, c)
     elif d == 'r': nav_push(bot, uid, NAV_MAIN); await show_recent(bot, u, c)
+    elif d == 'c': from app.handlers.cookies import ask_cookies; await ask_cookies(bot, u, c)
+    elif d == 'lang': await _change_language(bot, u, c)
+    elif d.startswith('setlang_'): await _set_language(bot, u, c)
     elif d == 'cs': await q.message.reply_text("✅ Cookies active" if uid in bot._cookie_data else "❌ Upload with /cookies")
     elif d == 'vc': await q.message.reply_text(f"📦 {len(bot.videos.get(uid,[]))} files")
     elif d == 'clear_all': await _clear_all(bot, u, c)
@@ -105,6 +110,30 @@ async def router(bot, u, c):
     elif d.startswith('sel_'): await _select(bot, u, c)
     elif d.startswith('d_'): await _delete(bot, u, c)
     elif d.startswith('p_'): await show_recent(bot, u, c, int(d.split('_')[1]))
+
+async def _change_language(bot, u, c):
+    q = u.callback_query; uid = u.effective_user.id
+    current = bot._user_langs.get(uid, 'en')
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"{'✅' if current == 'en' else '⬜'} English", callback_data='setlang_en')],
+        [InlineKeyboardButton(f"{'✅' if current == 'fa' else '⬜'} فارسی", callback_data='setlang_fa')],
+        [InlineKeyboardButton(f"{'✅' if current == 'ar' else '⬜'} العربية", callback_data='setlang_ar')],
+        [InlineKeyboardButton(f"{'✅' if current == 'ru' else '⬜'} Русский", callback_data='setlang_ru')],
+        [InlineKeyboardButton(f"{'✅' if current == 'es' else '⬜'} Español", callback_data='setlang_es')],
+        [InlineKeyboardButton("🔙 Back", callback_data='b')],
+    ])
+    await q.message.reply_text("🌐 Select subtitle language:", reply_markup=kb)
+    await q.message.delete()
+
+async def _set_language(bot, u, c):
+    q = u.callback_query; await q.answer()
+    uid = u.effective_user.id
+    lang = q.data.split('_')[1]
+    bot._user_langs[uid] = lang
+    bot.save()
+    lang_names = {'en': 'English', 'fa': 'فارسی', 'ar': 'العربية', 'ru': 'Русский', 'es': 'Español'}
+    await q.message.reply_text(f"🌐 Language set to {lang_names.get(lang, lang.upper())}", reply_markup=menu(bot, uid))
+    await q.message.delete()
 
 async def _clear_all(bot, u, c):
     q = u.callback_query; uid = u.effective_user.id

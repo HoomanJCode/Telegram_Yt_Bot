@@ -46,6 +46,10 @@ def load_data(bot):
         fp = DATA_DIR / 'global_file_ids.json'
         if fp.exists(): bot._global_file_ids = json.loads(fp.read_text())
     except: pass
+    try:
+        fp = DATA_DIR / 'user_langs.json'
+        if fp.exists(): bot._user_langs = {int(k): v for k, v in json.loads(fp.read_text()).items()}
+    except: pass
 
 def save_data(bot):
     try: (DATA_DIR / 'user_videos.json').write_text(json.dumps({str(k): [v.to_dict() for v in vs] for k, vs in bot.videos.items()}, indent=2))
@@ -53,6 +57,8 @@ def save_data(bot):
     try: (DATA_DIR / 'cookie_file_ids.json').write_text(json.dumps({str(k): v for k, v in bot._cookie_file_ids.items()}, indent=2))
     except: pass
     try: (DATA_DIR / 'global_file_ids.json').write_text(json.dumps(bot._global_file_ids, indent=2))
+    except: pass
+    try: (DATA_DIR / 'user_langs.json').write_text(json.dumps({str(k): v for k, v in bot._user_langs.items()}, indent=2))
     except: pass
 
 def find_existing(bot, uid, video_id, media_type='video'):

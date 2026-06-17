@@ -68,9 +68,14 @@ async def send_link(bot, u, c):
     if not record or not Path(record.file_path).exists(): return
     from urllib.parse import quote
     url = f"{bot.base_url}/{quote(Path(record.file_path).name)}"
+    mb = Path(record.file_path).stat().st_size / 1024 / 1024
     await q.message.reply_text(
-        f"✅ *{esc(record.title[:200])}*\n\n📥 `{url}`\n\n⚠️ {bot.config.STORAGE_DAYS}d retention.",
+        f"🎬 *{esc(record.title[:200])}*\n\n"
+        f"📦 {mb:.2f} MB\n"
+        f"📥 {url}\n\n"
+        f"⚠️ File will be deleted after {bot.config.STORAGE_DAYS} days.",
         parse_mode=ParseMode.MARKDOWN,
+        disable_web_page_preview=False,
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📥 Download", url=url)], [InlineKeyboardButton("🔙 Menu", callback_data='b')]]))
     await q.message.delete()
 

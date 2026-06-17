@@ -23,21 +23,31 @@ def download(bot, uid, url, media_type):
         if user_lang != 'en':
             sub_langs.append(user_lang)
         
-        opts = {
-            **base_opts,
-            'format': 'best[ext=mp4]/best',
-            'outtmpl': str(DOWNLOADS_DIR / '%(title)s_v.%(ext)s'),
-            'writesubtitles': True,
-            'writeautomaticsub': True,
-            'subtitleslangs': sub_langs,
-            'postprocessors': [
-                {'key': 'FFmpegVideoRemuxer', 'preferedformat': 'mkv'},
-                {'key': 'FFmpegEmbedSubtitle'},
-            ],
-        }
-    else:
+        if bot.has_ffmpeg:
+            opts = {
+                **base_opts,
+                'format': 'best[ext=mp4]/best',
+                'outtmpl': str(DOWNLOADS_DIR / '%(title)s_v.%(ext)s'),
+                'writesubtitles': True,
+                'writeautomaticsub': True,
+                'subtitleslangs': sub_langs,
+                'postprocessors': [
+                    {'key': 'FFmpegVideoRemuxer', 'preferedformat': 'mkv'},
+                    {'key': 'FFmpegEmbedSubtitle'},
+                ],
+            }
+        else:
+            opts = {
+                **base_opts,
+                'format': 'best[ext=mp4]/best',
+                'outtmpl': str(DOWNLOADS_DIR / '%(title)s_v.%(ext)s'),
+            }
+    elif media_type == 'audio':
         opts = {**base_opts, 'format': 'bestaudio[ext=m4a]/bestaudio', 'outtmpl': str(DOWNLOADS_DIR / '%(title)s_a.%(ext)s')}
-        if bot.has_ffmpeg: opts['postprocessors'] = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}]
+        if bot.has_ffmpeg:
+            opts['postprocessors'] = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}]
+    else:
+        opts = {**base_opts, 'format': 'best[ext=mp4]/best', 'outtmpl': str(DOWNLOADS_DIR / '%(title)s_v.%(ext)s')}
     
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
@@ -45,8 +55,7 @@ def download(bot, uid, url, media_type):
         vid = info.get('id', '')
         fp = ydl.prepare_filename(info)
         
-        # After remux, extension is .mkv
-        if media_type == 'video':
+        if media_type == 'video' and bot.has_ffmpeg:
             fp = str(Path(fp).with_suffix('.mkv'))
         elif media_type == 'audio' and bot.has_ffmpeg:
             fp = str(Path(fp).with_suffix('.mp3'))
@@ -65,12 +74,11 @@ def download(bot, uid, url, media_type):
         
         if Path(fp).exists(): return fp, title, vid
         
-        # Search for the file with any extension
         for ext_check in ('.mkv', '.mp4', '.webm', '.mp3', '.m4a', '.opus'):
             alt = DOWNLOADS_DIR / f'{Path(fp).stem}{ext_check}'
             if alt.exists(): return str(alt), title, vid
         for f in DOWNLOADS_DIR.iterdir():
-            if f.is_file() and safe_title in f.stem and not f.suffix.startswith('.vtt'):
+            if f.is_file() and safe_title in f.stem and f.suffix not in ('.vtt', '.srt'):
                 return str(f), title, vid
         raise FileNotFoundError(title)
 

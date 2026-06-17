@@ -18,6 +18,7 @@ def fetch_info(bot, uid, url):
         'quiet': True, 'no_warnings': True,
         'socket_timeout': 30, 'retries': 3,
         'proxy': WARP_PROXY,
+        'js_runtimes': {'quickjs': '/usr/local/bin/qjs'},
     }
     with yt_dlp.YoutubeDL(opts) as ydl: return ydl.extract_info(url, download=False)
 
@@ -28,6 +29,7 @@ def download(bot, uid, url, media_type):
         'socket_timeout': 120, 'retries': 50, 'fragment_retries': 50,
         'concurrent_fragment_downloads': 2, 'no_mtime': True,
         'proxy': WARP_PROXY,
+        'js_runtimes': {'quickjs': '/usr/local/bin/qjs'},
     }
     
     if media_type == 'video':
@@ -133,6 +135,7 @@ def download_thumb(bot, uid, url):
         'skip_download': True, 'writethumbnail': True,
         'outtmpl': str(DOWNLOADS_DIR / '%(title)s_thumb.%(ext)s'),
         'proxy': WARP_PROXY,
+        'js_runtimes': {'quickjs': '/usr/local/bin/qjs'},
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)

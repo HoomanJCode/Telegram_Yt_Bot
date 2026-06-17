@@ -58,14 +58,21 @@ jobs:
           
           echo "📦 Installing dependencies..."
           apt-get update -qq
-          apt-get install -y -qq python3 python3-pip python3-venv ffmpeg curl git lsb-release gpg
+          apt-get install -y -qq python3 python3-pip python3-venv ffmpeg curl git lsb-release gpg build-essential make cmake
           
-          # Install Deno
-          if ! command -v deno &>/dev/null; then
-            echo "🔧 Installing Deno..."
-            curl -fsSL https://deno.land/install.sh | sh
+          # Install QuickJS-NG (faster JS runtime for yt-dlp)
+          if ! command -v qjs &>/dev/null; then
+            echo "🔧 Installing QuickJS-NG..."
+            cd /tmp
+            rm -rf quickjs
+            git clone --depth 1 https://github.com/quickjs-ng/quickjs.git quickjs
+            cd quickjs
+            make -j$(nproc)
+            make install
+            cd /opt/TelegramYtBot 2>/dev/null || cd /root
+            rm -rf /tmp/quickjs
+            echo "  ✓ QuickJS-NG installed"
           fi
-          export PATH="$HOME/.deno/bin:$PATH"
           
           # Install Cloudflare Warp
           if ! command -v warp-cli &>/dev/null; then
@@ -78,7 +85,7 @@ jobs:
             warp-cli set-mode proxy
             warp-cli connect
             echo "  ✓ Warp connected"
-          elif ! warp-cli status | grep -q "Connected"; then
+          elif ! warp-cli status 2>/dev/null | grep -q "Connected"; then
             warp-cli connect
             echo "  ✓ Warp reconnected"
           fi
@@ -143,7 +150,7 @@ jobs:
           Type=simple
           User=root
           WorkingDirectory=$PROJECT_DIR
-          Environment=PATH=$PROJECT_DIR/venv/bin:/usr/local/bin:/usr/bin:/bin:/root/.deno/bin
+          Environment=PATH=$PROJECT_DIR/venv/bin:/usr/local/bin:/usr/bin:/bin
           ExecStart=$PROJECT_DIR/venv/bin/python $PROJECT_DIR/bot.py
           Restart=on-failure
           RestartSec=10

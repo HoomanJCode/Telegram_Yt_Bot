@@ -11,25 +11,7 @@ class FileServer:
         self.port = port
         self.app = web.Application()
         self.app.router.add_get('/{filename}', self._handle_download)
-        self.app.router.add_head('/{filename}', self._handle_head)
         self._runner = None
-
-    async def _handle_head(self, request):
-        """Handle HEAD requests for download managers"""
-        filename = request.match_info['filename']
-        filepath = DOWNLOADS_DIR / filename
-        if not filepath.exists() or not filepath.is_file():
-            raise web.HTTPNotFound()
-        size = filepath.stat().st_size
-        return web.Response(
-            status=200,
-            headers={
-                'Content-Type': _mime(filepath.suffix),
-                'Content-Length': str(size),
-                'Accept-Ranges': 'bytes',
-                'Cache-Control': 'public, max-age=86400',
-            }
-        )
 
     async def _handle_download(self, request):
         filename = request.match_info['filename']
@@ -45,7 +27,6 @@ class FileServer:
             'Content-Disposition': f'inline; filename="{filename}"',
         }
         
-        # Handle Range request for resume support
         range_header = request.headers.get('Range', '')
         if range_header.startswith('bytes='):
             try:
@@ -82,7 +63,6 @@ class FileServer:
             except (ValueError, IndexError):
                 pass
         
-        # Full download
         response = web.StreamResponse()
         headers['Content-Length'] = str(file_size)
         response.headers.update(headers)

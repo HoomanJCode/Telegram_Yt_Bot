@@ -1,5 +1,5 @@
 """Synchronous yt-dlp download functions"""
-import tempfile, os, re
+import tempfile, os, re, subprocess, glob
 from pathlib import Path
 import yt_dlp
 
@@ -23,31 +23,21 @@ def download(bot, uid, url, media_type):
         if user_lang != 'en':
             sub_langs.append(user_lang)
         
-        if bot.has_ffmpeg:
-            opts = {
-                **base_opts,
-                'format': 'best[ext=mp4]/best',
-                'outtmpl': str(DOWNLOADS_DIR / '%(title)s_v.%(ext)s'),
-                'writesubtitles': True,
-                'writeautomaticsub': True,
-                'subtitleslangs': sub_langs,
-                'postprocessors': [
-                    {'key': 'FFmpegVideoRemuxer', 'preferedformat': 'mkv'},
-                    {'key': 'FFmpegEmbedSubtitle'},
-                ],
-            }
-        else:
-            opts = {
-                **base_opts,
-                'format': 'best[ext=mp4]/best',
-                'outtmpl': str(DOWNLOADS_DIR / '%(title)s_v.%(ext)s'),
-            }
+        opts = {
+            **base_opts,
+            'format': 'best[ext=mp4]/best',
+            'outtmpl': str(DOWNLOADS_DIR / '%(title)s_v.%(ext)s'),
+            'writesubtitles': True,
+            'writeautomaticsub': True,
+            'subtitleslangs': sub_langs,
+            'subtitlesformat': 'vtt',
+        }
     elif media_type == 'audio':
         opts = {**base_opts, 'format': 'bestaudio[ext=m4a]/bestaudio', 'outtmpl': str(DOWNLOADS_DIR / '%(title)s_a.%(ext)s')}
         if bot.has_ffmpeg:
             opts['postprocessors'] = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}]
     else:
-        opts = {**base_opts, 'format': 'best[ext=mp4]/best', 'outtmpl': str(DOWNLOADS_DIR / '%(title)s_v.%(ext)s')}
+        opts = {**base_opts, 'format': 'best', 'outtmpl': str(DOWNLOADS_DIR / '%(title)s_v.%(ext)s')}
     
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
@@ -55,10 +45,55 @@ def download(bot, uid, url, media_type):
         vid = info.get('id', '')
         fp = ydl.prepare_filename(info)
         
-        if media_type == 'video' and bot.has_ffmpeg:
-            fp = str(Path(fp).with_suffix('.mkv'))
-        elif media_type == 'audio' and bot.has_ffmpeg:
+        if media_type == 'audio' and bot.has_ffmpeg:
             fp = str(Path(fp).with_suffix('.mp3'))
+        
+        # Manual subtitle merge for video
+        if media_type == 'video' and bot.has_ffmpeg:
+            safe_title = _sanitize_filename(title)
+            video_file = None
+            subtitle_files = []
+            
+            # Find video file
+            for ext in ('.mp4', '.webm', '.mkv'):
+                candidate = DOWNLOADS_DIR / f'{Path(fp).stem}{ext}'
+                if candidate.exists():
+                    video_file = str(candidate)
+                    break
+            if not video_file:
+                for f in DOWNLOADS_DIR.iterdir():
+                    if f.is_file() and safe_title in f.stem and f.suffix in ('.mp4', '.webm', '.mkv'):
+                        video_file = str(f)
+                        break
+            
+            # Find subtitle files
+            if video_file:
+                video_stem = Path(video_file).stem
+                for f in DOWNLOADS_DIR.iterdir():
+                    if f.is_file() and f.suffix in ('.vtt', '.srt') and video_stem in f.stem:
+                        subtitle_files.append(str(f))
+            
+            # Merge with FFmpeg
+            if video_file and subtitle_files:
+                mkv_file = str(Path(video_file).with_suffix('.mkv'))
+                cmd = ['ffmpeg', '-y', '-i', video_file]
+                for sub in subtitle_files:
+                    cmd.extend(['-i', sub])
+                # Map all streams
+                cmd.extend(['-map', '0'])  # Video and audio from first input
+                for i in range(len(subtitle_files)):
+                    cmd.extend(['-map', f'{i+1}'])  # Subtitles from other inputs
+                cmd.extend(['-c', 'copy', '-c:s', 'srt', mkv_file])
+                
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                
+                if result.returncode == 0 and Path(mkv_file).exists():
+                    # Remove original video and subtitle files
+                    os.unlink(video_file)
+                    for sub in subtitle_files:
+                        try: os.unlink(sub)
+                        except: pass
+                    fp = mkv_file
         
         ext = Path(fp).suffix
         safe_title = _sanitize_filename(title)

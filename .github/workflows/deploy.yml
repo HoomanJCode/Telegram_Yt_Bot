@@ -74,21 +74,28 @@ jobs:
             echo "  ✓ QuickJS-NG installed"
           fi
           
-          # Install Cloudflare Warp
+          # Install & Setup Cloudflare Warp
           if ! command -v warp-cli &>/dev/null; then
             echo "🔧 Installing Cloudflare Warp..."
             curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
             echo "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/cloudflare-client.list
             apt-get update -qq
             apt-get install -y -qq cloudflare-warp
-            warp-cli --accept-tos registration new
-            warp-cli mode proxy
-            warp-cli connect
-            echo "  ✓ Warp connected"
-          elif ! warp-cli status 2>/dev/null | grep -q "Connected"; then
-            warp-cli connect
-            echo "  ✓ Warp reconnected"
           fi
+          
+          echo "🔧 Configuring Cloudflare Warp..."
+          systemctl stop warp-svc 2>/dev/null || true
+          systemctl disable warp-svc 2>/dev/null || true
+          pkill -9 warp-svc 2>/dev/null || true
+          pkill -9 warp-cli 2>/dev/null || true
+          sleep 2
+          rm -f /run/cloudflare-warp/warp_service
+          warp-svc --accept-tos &
+          sleep 3
+          echo "y" | warp-cli registration new 2>/dev/null || true
+          warp-cli mode proxy
+          warp-cli connect
+          echo "  ✓ Warp ready"
           
           if [ -d "$PROJECT_DIR/.git" ]; then
             echo "📥 Pulling latest code..."

@@ -25,8 +25,8 @@ def download(bot, uid, url, media_type):
         
         opts = {
             **base_opts,
-            'format': 'best[ext=mp4]/best',
-            'outtmpl': str(DOWNLOADS_DIR / '%(title)s_v.%(ext)s'),
+            'format': 'bestvideo+bestaudio/best',
+            'outtmpl': str(DOWNLOADS_DIR / '%(title)s_v.mkv'),
             'merge_output_format': 'mkv',
             'writesubtitles': True,
             'writeautomaticsub': True,
@@ -57,7 +57,7 @@ def download(bot, uid, url, media_type):
             fp = str(new_path)
         
         if Path(fp).exists(): return fp, title, vid
-        for ext_check in ('.mkv', '.mp4', '.mp3', '.m4a', '.webm', '.opus'):
+        for ext_check in ('.mkv', '.mp4', '.webm', '.mp3', '.m4a', '.opus'):
             alt = DOWNLOADS_DIR / f'{Path(fp).stem}{ext_check}'
             if alt.exists(): return str(alt), title, vid
         for f in DOWNLOADS_DIR.iterdir():

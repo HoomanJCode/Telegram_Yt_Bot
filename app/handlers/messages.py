@@ -1,4 +1,3 @@
-# app/handlers/messages.py
 """Message handler for private chats and groups"""
 import asyncio, os, logging
 from datetime import datetime
@@ -44,14 +43,12 @@ async def _group_download(bot, uid, url, msg, media_type, video_id):
             bot.videos.setdefault(uid, []).insert(0, record)
             while len(bot.videos.get(uid, [])) > 20: old = bot.videos[uid].pop(); Path(old.file_path).unlink(missing_ok=True)
             bot.save()
-        
-        # Check default delivery for groups
+
         default = get_default_delivery(bot, uid)
         if default == 'telegram':
             from app.handlers.tokens import send_file
             record = find_existing(bot, uid, video_id, media_type)
-            if record:
-                await send_file(bot, msg, record)
+            if record: await send_file(bot, msg, record)
             return
         elif default == 'link':
             record = find_existing(bot, uid, video_id, media_type)
@@ -64,8 +61,7 @@ async def _group_download(bot, uid, url, msg, media_type, video_id):
                     parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=False,
                     reply_to_message_id=msg.message_id)
             return
-        
-        # Default: show keyboard
+
         mb = Path(fp).stat().st_size / 1024 / 1024
         kb = _group_delivery_kb(bot, uid)
         await msg.reply_text(f"✅ *{esc(title[:200])}*\n📦 {mb:.2f} MB\n\nChoose delivery:", parse_mode=ParseMode.MARKDOWN, reply_markup=kb, reply_to_message_id=msg.message_id)
@@ -88,11 +84,13 @@ async def download_task(bot, uid, url, msg, media_type):
 
 async def _ensure(bot, uid):
     if uid in bot._cookie_data: return True
-    if uid in bot._cookie_file_ids: return await _load_cookies(bot, uid)
+    if uid in bot._cookie_file_ids:
+        result = await _load_cookies(bot, uid)
+        return result
     return False
 
 async def _load_cookies(bot, uid):
-    logger.info("Restoring cookies for user %d", uid)
+    logger.info("Restoring cookies for user %d from Telegram", uid)
     if not bot._bot:
         logger.warning("No bot reference for cookie restore")
         return False
@@ -107,7 +105,6 @@ async def _load_cookies(bot, uid):
         return True
     except Exception as e:
         logger.error("Cookie restore failed %d: %s", uid, str(e)[:100])
-        del bot._cookie_file_ids[uid]; bot.save()
         return False
 
 async def _check_group(bot, chat_id, bot_client):

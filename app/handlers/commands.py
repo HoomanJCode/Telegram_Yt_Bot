@@ -9,6 +9,8 @@ async def start_cmd(bot, u, c):
     if args and args[0].startswith('dl_'):
         from app.handlers.tokens import handle_token_start
         await handle_token_start(bot, uid, args[0], u.message); return
+    from app.handlers.messages import _ensure
+    await _ensure(bot, uid)
     nav_clear(bot, uid)
     from app.handlers.navigation import welcome_text, menu
     await u.message.reply_text(await welcome_text(bot), reply_markup=menu(bot, uid))

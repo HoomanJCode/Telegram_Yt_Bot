@@ -25,13 +25,15 @@ def download(bot, uid, url, media_type):
         
         opts = {
             **base_opts,
-            'format': 'bestvideo+bestaudio/best',
-            'outtmpl': str(DOWNLOADS_DIR / '%(title)s_v.mkv'),
-            'merge_output_format': 'mkv',
+            'format': 'best[ext=mp4]/best',
+            'outtmpl': str(DOWNLOADS_DIR / '%(title)s_v.%(ext)s'),
             'writesubtitles': True,
             'writeautomaticsub': True,
             'subtitleslangs': sub_langs,
-            'embedsubs': True,
+            'postprocessors': [
+                {'key': 'FFmpegVideoRemuxer', 'preferedformat': 'mkv'},
+                {'key': 'FFmpegEmbedSubtitle'},
+            ],
         }
     else:
         opts = {**base_opts, 'format': 'bestaudio[ext=m4a]/bestaudio', 'outtmpl': str(DOWNLOADS_DIR / '%(title)s_a.%(ext)s')}
@@ -42,7 +44,12 @@ def download(bot, uid, url, media_type):
         title = info.get('title', 'Unknown')
         vid = info.get('id', '')
         fp = ydl.prepare_filename(info)
-        if media_type == 'audio' and bot.has_ffmpeg: fp = str(Path(fp).with_suffix('.mp3'))
+        
+        # After remux, extension is .mkv
+        if media_type == 'video':
+            fp = str(Path(fp).with_suffix('.mkv'))
+        elif media_type == 'audio' and bot.has_ffmpeg:
+            fp = str(Path(fp).with_suffix('.mp3'))
         
         ext = Path(fp).suffix
         safe_title = _sanitize_filename(title)
@@ -57,11 +64,14 @@ def download(bot, uid, url, media_type):
             fp = str(new_path)
         
         if Path(fp).exists(): return fp, title, vid
+        
+        # Search for the file with any extension
         for ext_check in ('.mkv', '.mp4', '.webm', '.mp3', '.m4a', '.opus'):
             alt = DOWNLOADS_DIR / f'{Path(fp).stem}{ext_check}'
             if alt.exists(): return str(alt), title, vid
         for f in DOWNLOADS_DIR.iterdir():
-            if f.is_file() and f.stem.startswith(safe_title): return str(f), title, vid
+            if f.is_file() and safe_title in f.stem and not f.suffix.startswith('.vtt'):
+                return str(f), title, vid
         raise FileNotFoundError(title)
 
 def download_thumb(bot, uid, url):

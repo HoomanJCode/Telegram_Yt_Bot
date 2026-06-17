@@ -1,3 +1,4 @@
+# .github/workflows/deploy.yml
 name: Deploy TelegramYtBot to VPS
 
 on:
@@ -57,13 +58,30 @@ jobs:
           
           echo "📦 Installing dependencies..."
           apt-get update -qq
-          apt-get install -y -qq python3 python3-pip python3-venv ffmpeg curl git
+          apt-get install -y -qq python3 python3-pip python3-venv ffmpeg curl git lsb-release gpg
           
+          # Install Deno
           if ! command -v deno &>/dev/null; then
             echo "🔧 Installing Deno..."
             curl -fsSL https://deno.land/install.sh | sh
           fi
           export PATH="$HOME/.deno/bin:$PATH"
+          
+          # Install Cloudflare Warp
+          if ! command -v warp-cli &>/dev/null; then
+            echo "🔧 Installing Cloudflare Warp..."
+            curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+            echo "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/cloudflare-client.list
+            apt-get update -qq
+            apt-get install -y -qq cloudflare-warp
+            warp-cli register
+            warp-cli set-mode proxy
+            warp-cli connect
+            echo "  ✓ Warp connected"
+          elif ! warp-cli status | grep -q "Connected"; then
+            warp-cli connect
+            echo "  ✓ Warp reconnected"
+          fi
           
           if [ -d "$PROJECT_DIR/.git" ]; then
             echo "📥 Pulling latest code..."
@@ -113,7 +131,6 @@ jobs:
           print('Token:', 'SET' if c.BOT_TOKEN and 'YOUR_BOT_TOKEN' not in c.BOT_TOKEN else 'MISSING')
           print('Base URL:', c.BASE_DOWNLOAD_LINK)
           print('Storage:', c.STORAGE_DAYS, 'days')
-          print('Cookie TTL:', c.COOKIE_TTL_HOURS, 'hours (0=until restart)')
           "
           
           echo "🔧 Creating service..."

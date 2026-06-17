@@ -1,9 +1,10 @@
 """Synchronous yt-dlp download functions"""
-import tempfile, os, re, subprocess, glob
+import tempfile, os, re, subprocess
 from pathlib import Path
 import yt_dlp
 
 DOWNLOADS_DIR = Path('downloads')
+WARP_PROXY = 'http://127.0.0.1:40000'
 
 def _sanitize_filename(title):
     """Keep only alphanumeric, spaces, and basic punctuation"""
@@ -11,11 +12,23 @@ def _sanitize_filename(title):
     return name[:100].strip()
 
 def fetch_info(bot, uid, url):
-    opts = {'format': 'best', 'cookiefile': _cookie_file(bot, uid), 'quiet': True, 'no_warnings': True, 'socket_timeout': 30, 'retries': 3}
+    opts = {
+        'format': 'best',
+        'cookiefile': _cookie_file(bot, uid),
+        'quiet': True, 'no_warnings': True,
+        'socket_timeout': 30, 'retries': 3,
+        'proxy': WARP_PROXY,
+    }
     with yt_dlp.YoutubeDL(opts) as ydl: return ydl.extract_info(url, download=False)
 
 def download(bot, uid, url, media_type):
-    base_opts = {'cookiefile': _cookie_file(bot, uid), 'quiet': True, 'no_warnings': True, 'socket_timeout': 120, 'retries': 50, 'fragment_retries': 50, 'concurrent_fragment_downloads': 2, 'no_mtime': True}
+    base_opts = {
+        'cookiefile': _cookie_file(bot, uid),
+        'quiet': True, 'no_warnings': True,
+        'socket_timeout': 120, 'retries': 50, 'fragment_retries': 50,
+        'concurrent_fragment_downloads': 2, 'no_mtime': True,
+        'proxy': WARP_PROXY,
+    }
     
     if media_type == 'video':
         user_lang = bot._user_langs.get(uid, 'en')
@@ -54,7 +67,6 @@ def download(bot, uid, url, media_type):
             video_file = None
             subtitle_files = []
             
-            # Find video file
             for ext in ('.mp4', '.webm', '.mkv'):
                 candidate = DOWNLOADS_DIR / f'{Path(fp).stem}{ext}'
                 if candidate.exists():
@@ -66,29 +78,25 @@ def download(bot, uid, url, media_type):
                         video_file = str(f)
                         break
             
-            # Find subtitle files
             if video_file:
                 video_stem = Path(video_file).stem
                 for f in DOWNLOADS_DIR.iterdir():
                     if f.is_file() and f.suffix in ('.vtt', '.srt') and video_stem in f.stem:
                         subtitle_files.append(str(f))
             
-            # Merge with FFmpeg
             if video_file and subtitle_files:
                 mkv_file = str(Path(video_file).with_suffix('.mkv'))
                 cmd = ['ffmpeg', '-y', '-i', video_file]
                 for sub in subtitle_files:
                     cmd.extend(['-i', sub])
-                # Map all streams
-                cmd.extend(['-map', '0'])  # Video and audio from first input
+                cmd.extend(['-map', '0'])
                 for i in range(len(subtitle_files)):
-                    cmd.extend(['-map', f'{i+1}'])  # Subtitles from other inputs
+                    cmd.extend(['-map', f'{i+1}'])
                 cmd.extend(['-c', 'copy', '-c:s', 'srt', mkv_file])
                 
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
                 
                 if result.returncode == 0 and Path(mkv_file).exists():
-                    # Remove original video and subtitle files
                     os.unlink(video_file)
                     for sub in subtitle_files:
                         try: os.unlink(sub)
@@ -118,7 +126,14 @@ def download(bot, uid, url, media_type):
         raise FileNotFoundError(title)
 
 def download_thumb(bot, uid, url):
-    opts = {'cookiefile': _cookie_file(bot, uid), 'quiet': True, 'no_warnings': True, 'socket_timeout': 30, 'retries': 3, 'skip_download': True, 'writethumbnail': True, 'outtmpl': str(DOWNLOADS_DIR / '%(title)s_thumb.%(ext)s')}
+    opts = {
+        'cookiefile': _cookie_file(bot, uid),
+        'quiet': True, 'no_warnings': True,
+        'socket_timeout': 30, 'retries': 3,
+        'skip_download': True, 'writethumbnail': True,
+        'outtmpl': str(DOWNLOADS_DIR / '%(title)s_thumb.%(ext)s'),
+        'proxy': WARP_PROXY,
+    }
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
         title = info.get('title', 'Unknown')

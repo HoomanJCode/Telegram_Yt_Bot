@@ -25,8 +25,8 @@ def download(bot, uid, url, media_type):
         
         opts = {
             **base_opts,
-            'format': 'best[ext=mp4]/best',
-            'outtmpl': str(DOWNLOADS_DIR / '%(title)s_v.%(ext)s'),
+            'format': 'bestvideo+bestaudio/best',
+            'outtmpl': str(DOWNLOADS_DIR / '%(title)s_v.mkv'),
             'merge_output_format': 'mkv',
             'writesubtitles': True,
             'writeautomaticsub': True,
@@ -43,10 +43,6 @@ def download(bot, uid, url, media_type):
         vid = info.get('id', '')
         fp = ydl.prepare_filename(info)
         if media_type == 'audio' and bot.has_ffmpeg: fp = str(Path(fp).with_suffix('.mp3'))
-        
-        # For video, extension changes to .mkv after merge
-        if media_type == 'video':
-            fp = str(Path(fp).with_suffix('.mkv'))
         
         ext = Path(fp).suffix
         safe_title = _sanitize_filename(title)

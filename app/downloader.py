@@ -25,8 +25,8 @@ def download(bot, uid, url, media_type):
         
         opts = {
             **base_opts,
-            'format': 'bestvideo+bestaudio/best',
-            'outtmpl': str(DOWNLOADS_DIR / '%(title)s_v.mkv'),
+            'format': 'best[ext=mp4]/best',
+            'outtmpl': str(DOWNLOADS_DIR / '%(title)s_v.%(ext)s'),
             'merge_output_format': 'mkv',
             'writesubtitles': True,
             'writeautomaticsub': True,
@@ -43,6 +43,10 @@ def download(bot, uid, url, media_type):
         vid = info.get('id', '')
         fp = ydl.prepare_filename(info)
         if media_type == 'audio' and bot.has_ffmpeg: fp = str(Path(fp).with_suffix('.mp3'))
+        
+        # For video, extension changes to .mkv after merge
+        if media_type == 'video':
+            fp = str(Path(fp).with_suffix('.mkv'))
         
         ext = Path(fp).suffix
         safe_title = _sanitize_filename(title)
@@ -61,7 +65,7 @@ def download(bot, uid, url, media_type):
             alt = DOWNLOADS_DIR / f'{Path(fp).stem}{ext_check}'
             if alt.exists(): return str(alt), title, vid
         for f in DOWNLOADS_DIR.iterdir():
-            if f.is_file() and f.stem.startswith(vid): return str(f), title, vid
+            if f.is_file() and f.stem.startswith(safe_title): return str(f), title, vid
         raise FileNotFoundError(title)
 
 def download_thumb(bot, uid, url):

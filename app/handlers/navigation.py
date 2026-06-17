@@ -1,3 +1,4 @@
+# app/handlers/navigation.py
 """Navigation stack, menus, back button"""
 import asyncio
 from pathlib import Path
@@ -27,10 +28,13 @@ def menu(bot, uid):
     has = uid in bot._cookie_data
     vc = len(bot.videos.get(uid, []))
     lang = bot._user_langs.get(uid, 'en')
+    delivery = bot._user_settings.get(uid, {}).get('default_delivery', 'ask')
+    delivery_label = {'ask': 'Ask', 'telegram': 'Telegram', 'link': 'Link'}.get(delivery, 'Ask')
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📹 Recent Downloads", callback_data='r')],
         [InlineKeyboardButton("🍪 Upload Cookies", callback_data='c')],
-        [InlineKeyboardButton(f"🌐 Language: {lang.upper()}", callback_data='lang')],
+        [InlineKeyboardButton(f"🌐 Language: {lang.upper()}", callback_data='lang'),
+         InlineKeyboardButton(f"📤 Delivery: {delivery_label}", callback_data='delivery')],
         [InlineKeyboardButton(f"🍪 {'✅' if has else '❌'}", callback_data='cs'),
          InlineKeyboardButton(f"📦 {vc} files", callback_data='vc')],
     ])
@@ -98,7 +102,9 @@ async def router(bot, u, c):
     if d == 'b': await handle_back(bot, u, c)
     elif d == 'r': nav_push(bot, uid, NAV_MAIN); await show_recent(bot, u, c)
     elif d == 'lang': await _change_language(bot, u, c)
+    elif d == 'delivery': await _change_delivery(bot, u, c)
     elif d.startswith('setlang_'): await _set_language(bot, u, c)
+    elif d.startswith('setdelivery_'): await _set_delivery(bot, u, c)
     elif d == 'cs': await q.message.reply_text("✅ Cookies active" if uid in bot._cookie_data else "❌ Upload with /cookies")
     elif d == 'vc': await q.message.reply_text(f"📦 {len(bot.videos.get(uid,[]))} files")
     elif d == 'clear_all': await _clear_all(bot, u, c)
@@ -132,6 +138,30 @@ async def _set_language(bot, u, c):
     bot.save()
     lang_names = {'en': 'English', 'fa': 'فارسی', 'ar': 'العربية', 'ru': 'Русский', 'es': 'Español'}
     await q.message.reply_text(f"🌐 Language set to {lang_names.get(lang, lang.upper())}", reply_markup=menu(bot, uid))
+    await q.message.delete()
+
+async def _change_delivery(bot, u, c):
+    q = u.callback_query; uid = u.effective_user.id
+    current = bot._user_settings.get(uid, {}).get('default_delivery', 'ask')
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"{'✅' if current == 'ask' else '⬜'} Ask every time", callback_data='setdelivery_ask')],
+        [InlineKeyboardButton(f"{'✅' if current == 'telegram' else '⬜'} Send via Telegram", callback_data='setdelivery_telegram')],
+        [InlineKeyboardButton(f"{'✅' if current == 'link' else '⬜'} Get Download Link", callback_data='setdelivery_link')],
+        [InlineKeyboardButton("🔙 Back", callback_data='b')],
+    ])
+    await q.message.reply_text("📤 Default delivery method:", reply_markup=kb)
+    await q.message.delete()
+
+async def _set_delivery(bot, u, c):
+    q = u.callback_query; await q.answer()
+    uid = u.effective_user.id
+    method = q.data.split('_')[1]
+    if uid not in bot._user_settings:
+        bot._user_settings[uid] = {}
+    bot._user_settings[uid]['default_delivery'] = method
+    bot.save()
+    labels = {'ask': 'Ask every time', 'telegram': 'Send via Telegram', 'link': 'Get Download Link'}
+    await q.message.reply_text(f"📤 Default delivery: {labels.get(method, method)}", reply_markup=menu(bot, uid))
     await q.message.delete()
 
 async def _clear_all(bot, u, c):

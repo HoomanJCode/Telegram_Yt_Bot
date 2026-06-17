@@ -1,3 +1,4 @@
+# app/utils.py
 """Utility functions"""
 import json, re, subprocess, time
 from pathlib import Path
@@ -50,6 +51,10 @@ def load_data(bot):
         fp = DATA_DIR / 'user_langs.json'
         if fp.exists(): bot._user_langs = {int(k): v for k, v in json.loads(fp.read_text()).items()}
     except: pass
+    try:
+        fp = DATA_DIR / 'user_settings.json'
+        if fp.exists(): bot._user_settings = {int(k): v for k, v in json.loads(fp.read_text()).items()}
+    except: pass
 
 def save_data(bot):
     try: (DATA_DIR / 'user_videos.json').write_text(json.dumps({str(k): [v.to_dict() for v in vs] for k, vs in bot.videos.items()}, indent=2))
@@ -60,8 +65,14 @@ def save_data(bot):
     except: pass
     try: (DATA_DIR / 'user_langs.json').write_text(json.dumps({str(k): v for k, v in bot._user_langs.items()}, indent=2))
     except: pass
+    try: (DATA_DIR / 'user_settings.json').write_text(json.dumps({str(k): v for k, v in bot._user_settings.items()}, indent=2))
+    except: pass
 
 def find_existing(bot, uid, video_id, media_type='video'):
     for v in bot.videos.get(uid, []):
         if v.video_id == video_id and v.media_type == media_type and Path(v.file_path).exists(): return v
     return None
+
+def get_default_delivery(bot, uid):
+    """Return user's default delivery method: 'ask', 'telegram', 'link'"""
+    return bot._user_settings.get(uid, {}).get('default_delivery', 'ask')

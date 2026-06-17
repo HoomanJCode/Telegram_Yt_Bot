@@ -1,3 +1,4 @@
+# app/handlers/messages.py
 """Message handler for private chats and groups"""
 import asyncio, os, logging
 from datetime import datetime
@@ -6,7 +7,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode, ChatType
 from app.models import VideoRecord
 from app.downloader import download, fetch_info
-from app.utils import extract_url, extract_video_id, find_existing, esc, ok
+from app.utils import extract_url, extract_video_id, find_existing, esc, ok, get_default_delivery
 from app.handlers.navigation import nav_clear, show_format_choice, menu
 
 logger = logging.getLogger('yt_bot')
@@ -43,6 +44,28 @@ async def _group_download(bot, uid, url, msg, media_type, video_id):
             bot.videos.setdefault(uid, []).insert(0, record)
             while len(bot.videos.get(uid, [])) > 20: old = bot.videos[uid].pop(); Path(old.file_path).unlink(missing_ok=True)
             bot.save()
+        
+        # Check default delivery for groups
+        default = get_default_delivery(bot, uid)
+        if default == 'telegram':
+            from app.handlers.tokens import send_file
+            record = find_existing(bot, uid, video_id, media_type)
+            if record:
+                await send_file(bot, msg, record)
+            return
+        elif default == 'link':
+            record = find_existing(bot, uid, video_id, media_type)
+            if record and Path(record.file_path).exists():
+                from urllib.parse import quote
+                url_link = f"{bot.base_url}/{quote(Path(record.file_path).name)}"
+                mb = Path(record.file_path).stat().st_size / 1024 / 1024
+                await msg.reply_text(
+                    f"🎬 *{esc(record.title[:200])}*\n\n📦 {mb:.2f} MB\n📥 {url_link}\n\n⚠️ {bot.config.STORAGE_DAYS}d retention.",
+                    parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=False,
+                    reply_to_message_id=msg.message_id)
+            return
+        
+        # Default: show keyboard
         mb = Path(fp).stat().st_size / 1024 / 1024
         kb = _group_delivery_kb(bot, uid)
         await msg.reply_text(f"✅ *{esc(title[:200])}*\n📦 {mb:.2f} MB\n\nChoose delivery:", parse_mode=ParseMode.MARKDOWN, reply_markup=kb, reply_to_message_id=msg.message_id)

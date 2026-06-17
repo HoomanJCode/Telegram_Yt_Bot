@@ -1,3 +1,4 @@
+# app/bot.py
 """Main bot class with shared state"""
 import asyncio
 from pathlib import Path
@@ -21,6 +22,7 @@ class YouTubeDownloaderBot:
         self._cookie_data: Dict[int, bytes] = {}
         self._cookie_tmpfiles: Dict[int, str] = {}
         self._user_langs: Dict[int, str] = {}
+        self._user_settings: Dict[int, dict] = {}  # uid -> {default_delivery: 'ask'|'telegram'|'link'}
         self._bot = None
         self._bot_username = None
         self.videos: Dict[int, List[VideoRecord]] = {}

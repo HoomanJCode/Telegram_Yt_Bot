@@ -1,9 +1,10 @@
+# app/handlers/formats.py
 """Format choice and delivery handlers"""
 from pathlib import Path
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode, ChatType
 from app.handlers.navigation import nav_push, NAV_FORMAT
-from app.utils import esc
+from app.utils import esc, get_default_delivery
 
 def format_choice_kb(bot, uid, video_id):
     existing = {v.media_type for v in bot.videos.get(uid, []) if v.video_id == video_id and Path(v.file_path).exists()}
@@ -37,6 +38,18 @@ async def choose_format(bot, u, c):
                 await download_task(bot, uid, url, q.message, mt)
 
 async def show_delivery(bot, msg, record, idx):
+    uid = msg.chat.id
+    default = get_default_delivery(bot, uid)
+    
+    # If user has a default set, skip the keyboard and deliver directly
+    if default == 'telegram':
+        await send_telegram_direct(bot, msg, record)
+        return
+    elif default == 'link':
+        await send_link_direct(bot, msg, record)
+        return
+    
+    # Default: ask user
     emoji = {'video': '🎬', 'audio': '🎵', 'thumb': '🖼️'}.get(record.media_type, '📹')
     mb = record.file_size / 1024 / 1024
     nav_push(bot, msg.chat.id, NAV_FORMAT, (record.url, record.video_id))
@@ -53,6 +66,26 @@ def delivery_kb(bot, uid, idx=None):
         [InlineKeyboardButton("📋 Get Download Link", callback_data=f'lk_{idx_str}')],
         [InlineKeyboardButton("🔙 Back to formats", callback_data=f'backfmt_{idx_str}')],
     ])
+
+async def send_telegram_direct(bot, msg, record):
+    """Send via Telegram without asking user"""
+    from app.handlers.tokens import send_file
+    await send_file(bot, msg, record)
+
+async def send_link_direct(bot, msg, record):
+    """Send download link without asking user"""
+    if not Path(record.file_path).exists(): return
+    from urllib.parse import quote
+    url = f"{bot.base_url}/{quote(Path(record.file_path).name)}"
+    mb = Path(record.file_path).stat().st_size / 1024 / 1024
+    await msg.reply_text(
+        f"🎬 *{esc(record.title[:200])}*\n\n"
+        f"📦 {mb:.2f} MB\n"
+        f"📥 {url}\n\n"
+        f"⚠️ File will be deleted after {bot.config.STORAGE_DAYS} days.",
+        parse_mode=ParseMode.MARKDOWN,
+        disable_web_page_preview=False,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📥 Download", url=url)], [InlineKeyboardButton("🔙 Menu", callback_data='b')]]))
 
 async def send_telegram(bot, u, c):
     q = u.callback_query; await q.answer(); uid = u.effective_user.id; data = q.data

@@ -97,7 +97,6 @@ async def router(bot, u, c):
     q = u.callback_query; await q.answer(); d, uid = q.data, u.effective_user.id
     if d == 'b': await handle_back(bot, u, c)
     elif d == 'r': nav_push(bot, uid, NAV_MAIN); await show_recent(bot, u, c)
-    elif d == 'c': from app.handlers.cookies import ask_cookies; await ask_cookies(bot, u, c)
     elif d == 'lang': await _change_language(bot, u, c)
     elif d.startswith('setlang_'): await _set_language(bot, u, c)
     elif d == 'cs': await q.message.reply_text("✅ Cookies active" if uid in bot._cookie_data else "❌ Upload with /cookies")

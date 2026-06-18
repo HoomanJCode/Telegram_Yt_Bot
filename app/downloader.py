@@ -36,12 +36,20 @@ def _vtt_to_srt(vtt_path):
 
 def _merge_subs_into_mkv(video_file, subtitle_files):
     """Merge video + subtitle files into MKV. Returns MKV path on success, None on failure.
-    Robust: tries to convert VTT -> SRT first, then mux with -c copy for video/audio
-    and -c:s srt for subs (srt codecs can be muxed, webvtt cannot).
+
+    Robust:
+    * Tries to convert VTT -> SRT first (srt codec can be muxed; webvtt cannot).
+    * Writes ffmpeg output to a unique temp file, then atomically renames it to
+      the target MKV path. This avoids same-path read/write collisions when the
+      input `video_file` is already an MKV (e.g. yt-dlp produced MKV directly
+      for vp9+opus streams) and ensures we never unlink the just-written
+      merged file by mistake.
     """
     if not subtitle_files:
         return None
     mkv_file = str(Path(video_file).with_suffix('.mkv'))
+    # Distinct path so ffmpeg never reads & writes the same file at once.
+    tmp_file = f"{mkv_file}.merge.tmp.mkv"
     converted = []
     for sub in subtitle_files:
         if sub.lower().endswith('.vtt'):
@@ -57,21 +65,30 @@ def _merge_subs_into_mkv(video_file, subtitle_files):
     for i in range(len(converted)):
         cmd.append('-map'); cmd.append(f'{i + 1}:0')
     cmd.extend(['-c:v', 'copy', '-c:a', 'copy', '-c:s', 'srt'])
-    cmd.append(mkv_file)
+    cmd.append(tmp_file)
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        if result.returncode == 0 and Path(mkv_file).exists() and Path(mkv_file).stat().st_size > 0:
-            try: os.unlink(video_file)
-            except: pass
+        if result.returncode == 0 and Path(tmp_file).exists() and Path(tmp_file).stat().st_size > 0:
+            # Atomic rename temp -> final.
+            os.replace(tmp_file, mkv_file)
+            # Only delete the source video if its path differs from the output.
+            # When the input was already an MKV (e.g. yt-dlp produced MKV), the
+            # two paths match — unlinking would delete the merged result we
+            # just wrote via os.replace.
+            def _norm(p):
+                return os.path.normcase(os.path.abspath(p))
+            if _norm(video_file) != _norm(mkv_file):
+                try: os.unlink(video_file)
+                except: pass
             for sub in converted:
                 try: os.unlink(sub)
                 except: pass
             return mkv_file
     except Exception:
         pass
-    if Path(mkv_file).exists() and Path(mkv_file).stat().st_size == 0:
-        try: os.unlink(mkv_file)
+    if Path(tmp_file).exists():
+        try: os.unlink(tmp_file)
         except: pass
     return None
 
@@ -116,8 +133,9 @@ def download(bot, uid, url, media_type, video_quality=None, audio_quality=None, 
             **base_opts,
             'format': VIDEO_QUALITY_FMT.get(vq, VIDEO_QUALITY_FMT['best']),
             'outtmpl': str(DOWNLOADS_DIR / '%(title)s_v.%(ext)s'),
-            # Prefer MKV when we need to embed subs; fall back to MP4 for separate mode
-            'merge_output_format': 'mkv/mp4',
+            # No merge_output_format hint: we always run a manual ffmpeg MKV
+            # mux after download (with embedded subs), so yt-dlp can pick
+            # the natural codec-compatible container for the streams.
         }
         if actual_sub_mode != 'off':
             opts.update({

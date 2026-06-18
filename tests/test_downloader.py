@@ -155,42 +155,80 @@ class TestMergeSubsIntoMkv(unittest.TestCase):
 
     def test_success_path_cleans_original_and_subs(self):
         tmpdir, video, sub_vtt, sub_srt, srt_path, out = self._run_merge()
-        # The merge output file
-        Path(out).write_bytes(b'\0' * 6000)  # non-zero size so the size check passes
+        # Ffmpeg is mocked but writes to a temp suffix; pre-create that file
+        # so the size check passes.
+        tmp_file = out + '.merge.tmp.mkv'
+        Path(tmp_file).write_bytes(b'\0' * 6000)
         with patch('app.downloader.DOWNLOADS_DIR', Path(tmpdir)):
             with patch('app.downloader._vtt_to_srt', return_value=str(srt_path)):
                 with patch('app.downloader.subprocess.run') as mock_run:
                     mock_run.return_value = MagicMock(returncode=0)
                     result = _merge_subs_into_mkv(video, [sub_vtt])
                     self.assertEqual(result, out)
-                    # Original video removed, output kept
+                    # Original video removed (mp4 -> mkv, so paths differ)
                     self.assertFalse(os.path.exists(video))
+                    # Merged output (rename of tmp) kept
                     self.assertTrue(os.path.exists(out))
+                    # Temp file removed by os.replace
+                    self.assertFalse(os.path.exists(tmp_file))
                     # Subtitle file cleaned up too
                     self.assertFalse(os.path.exists(str(srt_path)))
 
     def test_empty_output_is_cleaned(self):
         tmpdir, video, sub_vtt, sub_srt, srt_path, out = self._run_merge()
+        # Ffmpeg mock returns 0 but the temp file is zero bytes — verify
+        # that _merge_subs_into_mkv bails and cleans up.
+        tmp_file = out + '.merge.tmp.mkv'
         with patch('app.downloader.DOWNLOADS_DIR', Path(tmpdir)):
             with patch('app.downloader._vtt_to_srt', return_value=str(srt_path)):
                 with patch('app.downloader.subprocess.run') as mock_run:
-                    # Returncode 0 but ffmpeg creates a zero-byte file
                     mock_run.return_value = MagicMock(returncode=0)
-                    Path(out).write_bytes(b'')  # zero bytes — should be removed
+                    Path(tmp_file).write_bytes(b'')
                     result = _merge_subs_into_mkv(video, [sub_vtt])
                     self.assertIsNone(result)
+                    self.assertFalse(os.path.exists(tmp_file))
                     self.assertFalse(os.path.exists(out))
 
     def test_passes_non_vtt_subs_directly_through(self):
         """If VTT→SRT is skipped and the sub is already SRT, helper passes it."""
         tmpdir, video, _sub_vtt, sub_srt, srt_path, out = self._run_merge()
-        Path(out).write_bytes(b'\0' * 6000)
+        tmp_file = out + '.merge.tmp.mkv'
+        Path(tmp_file).write_bytes(b'\0' * 6000)
         with patch('app.downloader.DOWNLOADS_DIR', Path(tmpdir)):
             # No _vtt_to_srt patch — pass SRT directly
             with patch('app.downloader.subprocess.run') as mock_run:
                 mock_run.return_value = MagicMock(returncode=0)
                 result = _merge_subs_into_mkv(video, [str(srt_path)])
                 self.assertEqual(result, out)
+                self.assertTrue(os.path.exists(out))
+                self.assertFalse(os.path.exists(tmp_file))
+
+    def test_input_already_mkv_does_not_unlink_output(self):
+        """Regression: when input is already MKV, mkv_file == video_file path.
+        Function must write to a temp file, atomic-rename to mkv_file, and
+        NOT also unlink that path (or we'd delete the merged result).
+        """
+        tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
+        video_mkv = Path(tmpdir) / 'video.mkv'
+        video_mkv.write_bytes(b'\0' * 5000)
+        srt_path = Path(tmpdir) / 'sub_en.srt'
+        srt_path.write_text('1\n00:00:00,000 --> 00:00:01,000\nHi\n')
+        tmp_file = str(video_mkv) + '.merge.tmp.mkv'
+        Path(tmp_file).write_bytes(b'\0' * 6000)
+        out = str(video_mkv)
+        with patch('app.downloader.DOWNLOADS_DIR', Path(tmpdir)):
+            with patch('app.downloader._vtt_to_srt', return_value=str(srt_path)):
+                with patch('app.downloader.subprocess.run') as mock_run:
+                    mock_run.return_value = MagicMock(returncode=0)
+                    result = _merge_subs_into_mkv(out, [str(srt_path)])
+                    self.assertEqual(result, out)
+                    # The merged file (renamed from tmp) still exists with content.
+                    self.assertTrue(os.path.exists(out))
+                    self.assertGreater(os.path.getsize(out), 0)
+                    # Temp file is gone after os.replace.
+                    self.assertFalse(os.path.exists(tmp_file))
+                    self.assertFalse(os.path.exists(str(srt_path)))
 
 
 class TestQualityFormatIntegrity(unittest.TestCase):

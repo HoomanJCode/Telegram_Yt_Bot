@@ -9,9 +9,11 @@ from app.utils import (
     esc, find_existing,
     VIDEO_QUALITY_OPTIONS, AUDIO_QUALITY_OPTIONS, SUBTITLE_MODE_OPTIONS,
     VIDEO_QUALITY_LABELS, AUDIO_QUALITY_LABELS, SUBTITLE_MODE_LABELS,
+    classify_yt_error, friendly_error_msg,
 )
 from app.models import VideoRecord
 from app.downloader import fetch_info
+import logging
 
 NAV_MAIN = 'main'
 NAV_RECENT = 'recent'
@@ -27,6 +29,8 @@ def nav_pop(bot, uid):
     return (NAV_MAIN, None)
 
 def nav_clear(bot, uid): bot._nav_stack.pop(uid, None)
+
+logger = logging.getLogger('yt_bot')
 
 def menu(bot, uid):
     has = uid in bot._cookie_data
@@ -75,10 +79,9 @@ async def show_format_choice(bot, uid, url, video_id, msg):
         from app.handlers.formats import format_choice_kb
         await s.edit_text(f"📹 *{esc(title[:200])}*\n⏱ {mins}:{secs:02d}\n\nChoose format:", parse_mode=ParseMode.MARKDOWN, reply_markup=format_choice_kb(bot, uid, video_id))
     except Exception as e:
-        import logging
-        logger = logging.getLogger('yt_bot')
-        logger.error("Format choice error: %s", str(e)[:200])
-        await s.edit_text("❌ Failed.", reply_markup=menu(bot, uid))
+        category = classify_yt_error(str(e))
+        logger.error("Format choice error [%s]: %s", category, str(e)[:200])
+        await s.edit_text(friendly_error_msg(category), reply_markup=menu(bot, uid))
 
 async def show_recent(bot, u, c, page=0):
     uid = u.effective_user.id; msg = u.callback_query.message if u.callback_query else u.message

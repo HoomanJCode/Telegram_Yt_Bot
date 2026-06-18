@@ -6,7 +6,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode, ChatType
 from app.models import VideoRecord
 from app.downloader import download, fetch_info
-from app.utils import extract_url, extract_video_id, find_existing, esc, ok, get_default_delivery
+from app.utils import extract_url, extract_video_id, find_existing, esc, ok, get_default_delivery, classify_yt_error, friendly_error_msg
 from app.handlers.navigation import nav_clear, show_format_choice, menu
 
 logger = logging.getLogger('yt_bot')
@@ -79,7 +79,10 @@ async def _group_download(bot, uid, url, msg, media_type, video_id):
         mb = Path(fp).stat().st_size / 1024 / 1024
         kb = _group_delivery_kb(bot, uid)
         await msg.reply_text(f"✅ *{esc(title[:200])}*\n📦 {mb:.2f} MB\n\nChoose delivery:", parse_mode=ParseMode.MARKDOWN, reply_markup=kb, reply_to_message_id=msg.message_id)
-    except Exception as e: pass
+    except Exception as e:
+        category = classify_yt_error(str(e))
+        logger.error("Group download error [%s]: %s", category, str(e)[:200])
+        await msg.reply_text(friendly_error_msg(category), reply_to_message_id=msg.message_id)
 
 async def download_task(bot, uid, url, msg, media_type):
     from app.downloader import download_thumb
@@ -98,7 +101,10 @@ async def download_task(bot, uid, url, msg, media_type):
             record._pending_subs = sub_files  # attach to record for show_delivery to send
         from app.handlers.formats import show_delivery
         await show_delivery(bot, msg, record, 0)
-    except Exception as e: await s.edit_text("❌ Failed.", reply_markup=menu(bot, uid))
+    except Exception as e:
+        category = classify_yt_error(str(e))
+        logger.error("Download task error [%s]: %s", category, str(e)[:200])
+        await s.edit_text(friendly_error_msg(category), reply_markup=menu(bot, uid))
 
 async def _ensure(bot, uid):
     if uid in bot._cookie_data: return True

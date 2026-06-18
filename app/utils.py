@@ -138,3 +138,66 @@ def get_audio_quality(bot, uid):
 def get_subtitle_mode(bot, uid):
     """'embed' = merge into MKV; 'separate' = send .srt alongside; 'off' = no subs"""
     return _ensure_settings(bot, uid).get('subtitle_mode', 'embed')
+
+
+# ----- yt-dlp error classification -----# Categorize the text of a yt-dlp / Telegram exception so handlers can show a
+# friendly message instead of the generic "❌ Failed.".
+#
+# Ordering matters: earlier rules win on overlap. Specific phrases (geo,
+# live, age-restricted) come BEFORE generic ones ('not available', 'video
+# unavailable') so they aren't shadowed.
+
+_YT_ERROR_PATTERNS = (
+    ('live_not_started', ('this live event will begin', 'live stream hasn')),
+    ('live_ended',      ('this live event will end', 'the livestream has ended', 'livestream has ended')),
+    ('geo_blocked',     ('not available in your country', 'this video is not available in your country')),
+    ('age_restricted',  ('sign in to confirm your age', 'age-restricted', 'age restricted')),
+    ('members_only',    ('members-only content', 'paid membership', 'paid members',
+                         "this channel\u2019s members",  # right single quotation mark (U+2019)
+                         "this channel's members",       # straight apostrophe (U+0027)
+                         'membership program', 'become a member of this channel',
+                         'for members only')),
+    ('private',         ('private video', 'sign in if you', 'this video is private')),
+    ('cookies_required',('login required', 'please log in to your account')),
+    ('removed',         ('has been removed by the uploader', 'has been removed for copyright',
+                         'removed for copyright')),
+    ('unavailable',     ('video unavailable',)),
+    ('playability',     ('playability',)),
+)
+
+
+# Friendly user-facing messages for each category. Kept short so they fit
+# comfortably above the menu keyboard.
+_YT_ERROR_MESSAGES = {
+    'live_not_started': '⏳ Live stream hasn’t started yet. Try again in a few minutes.',
+    'live_ended':       '⏳ This livestream has already ended.',
+    'unavailable':      '🚫 Video unavailable.',
+    'private':          '🔒 Private video. Upload updated cookies with /cookies and try again.',
+    'age_restricted':   '🔞 Age-restricted. Your cookies may not be enough; refresh them.',
+    'members_only':     '🔒 Members-only content. Your cookies may not unlock it.',
+    'geo_blocked':      '🌍 Not available in your country / region.',
+    'removed':          '⚠️ Removed by the uploader or for copyright.',
+    'cookies_required': '🔑 Login required. Upload fresh cookies with /cookies.',
+    'playability':      '🚫 YouTube refused playback. Try again or refresh cookies.',
+    'unknown':          '❌ Failed to fetch video info. Try again in a moment.',
+}
+
+
+def classify_yt_error(message):
+    """Map the text of a yt-dlp / Telegram exception to a stable category key.
+
+    Returns one of the keys in `_YT_ERROR_MESSAGES`, or `'unknown'` if no
+    pattern matches. Matching is case-insensitive substring.
+    """
+    if not message:
+        return 'unknown'
+    msg = str(message).lower()
+    for category, fragments in _YT_ERROR_PATTERNS:
+        if any(frag in msg for frag in fragments):
+            return category
+    return 'unknown'
+
+
+def friendly_error_msg(category):
+    """Return the user-facing message for a category. Falls back to `unknown`."""
+    return _YT_ERROR_MESSAGES.get(category, _YT_ERROR_MESSAGES['unknown'])

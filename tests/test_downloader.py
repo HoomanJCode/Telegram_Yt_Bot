@@ -16,6 +16,9 @@ from app.downloader import (
     _sanitize_filename,
     _vtt_to_srt,
     _merge_subs_into_mkv,
+    _is_proxy_transient_error,
+    _opts_with_proxy,
+    WARP_PROXY,
     VIDEO_QUALITY_FMT,
     AUDIO_QUALITY_FMT,
 )
@@ -236,7 +239,6 @@ class TestQualityFormatIntegrity(unittest.TestCase):
         self.video_keys = {'best', '2160p', '1440p', '1080p', '720p',
                            '480p', '360p', 'worst'}
         self.audio_keys = {'best', '320', '256', '192', '128', '96', 'worst'}
-
     def test_video_quality_keys_complete(self):
         self.assertEqual(set(VIDEO_QUALITY_FMT.keys()), self.video_keys)
 
@@ -266,6 +268,97 @@ class TestQualityFormatIntegrity(unittest.TestCase):
         # not by raising — sanity check our test mirrors that behavior.
         self.assertEqual(VIDEO_QUALITY_FMT.get('nonsense', VIDEO_QUALITY_FMT['best']),
                          VIDEO_QUALITY_FMT['best'])
+
+
+class TestProxyTransientErrorDetection(unittest.TestCase):
+    """Drive _is_proxy_transient_error — the classifier that decides
+    when to retry yt-dlp without the Warp proxy.
+    """
+
+    def _exc(self, msg):
+        return RuntimeError(msg)
+
+    def test_connection_refused_is_transient(self):
+        e = self._exc(
+            'ERROR: [youtube] abc: Unable to download API page: '
+            '[Errno 111] Connection refused (caused by TransportError(...))')
+        self.assertTrue(_is_proxy_transient_error(e))
+
+    def test_connection_reset_is_transient(self):
+        self.assertTrue(_is_proxy_transient_error(self._exc('Connection reset by peer')))
+
+    def test_connection_aborted_is_transient(self):
+        self.assertTrue(_is_proxy_transient_error(self._exc('Connection aborted')))
+
+    def test_timeout_is_transient(self):
+        self.assertTrue(_is_proxy_transient_error(self._exc('Read timed out')))
+
+    def test_dns_failure_is_transient(self):
+        self.assertTrue(_is_proxy_transient_error(
+            self._exc('Temporary failure in name resolution')))
+
+    def test_dns_unknown_host_is_transient(self):
+        self.assertTrue(_is_proxy_transient_error(
+            self._exc('Name or service not known')))
+
+    def test_network_unreachable_is_transient(self):
+        self.assertTrue(_is_proxy_transient_error(self._exc('Network is unreachable')))
+
+    def test_errno_104_is_transient(self):
+        self.assertTrue(_is_proxy_transient_error(self._exc('[Errno 104] reset')))
+
+    def test_errno_110_is_transient(self):
+        self.assertTrue(_is_proxy_transient_error(self._exc('[Errno 110] timed out')))
+
+    def test_video_unavailable_is_not_transient(self):
+        # This is a YouTube-side error; dropping the proxy won't help.
+        self.assertFalse(_is_proxy_transient_error(
+            self._exc('Video unavailable')))
+
+    def test_private_video_is_not_transient(self):
+        self.assertFalse(_is_proxy_transient_error(
+            self._exc('Private video. Sign in if you\'ve been granted access')))
+
+    def test_http_403_is_not_transient(self):
+        self.assertFalse(_is_proxy_transient_error(
+            self._exc('HTTP Error 403: Forbidden')))
+
+    def test_unrelated_exception_is_not_transient(self):
+        self.assertFalse(_is_proxy_transient_error(ValueError('bad')))
+
+    def test_case_insensitive_match(self):
+        # String fragments are matched lowercased.
+        self.assertTrue(_is_proxy_transient_error(self._exc('CONNECTION REFUSED')))
+        self.assertTrue(_is_proxy_transient_error(self._exc('Connection Refused')))
+
+
+class TestOptsWithProxy(unittest.TestCase):
+    """Drive _opts_with_proxy — the helper that toggles the proxy opt."""
+
+    def setUp(self):
+        self.base = {'format': 'best', 'quiet': True, 'socket_timeout': 30}
+
+    def test_with_proxy_true_adds_proxy(self):
+        out = _opts_with_proxy(self.base, True)
+        self.assertEqual(out['proxy'], WARP_PROXY)
+        self.assertEqual(out['format'], 'best')
+        self.assertEqual(out['quiet'], True)
+
+    def test_with_proxy_false_strips_proxy(self):
+        out = _opts_with_proxy(self.base, False)
+        self.assertNotIn('proxy', out)
+        self.assertEqual(out['format'], 'best')
+
+    def test_does_not_mutate_input(self):
+        out = _opts_with_proxy(self.base, True)
+        self.assertNotIn('proxy', self.base)  # input dict untouched
+        # Returned dict is a different object from the input
+        self.assertIsNot(out, self.base)
+
+    def test_overrides_existing_proxy(self):
+        # If base already had a proxy, the helper overwrites it.
+        out = _opts_with_proxy({**self.base, 'proxy': 'http://old:9999'}, True)
+        self.assertEqual(out['proxy'], WARP_PROXY)
 
 
 if __name__ == '__main__':

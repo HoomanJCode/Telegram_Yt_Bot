@@ -19,7 +19,22 @@ jobs:
     steps:
       - name: 📥 Checkout code
         uses: actions/checkout@v4
-      
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: requirements.txt
+
+      - name: 📦 Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 🧪 Run tests (must pass before deploy)
+        run: python -m unittest discover tests -v
+
       - name: 🔑 Setup SSH
         uses: webfactory/ssh-agent@v0.9.0
         with:

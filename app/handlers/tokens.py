@@ -26,6 +26,7 @@ async def handle_token_start(bot, uid, param, msg):
 
     if req['status'] == 'completed' and req['file_path'] and Path(req['file_path']).exists():
         await send_file(bot, msg, req)
+        await _send_subs(bot, msg, req.get('_subs') or [])
     elif req['status'] == 'pending':
         await msg.reply_text("⏳ Starting download...", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Check Progress", url=f"https://t.me/{bot_username}?start=dl_{token}")]]))
         asyncio.create_task(_do_download(bot, token))
@@ -41,15 +42,43 @@ async def _do_download(bot, token):
         req['status'] = 'downloading'
         uid, url, mt = req['uid'], req['url'], req['media_type']
         try:
-            if mt == 'thumb': fp, title, vid = await asyncio.get_event_loop().run_in_executor(None, download_thumb, bot, uid, url)
-            else: fp, title, vid = await asyncio.get_event_loop().run_in_executor(None, download, bot, uid, url, mt)
+            if mt == 'thumb':
+                fp, title, vid, _subs = await asyncio.get_event_loop().run_in_executor(None, download_thumb, bot, uid, url)
+            else:
+                fp, title, vid, _subs = await asyncio.get_event_loop().run_in_executor(None, download, bot, uid, url, mt)
             req['status'] = 'completed'; req['file_path'] = fp; req['title'] = title; req['video_id'] = vid
+            req['_subs'] = _subs
             sz = Path(fp).stat().st_size
             record = VideoRecord(title, url, vid, fp, sz, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), media_type=mt)
+            record._pending_subs = _subs
             bot.videos.setdefault(uid, []).insert(0, record)
             while len(bot.videos.get(uid, [])) > 20: old = bot.videos[uid].pop(); Path(old.file_path).unlink(missing_ok=True)
             bot.save()
         except Exception as e: req['status'] = 'failed'; req['error'] = str(e)[:200]
+
+async def _send_subs(bot, msg, subs):
+    """Deliver any subtitle files as Telegram documents (fall back to download link for oversized)."""
+    if not subs:
+        return
+    for sub in subs:
+        if not Path(sub).exists():
+            continue
+        try:
+            size_kb = Path(sub).stat().st_size / 1024
+            name = Path(sub).name
+            if size_kb < 50 * 1024:  # <50MB → Telegram doc
+                with open(sub, 'rb') as f:
+                    await msg.reply_document(document=f, filename=name, caption=f"📝 Subtitle: {name}")
+            else:
+                from urllib.parse import quote
+                await msg.reply_text(
+                    f"📝 Subtitle too large ({size_kb / 1024:.1f}MB)\n"
+                    f"📥 `{bot.base_url}/{quote(name)}`",
+                    parse_mode=None,
+                )
+        except Exception:
+            pass
+
 
 async def send_file(bot, msg, record_or_req):
     from urllib.parse import quote

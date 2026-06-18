@@ -23,9 +23,10 @@ This Telegram bot downloads YouTube content in multiple formats (Video, Audio, T
 
 ## 🚀 Features
 
-- 🎬 **Video Download** - Full MP4 video
-- 🎵 **Audio Download** - MP3 (with FFmpeg) or M4A audio extraction
+- 🎬 **Video Download** - Full video with quality selection (Best, 4K, 1440p, 1080p, 720p, 480p, 360p, Worst)
+- 🎵 **Audio Download** - MP3 (with FFmpeg) or M4A, quality selection (Best, 320/256/192/128/96 kbps, Worst)
 - 🖼️ **Thumbnail Download** - Video thumbnails without full download
+- 📝 **Subtitle Handling** - Embed subs into MKV (default), send as separate `.srt` file, or off
 - 🔄 **Multi-Format** - Download all formats of the same video
 - 📤 **Two Delivery Methods** - Telegram upload or direct download link
 - 💾 **Duplicate Detection** - Prevents re-downloading same content

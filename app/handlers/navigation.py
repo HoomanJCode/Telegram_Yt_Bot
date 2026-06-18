@@ -5,7 +5,11 @@ from pathlib import Path
 from datetime import datetime
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
-from app.utils import esc, find_existing
+from app.utils import (
+    esc, find_existing,
+    VIDEO_QUALITY_OPTIONS, AUDIO_QUALITY_OPTIONS, SUBTITLE_MODE_OPTIONS,
+    VIDEO_QUALITY_LABELS, AUDIO_QUALITY_LABELS, SUBTITLE_MODE_LABELS,
+)
 from app.models import VideoRecord
 from app.downloader import fetch_info
 
@@ -27,16 +31,26 @@ def nav_clear(bot, uid): bot._nav_stack.pop(uid, None)
 def menu(bot, uid):
     has = uid in bot._cookie_data
     vc = len(bot.videos.get(uid, []))
+    settings = bot._user_settings.get(uid, {})
     lang = bot._user_langs.get(uid, 'en')
-    delivery = bot._user_settings.get(uid, {}).get('default_delivery', 'ask')
+    delivery = settings.get('default_delivery', 'ask')
     delivery_label = {'ask': 'Ask', 'telegram': 'Telegram', 'link': 'Link'}.get(delivery, 'Ask')
+    vq = settings.get('video_quality', 'best')
+    aq = settings.get('audio_quality', 'best')
+    sm = settings.get('subtitle_mode', 'embed')
+    vq_short = 'Best' if vq == 'best' else vq.upper() if vq != 'worst' else '~'
+    aq_short = 'Best' if aq == 'best' else f"{aq}k" if aq != 'worst' else '~'
+    sm_short = {'embed': 'MKV', 'separate': 'SRT', 'off': 'Off'}.get(sm, 'MKV')
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📹 Recent Downloads", callback_data='r')],
         [InlineKeyboardButton("🍪 Upload Cookies", callback_data='c')],
+        [InlineKeyboardButton(f"🎬 Video: {vq_short}", callback_data='vq'),
+         InlineKeyboardButton(f"🎵 Audio: {aq_short}", callback_data='aq'),
+         InlineKeyboardButton(f"📝 Subs: {sm_short}", callback_data='sm')],
         [InlineKeyboardButton(f"🌐 Language: {lang.upper()}", callback_data='lang'),
-         InlineKeyboardButton(f"📤 Delivery: {delivery_label}", callback_data='delivery')],
-        [InlineKeyboardButton(f"🍪 {'✅' if has else '❌'}", callback_data='cs'),
-         InlineKeyboardButton(f"📦 {vc} files", callback_data='vc')],
+         InlineKeyboardButton(f"📤 Delivery: {delivery_label}", callback_data='delivery'),
+         InlineKeyboardButton(f"🍪 {'✅' if has else '❌'}", callback_data='cs')],
+        [InlineKeyboardButton(f"📦 {vc} files", callback_data='vc')],
     ])
 
 async def welcome_text(bot):
@@ -103,8 +117,14 @@ async def router(bot, u, c):
     elif d == 'r': nav_push(bot, uid, NAV_MAIN); await show_recent(bot, u, c)
     elif d == 'lang': await _change_language(bot, u, c)
     elif d == 'delivery': await _change_delivery(bot, u, c)
+    elif d == 'vq': await _change_video_quality(bot, u, c)
+    elif d == 'aq': await _change_audio_quality(bot, u, c)
+    elif d == 'sm': await _change_subtitle_mode(bot, u, c)
     elif d.startswith('setlang_'): await _set_language(bot, u, c)
     elif d.startswith('setdelivery_'): await _set_delivery(bot, u, c)
+    elif d.startswith('setvq_'): await _set_video_quality(bot, u, c)
+    elif d.startswith('setaq_'): await _set_audio_quality(bot, u, c)
+    elif d.startswith('setsm_'): await _set_subtitle_mode(bot, u, c)
     elif d == 'cs': await q.message.reply_text("✅ Cookies active" if uid in bot._cookie_data else "❌ Upload with /cookies")
     elif d == 'vc': await q.message.reply_text(f"📦 {len(bot.videos.get(uid,[]))} files")
     elif d == 'clear_all': await _clear_all(bot, u, c)
@@ -162,6 +182,87 @@ async def _set_delivery(bot, u, c):
     bot.save()
     labels = {'ask': 'Ask every time', 'telegram': 'Send via Telegram', 'link': 'Get Download Link'}
     await q.message.reply_text(f"📤 Default delivery: {labels.get(method, method)}", reply_markup=menu(bot, uid))
+    await q.message.delete()
+
+async def _change_video_quality(bot, u, c):
+    q = u.callback_query; uid = u.effective_user.id
+    current = bot._user_settings.get(uid, {}).get('video_quality', 'best')
+    rows = []
+    for opt in VIDEO_QUALITY_OPTIONS:
+        marker = '✅' if current == opt else '⬜'
+        rows.append([InlineKeyboardButton(f"{marker} {VIDEO_QUALITY_LABELS.get(opt, opt)}", callback_data=f'setvq_{opt}')])
+    rows.append([InlineKeyboardButton("🔙 Back", callback_data='b')])
+    await q.message.reply_text("🎬 Video quality (default: 🏆 Best):", reply_markup=InlineKeyboardMarkup(rows))
+    await q.message.delete()
+
+async def _set_video_quality(bot, u, c):
+    q = u.callback_query; await q.answer()
+    uid = u.effective_user.id
+    qkey = q.data[len('setvq_'):]
+    if uid not in bot._user_settings or not isinstance(bot._user_settings.get(uid), dict):
+        bot._user_settings[uid] = {}
+    bot._user_settings[uid]['video_quality'] = qkey
+    bot.save()
+    await q.message.reply_text(
+        f"🎬 Video quality set to {VIDEO_QUALITY_LABELS.get(qkey, qkey)}",
+        reply_markup=menu(bot, uid))
+    await q.message.delete()
+
+async def _change_audio_quality(bot, u, c):
+    q = u.callback_query; uid = u.effective_user.id
+    current = bot._user_settings.get(uid, {}).get('audio_quality', 'best')
+    rows = []
+    for opt in AUDIO_QUALITY_OPTIONS:
+        marker = '✅' if current == opt else '⬜'
+        rows.append([InlineKeyboardButton(f"{marker} {AUDIO_QUALITY_LABELS.get(opt, opt)}", callback_data=f'setaq_{opt}')])
+    rows.append([InlineKeyboardButton("🔙 Back", callback_data='b')])
+    await q.message.reply_text("🎵 Audio quality (default: 🏆 Best):", reply_markup=InlineKeyboardMarkup(rows))
+    await q.message.delete()
+
+async def _set_audio_quality(bot, u, c):
+    q = u.callback_query; await q.answer()
+    uid = u.effective_user.id
+    qkey = q.data[len('setaq_'):]
+    if uid not in bot._user_settings or not isinstance(bot._user_settings.get(uid), dict):
+        bot._user_settings[uid] = {}
+    bot._user_settings[uid]['audio_quality'] = qkey
+    bot.save()
+    await q.message.reply_text(
+        f"🎵 Audio quality set to {AUDIO_QUALITY_LABELS.get(qkey, qkey)}",
+        reply_markup=menu(bot, uid))
+    await q.message.delete()
+
+async def _change_subtitle_mode(bot, u, c):
+    q = u.callback_query; uid = u.effective_user.id
+    current = bot._user_settings.get(uid, {}).get('subtitle_mode', 'embed')
+    rows = []
+    for opt in SUBTITLE_MODE_OPTIONS:
+        marker = '✅' if current == opt else '⬜'
+        label = SUBTITLE_MODE_LABELS.get(opt, opt)
+        if opt == 'embed':
+            desc = ' (SRT subs embedded in MKV)'
+        elif opt == 'separate':
+            desc = ' (subs sent as .srt file)'
+        else:
+            desc = ' (no subs)'
+        rows.append([InlineKeyboardButton(f"{marker} {label}{desc}", callback_data=f'setsm_{opt}')])
+    rows.append([InlineKeyboardButton("🔙 Back", callback_data='b')])
+    await q.message.reply_text("📝 Subtitle mode (default: 🔗 Embed MKV):", reply_markup=InlineKeyboardMarkup(rows))
+    await q.message.delete()
+
+async def _set_subtitle_mode(bot, u, c):
+    q = u.callback_query; await q.answer()
+    uid = u.effective_user.id
+    qkey = q.data[len('setsm_'):]
+    if qkey not in SUBTITLE_MODE_OPTIONS:
+        return
+    if uid not in bot._user_settings or not isinstance(bot._user_settings.get(uid), dict):
+        bot._user_settings[uid] = {}
+    bot._user_settings[uid]['subtitle_mode'] = qkey
+    bot.save()
+    await q.message.reply_text(
+        f"📝 Subtitle mode set to {SUBTITLE_MODE_LABELS.get(qkey, qkey)}",
+        reply_markup=menu(bot, uid))
     await q.message.delete()
 
 async def _clear_all(bot, u, c):

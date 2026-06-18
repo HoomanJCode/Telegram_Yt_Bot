@@ -87,5 +87,6 @@ def _mime(ext):
     return {
         '.mp4': 'video/mp4', '.webm': 'video/webm', '.mkv': 'video/x-matroska',
         '.mp3': 'audio/mpeg', '.m4a': 'audio/mp4', '.opus': 'audio/opus',
-        '.jpg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp'
+        '.jpg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp',
+        '.srt': 'text/plain; charset=utf-8', '.vtt': 'text/vtt; charset=utf-8',
     }.get(ext.lower(), 'application/octet-stream')

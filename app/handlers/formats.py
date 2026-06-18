@@ -40,7 +40,30 @@ async def choose_format(bot, u, c):
 async def show_delivery(bot, msg, record, idx):
     uid = msg.chat.id
     default = get_default_delivery(bot, uid)
-    
+
+    # Send any pending subtitle files first (separate-mode delivery)
+    pending_subs = getattr(record, '_pending_subs', None)
+    if pending_subs:
+        try:
+            for sub in pending_subs:
+                if Path(sub).exists():
+                    size_kb = Path(sub).stat().st_size / 1024
+                    if size_kb < 50 * 1024:  # <50MB → send as Telegram doc
+                        await msg.reply_document(
+                            document=open(sub, 'rb'),
+                            filename=Path(sub).name,
+                            caption=f"📝 Subtitle: {Path(sub).name}",
+                        )
+                    else:
+                        from urllib.parse import quote
+                        await msg.reply_text(
+                            f"📝 Subtitle too large for Telegram ({size_kb/1024:.1f}MB)\n"
+                            f"📥 `{bot.base_url}/{quote(Path(sub).name)}`",
+                            parse_mode=ParseMode.MARKDOWN,
+                        )
+        except Exception:
+            pass
+
     # If user has a default set, skip the keyboard and deliver directly
     if default == 'telegram':
         await send_telegram_direct(bot, msg, record)
@@ -48,15 +71,18 @@ async def show_delivery(bot, msg, record, idx):
     elif default == 'link':
         await send_link_direct(bot, msg, record)
         return
-    
+
     # Default: ask user
     emoji = {'video': '🎬', 'audio': '🎵', 'thumb': '🖼️'}.get(record.media_type, '📹')
     mb = record.file_size / 1024 / 1024
     nav_push(bot, msg.chat.id, NAV_FORMAT, (record.url, record.video_id))
     from app.handlers.messages import _group_delivery_kb
     kb = _group_delivery_kb(bot, msg.chat.id) if msg.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP) else delivery_kb(bot, msg.chat.id, idx)
+    sub_hint = ''
+    if pending_subs:
+        sub_hint = f"\n📝 {len(pending_subs)} subtitle file(s) attached"
     await msg.reply_text(
-        f"{emoji} *{esc(record.title[:200])}*\n📦 {mb:.2f} MB | {record.media_type}\n🕒 {record.download_time}\n\nChoose delivery:",
+        f"{emoji} *{esc(record.title[:200])}*\n📦 {mb:.2f} MB | {record.media_type}\n🕒 {record.download_time}{sub_hint}\n\nChoose delivery:",
         parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
 
 def delivery_kb(bot, uid, idx=None):

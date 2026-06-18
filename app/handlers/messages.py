@@ -35,14 +35,28 @@ async def on_msg(bot, u, c):
 async def _group_download(bot, uid, url, msg, media_type, video_id):
     try:
         existing = find_existing(bot, uid, video_id, media_type)
-        if existing: fp, title = existing.file_path, existing.title
+        fp = title = vid = None
+        sub_files = []
+        if existing:
+            fp, title = existing.file_path, existing.title
         else:
-            fp, title, vid = await asyncio.get_event_loop().run_in_executor(None, download, bot, uid, url, media_type)
+            fp, title, vid, sub_files = await asyncio.get_event_loop().run_in_executor(None, download, bot, uid, url, media_type)
             sz = Path(fp).stat().st_size
             record = VideoRecord(title, url, vid, fp, sz, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), media_type=media_type)
             bot.videos.setdefault(uid, []).insert(0, record)
             while len(bot.videos.get(uid, [])) > 20: old = bot.videos[uid].pop(); Path(old.file_path).unlink(missing_ok=True)
             bot.save()
+
+        # If we got separate sub files (sub mode 'separate' or merge fallback), send them too
+        for sub in sub_files:
+            if not Path(sub).exists(): continue
+            sz = Path(sub).stat().st_size / 1024
+            try:
+                with open(sub, 'rb') as fh:
+                    await msg.reply_document(document=fh, filename=Path(sub).name,
+                                             caption=f"📝 {Path(sub).name}", reply_to_message_id=msg.message_id)
+            except Exception:
+                pass
 
         default = get_default_delivery(bot, uid)
         if default == 'telegram':
@@ -71,13 +85,17 @@ async def download_task(bot, uid, url, msg, media_type):
     from app.downloader import download_thumb
     s = await msg.reply_text(f"⏳ Downloading {media_type}...")
     try:
-        if media_type == 'thumb': fp, title, vid = await asyncio.get_event_loop().run_in_executor(None, download_thumb, bot, uid, url)
-        else: fp, title, vid = await asyncio.get_event_loop().run_in_executor(None, download, bot, uid, url, media_type)
+        if media_type == 'thumb':
+            fp, title, vid, sub_files = await asyncio.get_event_loop().run_in_executor(None, download_thumb, bot, uid, url)
+        else:
+            fp, title, vid, sub_files = await asyncio.get_event_loop().run_in_executor(None, download, bot, uid, url, media_type)
         sz = Path(fp).stat().st_size
         record = VideoRecord(title, url, vid, fp, sz, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), media_type=media_type)
         bot.videos.setdefault(uid, []).insert(0, record)
         while len(bot.videos.get(uid, [])) > 20: old = bot.videos[uid].pop(); Path(old.file_path).unlink(missing_ok=True)
         bot.save(); await s.delete()
+        if sub_files:
+            record._pending_subs = sub_files  # attach to record for show_delivery to send
         from app.handlers.formats import show_delivery
         await show_delivery(bot, msg, record, 0)
     except Exception as e: await s.edit_text("❌ Failed.", reply_markup=menu(bot, uid))

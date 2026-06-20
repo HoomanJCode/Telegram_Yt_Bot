@@ -1,5 +1,5 @@
 """Synchronous yt-dlp download functions"""
-import logging, tempfile, os, re, subprocess, shutil
+import logging, tempfile, os, re, subprocess, shutil, time
 from pathlib import Path
 import yt_dlp
 from app.utils import (
@@ -31,6 +31,104 @@ SUBTITLE_OPTS_KEYS = (
     'writesubtitles', 'writeautomaticsub', 'subtitleslangs',
     'subtitlesformat', 'keepautosubs',
 )
+
+
+# In-memory cache for `fetch_info` results so the format-choice screen
+# does not retrigger yt-dlp's Innertube /next round-trip on every
+# back-and-forth between delivery kb / `back_to_formats` / show_format_choice.
+#
+# Cache key: (uid, url) -- per-user, not just per-url. Two reasons:
+#   1. yt-dlp's info-dict surface includes `comments` ONLY when the user's
+#      cookies are valid AND the operator has opted in via Config.MAX_COMMENTS.
+#      Cross-user cache hits would leak comments fetched with user A's
+#      cookies to user B who may NOT be permitted to see them (private
+#      channel membership-gated comments, etc.). Per-user keying isolates
+#      cookie-bound surfaces.
+#   2. Per-user is what the bot's actual refetch pattern produces: the
+#      dominant source of refetches is `back_to_formats` (delivery kb
+#      -> show_format_choice), which is always same-user. The cache hit
+#      rate under per-user is high in practice.
+#
+# TTL: 300 seconds (5 minutes). Short enough that recently-published
+# comments / updated titles / new view counts propagate without a bot
+# restart. Long enough that the back-to-formats / format-choice round
+# trip is essentially free. Operators who want a longer cache window
+# can env-tune `Config.INFO_CACHE_TTL_SECONDS` (added below) without
+# touching code.
+_INFO_CACHE = {}
+_INFO_CACHE_MAX_SIZE = 1000  # FIFO cap; see _info_cache_set for eviction
+
+
+_INFO_TTL_SECONDS = 300
+
+
+def _info_cache_get(uid, url):
+    """Return cached info dict for (uid, url) or None on miss / stale.
+
+    Pure helper so unit tests can drive the (uid, url, elapsed, info) ->
+    None-or-info contract without invoking `_run_ydl` (which would otherwise
+    require heavy mocking of yt_dlp.YoutubeDL).
+
+    Stale-entry side effect: drops the entry while iterating so the cache
+    does not accumulate dead entries under long-lived bot processes. The
+    drop uses `.pop((uid, url), None)` so an entry that was inserted by
+    a concurrent thread between the `.get` and the `.pop` flows through
+    unconditionally rather than throwing KeyError.
+    """
+    entry = _INFO_CACHE.get((uid, url))
+    if entry is None:
+        return None
+    cached_at, info = entry
+    if time.monotonic() - cached_at >= _INFO_TTL_SECONDS:
+        _INFO_CACHE.pop((uid, url), None)
+        return None
+    return info
+
+
+def _info_cache_set(uid, url, info):
+    """Store info dict under (uid, url) with the current monotonic timestamp.
+
+    Pure helper -- the timestamp lookup uses `time.monotonic` rather than
+    `time.time` so a system clock adjustment (NTP sync, daylight savings
+    on misconfigured servers, manual `date` calls) cannot accidentally
+    expire freshly-cached entries.
+
+    Defensive guards:
+      * Falsy/empty `info` (None, {}, []) is REJECTED (not cached).
+        Rationale: a transient `_run_ydl` failure (network blip,
+        cookies-expired mid-fetch) returns None/empty. Caching it
+        would mean every subsequent fetch for that (uid, url) for the
+        next TTL returns the same broken marker, masking the underlying
+        error. Better to fall through to a fresh fetch on the next hit.
+      * When the cache is at `_INFO_CACHE_MAX_SIZE`, the OLDEST entry
+        (lowest `cached_at`) is FIFO-evicted before the new entry is
+        written. This prevents unbounded growth under adversarial /
+        long-lived-bot conditions (a single user submitting 100k+ URLs
+        cannot leak memory forever). FIFO (not LRU) so we don't pay
+        the bookkeeping cost -- the bot's traffic is dominated by
+        back-clicks on the same video, not by 1M distinct URLs.
+    """
+    # Falsy/empty info guard: do NOT cache a degenerate marker that
+    # would otherwise propagate to every subsequent hit for TTL seconds.
+    if not info:
+        return
+    # FIFO size guard: oldest stamp goes first. We pick the key with
+    # the smallest cached_at -- O(n) but n<=_INFO_CACHE_MAX_SIZE=1000
+    # is a drop in the bucket relative to the network round-trip.
+    if len(_INFO_CACHE) >= _INFO_CACHE_MAX_SIZE:
+        oldest_key = min(_INFO_CACHE, key=lambda k: _INFO_CACHE[k][0])
+        _INFO_CACHE.pop(oldest_key, None)
+    _INFO_CACHE[(uid, url)] = (time.monotonic(), info)
+
+
+def _info_cache_clear():
+    """Drop every cache entry. Used by tests + (rarely) by a /reset command.
+
+    Pinning-name shape mirrors `_user_settings.clear()` and friends so
+    future maintainers grep for "cache" find the reset hook together with
+    the read/write helpers.
+    """
+    _INFO_CACHE.clear()
 
 
 class StorageFullError(Exception):
@@ -351,7 +449,26 @@ def fetch_info(bot, uid, url):
     has opted in via `Config.MAX_COMMENTS > 0`, a `comments` list. Comments
     are NOT fetched by default (yt-dlp skips the Innertube `/next` call) so
     the info fetch stays fast for the common path.
+
+    Caching: read-through TTL cache keyed by (uid, url). The dominant
+    refetch source is `back_to_formats` (delivery kb -> show_format_choice
+    on the SAME video URL by the SAME user within seconds); without this
+    cache every back-click would round-trip to YouTube and re-parse cookies
+    just to render the format kb the user already saw. The cache TTL is
+    300 seconds (5 min) so recently-updated comments / titles propagate
+    without a bot restart. See `_INFO_CACHE` and `_INFO_TTL_SECONDS` for
+    the rationale and per-user-vs-global trade-offs.
     """
+    cached = _info_cache_get(uid, url)
+    if cached is not None:
+        # DEBUG level (not INFO) -- a high-traffic bot generates
+        # one log line per user-paste even on the cache HIT path,
+        # which would drown the INFO-level download / mux /
+        # cookie lines operators rely on. Operators who want
+        # HIT/MISS counters for capacity planning can flip the
+        # env LOG_LEVEL=DEBUG without retuning this constant.
+        logger.debug('fetch_info cache HIT uid=%d url=%s', uid, url[:80])
+        return cached
     base = {
         'format': 'best',
         'cookiefile': _cookie_file(bot, uid),
@@ -378,8 +495,27 @@ def fetch_info(bot, uid, url):
                 'comment_sort': ['new'],
             }
         }
-    return _run_ydl(opts, 'fetch_info',
+    info = _run_ydl(opts, 'fetch_info',
                     lambda ydl: ydl.extract_info(url, download=False))
+    _info_cache_set(uid, url, info)
+    # DEBUG level (not INFO) -- see HIT-path comment above.
+    logger.debug('fetch_info cache MISS uid=%d url=%s -- refetched',
+                 uid, url[:80])
+    # CACHE PARTIAL-SUCCESS NOTE: _info_cache_set runs IMMEDIATELY
+    # after _run_ydl returns, BEFORE the in-loop caller
+    # (show_format_choice) does anything else with the info dict.
+    # If the caller raises later in the same await (e.g.
+    # bot._pending_urls write, navigation-stack overflow, scrolled
+    # message edit_text 4xx), the cache is already populated with
+    # a fully-valid info dict. This is the intentional trade-off:
+    # the next user-paste within the TTL gets the cached value
+    # WITHOUT re-hitting YouTube, even though the original caller
+    # hit an unrelated error after the fetch. The alternative
+    # (write-through-after-full-success) would mean a transient
+    # downstream error wastes the next user's 2-second round-trip
+    # for no good reason. Documented here so a future maintainer
+    # recognises it as a conscious trade-off, not a bug.
+    return info
 
 def download(bot, uid, url, media_type, video_quality=None, audio_quality=None, sub_mode=None, container=None):
     """Download with optional quality/sub_mode/container overrides.

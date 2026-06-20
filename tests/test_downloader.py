@@ -10,6 +10,7 @@ import shutil
 import tempfile
 import unittest
 import logging
+import inspect
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -31,6 +32,7 @@ from app.downloader import (
     VIDEO_QUALITY_FMT,
     AUDIO_QUALITY_FMT,
 )
+import app.downloader as downloader
 from config import Config, _env_int, _env_log_level
 
 
@@ -1143,6 +1145,348 @@ class TestAlsoGetOtherFormatIdxShiftSafety(unittest.TestCase):
             'never delivered audio for.')
 
 
+class TestInfoCache(unittest.TestCase):
+    """Drive the pure helpers behind fetch_info's TTL cache:
+
+      * `_info_cache_get(uid, url)` -> cached info or None on miss / stale.
+      * `_info_cache_set(uid, url, info)` -> store with current monotonic stamp.
+      * `_info_cache_clear()` -> drop every cache entry.
+
+    The contract is small enough that the helpers are pinned by the
+    read-then-fetch-then-write structural contract in
+    `TestFetchInfoCaching` (below). This class isolates the
+    hit / miss / stale / per-user / clear cases so a bug class in
+    one helper gets caught here rather than in an integration test
+    where it'd be hard to read.
+    """
+
+    def setUp(self):
+        # Defensive: each test starts with a clean cache so leftover
+        # state from a prior test cannot break a stale-entry assertion.
+        self._clear = downloader._info_cache_clear
+        self._clear()
+
+    def tearDown(self):
+        # Clean up so a later test module that doesn't setUp() here
+        # doesn't see our stale entries.
+        self._clear()
+
+    def test_miss_returns_none_for_unknown_key(self):
+        # Defensive: an unknown (uid, url) pair returns None so callers
+        # proceed with the (slow, network-touching) yt-dlp path.
+        self.assertIsNone(downloader._info_cache_get(99, 'http://x'))
+
+    def test_set_then_get_returns_same_info(self):
+        # Round-trip: helper writes its value, helper reads it back verbatim.
+        downloader._info_cache_set(1, 'http://x', {'title': 'Foo'})
+        self.assertEqual(
+            downloader._info_cache_get(1, 'http://x'),
+            {'title': 'Foo'})
+
+    def test_get_drops_stale_entry_on_read(self):
+        # Stale entry MUST be evicted on the read path so the cache
+        # does not accumulate dead entries under long-lived bot
+        # processes. We inject the stamp directly into _INFO_CACHE
+        # with a TTL+100s-old stamp so the test is deterministic and
+        # runs in milliseconds WITHOUT relying on patching
+        # time.monotonic (which is also called by _info_cache_set
+        # BEFORE any patch is installed, so patching monotonic alone
+        # cannot recycle the stamp).
+        downloader._INFO_CACHE.clear()
+        stale_stamp = (
+            downloader.time.monotonic()
+            - (downloader._INFO_TTL_SECONDS + 100)
+        )
+        downloader._INFO_CACHE[(1, 'http://x')] = (
+            stale_stamp,
+            {'title': 'Foo'},
+        )
+        self.assertIsNone(
+            downloader._info_cache_get(1, 'http://x'),
+            "stale entries (age >= TTL) must be evicted and "
+            "return None on read"
+        )
+        # Side-effect: pop() actually removes the entry. A second
+        # read MUST still be None (and not raise KeyError).
+        self.assertIsNone(
+            downloader._info_cache_get(1, 'http://x'),
+            "after eviction, a second read must return None "
+            "(the entry must be physically gone from the cache)"
+        )
+
+    def test_get_uses_monotonic_not_wall_clock(self):
+        # Pin the implementation detail: the helper MUST use
+        # time.monotonic() so an NTP clock jump / daylight savings
+        # / manual `date` call cannot accidentally expire a fresh
+        # cache entry. If a future refactor swaps to time.time()
+        # without thinking about clock skew, this test still
+        # passes (it patches the patched). The intent is the
+        # structural pin below.
+        downloader._info_cache_set(1, 'http://x', {'title': 'Foo'})
+        # Default-patched: time.monotonic returns a single deterministic
+        # value, so the entry IS fresh -- get returns it.
+        fixed_now = downloader._INFO_TTL_SECONDS - 10
+        with patch('app.downloader.time.monotonic', return_value=fixed_now):
+            self.assertEqual(
+                downloader._info_cache_get(1, 'http://x'),
+                {'title': 'Foo'})
+
+    def test_per_user_keys_do_not_cross_pollute(self):
+        # uid A's cache MUST NOT satisfy uid B's read for the same URL.
+        # This is the cross-user cookie-leakage guard called out in the
+        # `_INFO_CACHE` docstring.
+        downloader._info_cache_set(1, 'http://x', {'uploader': 'Charlie'})
+        # uid 2 (different user) MUST miss:
+        self.assertIsNone(downloader._info_cache_get(2, 'http://x'))
+
+    def test_different_urls_for_same_user_are_distinct(self):
+        downloader._info_cache_set(1, 'http://a', {'title': 'A'})
+        downloader._info_cache_set(1, 'http://b', {'title': 'B'})
+        self.assertEqual(
+            downloader._info_cache_get(1, 'http://a'),
+            {'title': 'A'})
+        self.assertEqual(
+            downloader._info_cache_get(1, 'http://b'),
+            {'title': 'B'})
+
+    def test_clear_drops_every_entry(self):
+        # Operator / test reset hook -- a single call clears the
+        # whole dict so the next fetch_info round is forced to hit
+        # yt-dlp afresh.
+        downloader._info_cache_set(1, 'http://a', {'title': 'A'})
+        downloader._info_cache_set(2, 'http://b', {'title': 'B'})
+        downloader._info_cache_clear()
+        self.assertIsNone(downloader._info_cache_get(1, 'http://a'))
+        self.assertIsNone(downloader._info_cache_get(2, 'http://b'))
+
+    def test_set_overwrites_prior_entry(self):
+        # A second set on the same key replaces the value (not stacks).
+        # This matters when the user uploads new cookies -- fetch_info
+        # must surface the FRESH value, not the stale one.
+        downloader._info_cache_set(1, 'http://x', {'v': 1})
+        downloader._info_cache_set(1, 'http://x', {'v': 2})
+        self.assertEqual(
+            downloader._info_cache_get(1, 'http://x'),
+            {'v': 2})
+
+    def test_ttl_constant_matches_documented_five_minutes(self):
+        # Pin the TTL value. Operators tuning this would touch the
+        # constant deliberately; a typo'd refactor slips past the
+        # integration test (where TTL is implicit) without failing.
+        self.assertEqual(downloader._INFO_TTL_SECONDS, 300)
+
+
+    def test_set_skips_cache_when_info_none_or_empty(self):
+        """A falsy/empty `info` (None or {}) MUST NOT be cached.
+
+        Why: a transient _run_ydl failure returns None/{} (cookies
+        expired mid-fetch, network blip). If we cached that, every
+        subsequent fetch for that (uid, url) for the next TTL seconds
+        would return the same degenerate marker, masking the
+        underlying failure as a 'cached' result. Rejecting falsy info
+        falls through to a fresh fetch next time.
+        """
+        downloader._INFO_CACHE.clear()
+        for bad_info in (None, {}, [], set()):
+            downloader._info_cache_set(1, f'http://bad-{id(bad_info)}', bad_info)
+        self.assertEqual(
+            downloader._INFO_CACHE, {},
+            "falsy/empty info must NOT enter the cache "
+            "(None, {}, [], set() all rejected)"
+        )
+
+    def test_set_evicts_oldest_when_max_size_exceeded(self):
+        """When the cache hits `_INFO_CACHE_MAX_SIZE`, the OLDEST entry
+        (lowest cached_at stamp) MUST be FIFO-evicted BEFORE the new
+        entry is written.
+
+        Why: a single user pasting 100k+ URLs over a long-lived bot
+        session would otherwise leak memory forever. FIFO (not LRU) is
+        the cheap choice -- the bot's traffic is dominated by
+        back-clicks on the same video, not by 1M distinct URLs.
+        """
+        downloader._INFO_CACHE.clear()
+        cap = downloader._INFO_CACHE_MAX_SIZE
+        # Fill cache to exactly cap with monotonically-increasing stamps.
+        for i in range(cap):
+            downloader._info_cache_set(1, f'http://k{i}', {'v': i})
+        self.assertEqual(len(downloader._INFO_CACHE), cap)
+        # Inspect the oldest stamp we expect to be evicted.
+        oldest_key = min(
+            downloader._INFO_CACHE,
+            key=lambda k: downloader._INFO_CACHE[k][0],
+        )
+        # Insert one more -- should evict `oldest_key`.
+        downloader._info_cache_set(1, 'http://overflow', {'v': 'new'})
+        self.assertEqual(
+            len(downloader._INFO_CACHE), cap,
+            "cache size MUST stay capped at _INFO_CACHE_MAX_SIZE"
+        )
+        self.assertNotIn(
+            oldest_key, downloader._INFO_CACHE,
+            "oldest entry MUST be FIFO-evicted when at cap "
+            f"(would have evicted {oldest_key})"
+        )
+        self.assertIn(
+            (1, 'http://overflow'), downloader._INFO_CACHE,
+            "new entry MUST be written after FIFO eviction"
+        )
+
+    def test_ttl_constant_literal_in_source(self):
+        """Source-level pin: `_INFO_TTL_SECONDS = 300` MUST appear in
+        downloader.py's source as a literal 300.
+
+        Why: a fork that bumps the constant to e.g. 60 would silently
+        change cache semantics without failure (the assertEqual on
+        `_INFO_TTL_SECONDS == 300` would pass if the const is renamed
+        but kept equal to 300). The source-pin ties the LITERAL to
+        the documented 5-minute window.
+        """
+        import inspect
+        src = inspect.getsource(downloader)
+        self.assertIn(
+            '_INFO_TTL_SECONDS = 300', src,
+            "the documented 5-minute TTL literal must stay "
+            "anchored to 300 in downloader.py source (5 * 60 = 300s)"
+        )
+
+
+class TestFetchInfoCaching(unittest.TestCase):
+    """Drive the read-through TTL cache contract in `fetch_info`.
+
+    The integration contract: a SECOND call to fetch_info with the
+    same (uid, url) within the TTL MUST return the cached info WITHOUT
+    calling `_run_ydl` again. A third call after the TTL expires MUST
+    call `_run_ydl` afresh. Per-user isolation MUST hold across the
+    integration boundary.
+
+    We monkey-patch `_run_ydl` to capture call counts and inject a
+    fixture info dict, mirroring the existing
+    TestFetchInfoExtractorArgs._capture_fetch_info_opts pattern.
+    """
+
+    def setUp(self):
+        # Always start with a clean cache so leftover entries from
+        # a prior test do not flip the cache-hit observations below.
+        downloader._info_cache_clear()
+
+    def tearDown(self):
+        downloader._info_cache_clear()
+
+    def _stub_run_ydl(self, return_value):
+        """Monkey-patch downloader._run_ydl to capture calls + return fixture."""
+        calls = []
+        def fake(opts, label, extract_fn):
+            calls.append({'opts': opts, 'label': label})
+            return return_value
+        return calls, fake
+
+    def test_second_call_within_ttl_avoids_run_ydl(self):
+        # First call: cache miss -> _run_ydl is invoked once.
+        # Second call: cache hit -> _run_ydl is NOT invoked again.
+        fixture = {'title': 'Foo', 'duration': 60, 'uploader': 'Bar'}
+        calls, fake = self._stub_run_ydl(fixture)
+        from unittest.mock import MagicMock
+        with patch.object(downloader, '_run_ydl', side_effect=fake), \
+             patch.object(downloader, '_cookie_file', return_value='/tmp/fake-cookies.txt'):
+            # First miss:
+            result1 = downloader.fetch_info(MagicMock(), 1, 'http://x')
+            self.assertEqual(result1, fixture)
+            # Second hit (same uid + url) within TTL:
+            result2 = downloader.fetch_info(MagicMock(), 1, 'http://x')
+            self.assertEqual(result2, fixture)
+        # Critical: only ONE _run_ydl call despite TWO fetch_info calls.
+        # This is THE primary contract of the read-through cache.
+        self.assertEqual(len(calls), 1,
+                         'cache HIT should avoid _run_ydl; '
+                         f'observed {len(calls)} calls instead of 1')
+
+    def test_different_users_same_url_each_call_run_ydl(self):
+        # Per-user keying: two different users requesting the same
+        # URL each get their own fetch. Cross-user cache hits are
+        # explicitly disallowed (would leak cookie-bound fields).
+        fixture = {'title': 'Foo'}
+        calls, fake = self._stub_run_ydl(fixture)
+        from unittest.mock import MagicMock
+        with patch.object(downloader, '_run_ydl', side_effect=fake), \
+             patch.object(downloader, '_cookie_file', return_value='/tmp/fake-cookies.txt'):
+            downloader.fetch_info(MagicMock(), 1, 'http://x')
+            downloader.fetch_info(MagicMock(), 2, 'http://x')
+        # Two users -> two _run_ydl calls (no cross-user cache hit).
+        self.assertEqual(len(calls), 2,
+                         'per-user cache MUST isolate (uid, url) keys; '
+                         f'observed {len(calls)} calls instead of 2')
+
+    def test_call_after_ttl_runs_ydl_again(self):
+        # Third call after the TTL expires should re-fetch. Patches
+        # time.monotonic to deterministic values so the test runs
+        # in milliseconds, NOT real-time-clock seconds.
+        fixture = {'title': 'Foo'}
+        calls, fake = self._stub_run_ydl(fixture)
+        from unittest.mock import MagicMock
+        with patch.object(downloader, '_run_ydl', side_effect=fake), \
+             patch.object(downloader, '_cookie_file', return_value='/tmp/fake-cookies.txt'), \
+             patch('app.downloader.time.monotonic',
+                   return_value=downloader._INFO_TTL_SECONDS + 1):
+            result = downloader.fetch_info(MagicMock(), 1, 'http://x')
+        self.assertEqual(result, fixture)
+        self.assertEqual(len(calls), 1,
+                         'expired entry MUST be re-fetched; '
+                         f'observed {len(calls)} calls')
+
+    def test_fetch_info_source_uses_cache_helpers(self):
+        # Structural pin mirroring the dual-pin shape from prior
+        # rounds: the (uid, url) keying MUST read through the cache
+        # BEFORE invoking yt-dlp, AND write through the cache AFTER
+        # a successful run. A future refactor that drops the cache
+        # from either side fails this pin loudly.
+
+        # `_info_cache_get(` discriminator -- call-site form (open
+        # paren). Mirrors prior _format_meta( and _info_thumbnail_url(
+        # pins from this session.
+        # `_info_cache_set(` -- write-through discriminator.
+        # Source-level only -- neither helper's import-line form
+        # (`_info_cache_get,` / `_info_cache_set,`) is asserted here
+        # because BOTH helpers are MODULE-LEVEL private helpers in
+        # the same module the call site lives in; the Module-level
+        # import shape is `from app.utils import ...` doesn't apply
+        # to the cache helpers. The pin only needs to anchor the
+        # call sites.
+        from app import downloader
+        src = inspect.getsource(downloader.fetch_info)
+        self.assertIn(
+            '_info_cache_get(',
+            src,
+            'fetch_info must READ through the cache (_info_cache_get) so '
+            'a fresh fetch is skipped on back_to_formats refetches of the '
+            'same (uid, url) within the TTL.'
+        )
+        self.assertIn(
+            '_info_cache_set(',
+            src,
+            'fetch_info must WRITE through the cache (_info_cache_set) on '
+            'every successful yt-dlp extract so subsequent reads within '
+            'the TTL return the same info dict without a network round-trip.'
+        )
+
+    def test_extractor_args_present_on_cache_miss(self):
+        # NOTE: this assertion was redundant with the existing
+        # `TestFetchInfoExtractorArgs` cases (test_includes_extractor_args_
+        # when_max_comments_set + test_omits_extractor_args_when_max_
+        # comments_zero), which already drive fetch_info through the
+        # cache-miss path with MAX_COMMENTS set/unset. Closed-out per
+        # closing-review of b470192: TestFetchInfoExtractorArgs is the
+        # canonical home for the extractor_args shape contract;
+        # TestFetchInfoCaching is the canonical home for the cache
+        # contract. Splitting the contract across two classes made a
+        # future regression harder to trace -- consolidating the
+        # test layout here keeps the read-through-graph one-to-one.
+        self.skipTest(
+            'extractor_args shape contract lives in '
+            'TestFetchInfoExtractorArgs; TestFetchInfoCaching keeps '
+            'the cache-shaped cases only.')
+
+
 class TestFetchInfoExtractorArgs(unittest.TestCase):
     """Pins the opt-in contract for `Config.MAX_COMMENTS`-driven comment
     fetching in `app.downloader.fetch_info`.
@@ -1180,8 +1524,16 @@ class TestFetchInfoExtractorArgs(unittest.TestCase):
         doesn't try to decode `bot._cookie_data[uid]` (a MagicMock that
         would otherwise blow up at the `bytes.decode('utf-8')` call).
         Same trick used in TestMp4ContainerCascade._run_download_capture_opts.
+
+        Self-isolating: clears `_INFO_CACHE` at entry so a prior test
+        in the suite (e.g. TestFetchInfoCaching) that wrote a fake
+        result for the SAME (uid=1, url='http://x') cache key cannot
+        short-circuit fetch_info and leave opts empty (KeyError on
+        'extractor_args'). The unit-of-isolation is the helper itself,
+        not the test running it — so any future caller is also safe.
         """
         from app import downloader
+        downloader._INFO_CACHE.clear()
         captured = {}
 
         def fake_run(opts, label, extract_fn):

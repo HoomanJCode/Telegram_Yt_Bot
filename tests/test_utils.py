@@ -376,5 +376,127 @@ class TestFriendlyErrorMsg(unittest.TestCase):
         self.assertTrue('region' in msg or 'country' in msg or 'geo' in msg)
 
 
+class TestConfigAdmin(unittest.TestCase):
+    """Config.is_admin + Config.get_admin_set — the cookie-upload gate.
+
+    Tests monkey-patch `Config.ADMIN_USERS` directly (no module reload) so we
+    verify the documented "NOT cached at import" contract on `is_admin`.
+    """
+
+    def setUp(self):
+        # Snapshot and clear so leftover env-side state does not leak between
+        # tests. Each test sets the value it wants explicitly.
+        from config import Config
+        self._saved = Config.ADMIN_USERS
+
+    def tearDown(self):
+        from config import Config
+        Config.ADMIN_USERS = self._saved
+
+    def _set(self, value):
+        from config import Config
+        Config.ADMIN_USERS = value
+
+    # ----- get_admin_set ----------------------------------------------
+
+    def test_get_admin_set_unset_returns_empty(self):
+        from config import Config
+        self._set('')
+        self.assertEqual(Config.get_admin_set(), set())
+
+    def test_get_admin_set_whitespace_only_returns_empty(self):
+        from config import Config
+        self._set('   ')
+        self.assertEqual(Config.get_admin_set(), set())
+
+    def test_get_admin_set_single_id(self):
+        from config import Config
+        self._set('42')
+        self.assertEqual(Config.get_admin_set(), {42})
+
+    def test_get_admin_set_multiple_ids(self):
+        from config import Config
+        self._set('1,2,3')
+        self.assertEqual(Config.get_admin_set(), {1, 2, 3})
+
+    def test_get_admin_set_strips_whitespace(self):
+        from config import Config
+        self._set('  1 ,  2  ,, 3  ')
+        self.assertEqual(Config.get_admin_set(), {1, 2, 3})
+
+    def test_get_admin_set_malformed_ignores_bad_tokens(self):
+        from config import Config
+        # `abc` cannot be parsed as int; the surrounding valid tokens still land.
+        self._set('1,abc,2')
+        self.assertEqual(Config.get_admin_set(), {1, 2})
+
+    def test_get_admin_set_all_malformed_returns_empty(self):
+        from config import Config
+        # Whole env var garbage → empty set, NOT a crash. `is_admin` then
+        # treats this as "admin gating requested but no valid uids" → deny
+        # all (safe default).
+        self._set('abc,def,ghi')
+        self.assertEqual(Config.get_admin_set(), set())
+
+    # ----- is_admin ---------------------------------------------------
+
+    def test_is_admin_unset_returns_true_for_any_uid(self):
+        # ADMIN_USERS unset → permissive (legacy behavior preserved).
+        from config import Config
+        self._set('')
+        self.assertTrue(Config.is_admin(123456))
+        self.assertTrue(Config.is_admin(1))
+        self.assertTrue(Config.is_admin(999999999))
+
+    def test_is_admin_set_returns_true_only_for_listed(self):
+        from config import Config
+        self._set('1,2,3')
+        self.assertTrue(Config.is_admin(1))
+        self.assertTrue(Config.is_admin(2))
+        self.assertTrue(Config.is_admin(3))
+        self.assertFalse(Config.is_admin(4))
+        self.assertFalse(Config.is_admin(123456))
+
+    def test_is_admin_set_with_malformed_admin_set_denies_all(self):
+        # All-malformed ADMIN_USERS → empty parse set → deny all. Safer
+        # than accidentally letting an unexpected parse succeed and
+        # admit the wrong uid.
+        from config import Config
+        self._set('abc,def')
+        self.assertFalse(Config.is_admin(1))
+        self.assertFalse(Config.is_admin(2))
+        self.assertFalse(Config.is_admin(123456))
+
+    def test_is_admin_re_evaluates_dynamic(self):
+        # Critical contract: monkey-patching ADMIN_USERS at runtime must
+        # be reflected in is_admin's result WITHOUT reloading the config
+        # module. This proves the no-import-time-cache invariant from the
+        # docstring.
+        from config import Config
+        self._set('1')
+        self.assertTrue(Config.is_admin(1))
+        self.assertFalse(Config.is_admin(2))
+        # Flip the gate mid-test.
+        self._set('2')
+        self.assertFalse(Config.is_admin(1))
+        self.assertTrue(Config.is_admin(2))
+        # And back.
+        self._set('')
+        self.assertTrue(Config.is_admin(1))
+        self.assertTrue(Config.is_admin(2))
+
+    def test_is_admin_layered_with_ok_helper(self):
+        # is_admin is layered on top of `ok(...)` (which gates by
+        # WHITELIST_USERS). This test is purely documentary — the helper
+        # does not enforce layering itself; the call sites do.
+        # We just assert that is_admin cares ONLY about ADMIN_USERS.
+        from config import Config
+        self._set('100')
+        self.assertTrue(Config.is_admin(100))
+        self.assertFalse(Config.is_admin(200))
+        # Even if there were no WHITELIST_USERS, is_admin should not change.
+        self.assertTrue(Config.is_admin(100))
+
+
 if __name__ == '__main__':
     unittest.main()

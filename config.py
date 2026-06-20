@@ -1,7 +1,14 @@
+import logging
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Module-level logger for security/audit events that need to surface in
+# journalctl. `Config.is_admin` logs here when ADMIN_USERS parses to an
+# empty set due to all-malformed tokens — a fail-closed safety net that
+# the operator notices on their next restart.
+logger = logging.getLogger('yt_bot')
 
 def _env_bool(key, default='false'):
     """Parse an env var as bool. Truthy = 1/true/yes/on (case-insensitive)."""
@@ -53,9 +60,86 @@ class Config:
     # at module import time. A bot restart is required for changes to
     # MIN_DISK_FREE_MB to take effect — live-tweaking Config at runtime
     # does not propagate to the pre-flight check.
+    # Telegram user IDs (comma-separated) that are allowed to upload cookies.
+    # Cookies are sensitive auth tokens — operators running a shared bot can
+    # lock the /cookies entry point behind this gate. Exit semantics:
+    #   * ADMIN_USERS unset/empty (default): every whitelisted user keeps the
+    #     pre-existing upload path. The bot behaves exactly as before.
+    #   * ADMIN_USERS set to a comma-separated ID list: only those uids can
+    #     trigger `ask_cookies`/`recv_cookies`. Other whitelisted users see a
+    #     "🔒 Cookie uploads are admin-only" reply and the conversation exits
+    #     cleanly (ConversationHandler.END) so their next text message is not
+    #     swallowed by the conversation's WAITING_FOR_COOKIES handlers.
+    # NOT cached at import: `is_admin()` re-parses ADMIN_USERS each call so
+    # test monkey-patching takes effect without a module reload.
+    ADMIN_USERS = os.getenv('ADMIN_USERS', '')
     
     @classmethod
     def get_whitelist(cls):
         if not cls.WHITELIST_USERS:
             return set()
         return set(int(uid.strip()) for uid in cls.WHITELIST_USERS.split(',') if uid.strip())
+
+    @classmethod
+    def get_admin_set(cls):
+        """Parse ADMIN_USERS on each call (NO import-time caching) so tests
+        can monkey-patch Config.ADMIN_USERS without reloading the module.
+        Returns a set[int] — empty if unset/empty/malformed.
+        """
+        raw = (cls.ADMIN_USERS or '').strip()
+        if not raw:
+            return set()
+        out = set()
+        for token in raw.split(','):
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                out.add(int(token))
+            except ValueError:
+                # Malformed ID — ignore the bad token, keep the rest. If the
+                # whole env var is garbage we land at an empty set, which
+                # `is_admin` treats as 'admin gating requested but no valid
+                # uids listed' → deny all (safe default).
+                continue
+        return out
+
+    @classmethod
+    def is_admin(cls, uid):
+        """Cookie-upload gate. Defense-in-depth layered over `ok()`.
+
+        Three distinct semantics keyed off the raw `ADMIN_USERS` value:
+
+        * Unset/empty (default): permissive. Every whitelisted user keeps
+          the legacy cookie-upload path. Preserves prior behavior for
+          deployments that didn't opt into admin gating.
+        * Set to at least one valid uid: only listed uids can upload.
+          Non-listed users get a "🔒 admin-only" reply and the
+          conversation exits cleanly.
+        * Set but ALL tokens malformed (e.g. "abc,def"): FAIL-CLOSED.
+          The operator's intent was clearly to gate cookies (otherwise
+          they wouldn't have set the var), but parsing yielded no valid
+          ids. We refuse to silently fall back to permissive — an
+          otherwise-unconfigured gate with parsing errors is a likely
+          typo and a fail-open security toggle. A WARNING is logged so
+          the typo surfaces in journalctl on the next restart.
+
+        NOT cached: ADMIN_USERS is re-read each call so test
+        monkey-patching (Config.ADMIN_USERS = ...) takes effect without
+        a module reload.
+        """
+        raw = (cls.ADMIN_USERS or '').strip()
+        if not raw:
+            # Admin gating unconfigured → permissive (legacy behavior).
+            return True
+        admin_set = cls.get_admin_set()
+        if not admin_set:
+            # Admin gating IS configured but parsing produced zero valid
+            # ids. Fail-closed: log a warning + deny.
+            logger.warning(
+                "ADMIN_USERS env var is set but no token parsed as an "
+                "integer Telegram ID (raw=%r); denying all cookie "
+                "uploads (fail-closed). Fix the env var and restart.",
+                cls.ADMIN_USERS)
+            return False
+        return uid in admin_set

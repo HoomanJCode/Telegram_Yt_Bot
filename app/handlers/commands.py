@@ -146,7 +146,51 @@ async def start_cmd(bot, u, c):
 
 async def help_cmd(bot, u, c):
     from app.handlers.navigation import menu
-    await u.message.reply_text("📚 Send YouTube link.\n📱 Inline: @botname <link>\n/status /cookies /recent", reply_markup=menu(bot, u.effective_user.id))
+    await u.message.reply_text(
+        "📚 Send YouTube link.\n"
+        "📱 Inline: @botname <link>\n"
+        "/settings /status /cookies /recent",
+        reply_markup=menu(bot, u.effective_user.id))
+
+
+async def settings_cmd(bot, u, c):
+    """Per-user settings viewer/editor (`/settings`).
+
+    Wraps the existing inline menu (which already exposes per-setting
+    buttons) with an intro text summarizing the current values so users
+    who prefer text commands over inline buttons have a discoverable
+    entry point. Does not introduce new state — reuses
+    `get_video_quality`/`get_audio_quality`/`get_subtitle_mode`/
+    `get_default_delivery` and the existing `setvq_*`/`setaq_*`/
+    `setsm_*`/`setdelivery_*`/`setlang_*` callback handlers.
+    """
+    from app.utils import ok
+    from app.utils import (
+        VIDEO_QUALITY_LABELS, AUDIO_QUALITY_LABELS, SUBTITLE_MODE_LABELS,
+    )
+    from app.handlers.navigation import menu
+    uid = u.effective_user.id
+    if not ok(bot, uid):
+        await u.message.reply_text("⛔")
+        return
+
+    settings = bot._user_settings.get(uid, {})
+    vq = settings.get('video_quality', 'best')
+    aq = settings.get('audio_quality', 'best')
+    sm = settings.get('subtitle_mode', 'embed')
+    delivery = settings.get('default_delivery', 'ask')
+    delivery_labels = {
+        'ask': 'Ask each time', 'telegram': 'Telegram', 'link': 'Link',
+    }
+    intro = (
+        "⚙️ *Your settings* (tap a button below to change):\n\n"
+        f"🎬 Video: {VIDEO_QUALITY_LABELS.get(vq, vq)}\n"
+        f"🎵 Audio: {AUDIO_QUALITY_LABELS.get(aq, aq)}\n"
+        f"📝 Subs: {SUBTITLE_MODE_LABELS.get(sm, sm)}\n"
+        f"📤 Delivery: {delivery_labels.get(delivery, delivery)}"
+    )
+    await u.message.reply_text(
+        intro, parse_mode='Markdown', reply_markup=menu(bot, uid))
 
 async def recent_cmd(bot, u, c):
     nav_clear(bot, u.effective_user.id); await show_recent(bot, u, c)

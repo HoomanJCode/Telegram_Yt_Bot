@@ -12,6 +12,7 @@ from app.utils import (
     VIDEO_QUALITY_OPTIONS, VIDEO_QUALITY_LABELS, AUDIO_QUALITY_LABELS, SUBTITLE_MODE_LABELS,
     VIDEO_CONTAINER_OPTIONS, VIDEO_CONTAINER_LABELS, VIDEO_CONTAINER_SHORT,
     classify_yt_error, friendly_error_msg, _format_comments, _format_description,
+    _format_meta,
 )
 from app.models import VideoRecord
 from app.downloader import fetch_info

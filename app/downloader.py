@@ -180,6 +180,42 @@ def _vtt_to_srt(vtt_path):
     return None
 
 
+def _extract_lang_from_filename(path):
+    """Extract the ISO 639-1 / BCP 47 language code from a yt-dlp subtitle filename.
+
+    yt-dlp saves softsubs as `Title.<lang>.<ext>` (e.g. `Foo.en.srt`,
+    `Foo.en-US.vtt`, `Foo.pt-BR.srt`). Some videos without a per-language
+    subscript (auto-generated fallback, very small channels) end up as just
+    `Title.srt` with no language segment.
+
+    Returns the lowercased language code, or '' when no segment looks like a
+    valid lang tag — the caller (the merge helper) treats '' as "no language
+    flag" so a missing/broken lang segment doesn't write `language=` into the
+    ffmpeg args (which would emit `language=` with an empty value, worse than
+    omitting).
+
+    The regex deliberately accepts ISO 639-1 (`en`, `de`), ISO 639-2 (`yue`,
+    `haw`), and BCP 47 regional variants (`en-US`, `zh-Hant`, `pt-BR`) without
+    trying to enumerate them — the contract is "looks like a lang tag, not a
+    filename word that happens to be 2-5 chars long". False positives like
+    `Title.1080p.srt` are still possible but harmless: ffmpeg will simply
+    write `language=1080p` on the track tag (VLC displays the raw tag; modern
+    players ignore non-ISO strings). The downstream gain (real `eng` / `spa`
+    tags for the vast majority of well-tagged subs) far outweighs the rare
+    cosmetic oddity.
+    """
+    if not path:
+        return ''
+    stem = Path(path).stem
+    parts = stem.split('.')
+    if len(parts) < 2:
+        return ''
+    candidate = parts[-1]
+    if not re.match(r'^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?$', candidate):
+        return ''
+    return candidate.lower()
+
+
 def _effective_sub_mode_for_container(container, sub_mode):
     """Apply the MP4↔embed cascade locally.
 
@@ -210,7 +246,7 @@ def _effective_sub_mode_for_container(container, sub_mode):
     return sub_mode
 
 
-def _merge_subs_into_mkv(video_file, subtitle_files):
+def _merge_subs_into_mkv(video_file, subtitle_files, title=None, sub_languages=None):
     """Merge video + subtitle files into MKV. Returns MKV path on success, None on failure.
 
     Robust:
@@ -220,6 +256,25 @@ def _merge_subs_into_mkv(video_file, subtitle_files):
       input `video_file` is already an MKV (e.g. yt-dlp produced MKV directly
       for vp9+opus streams) and ensures we never unlink the just-written
       merged file by mistake.
+    * Writes container-level metadata (`-metadata title=...`) when `title` is
+      provided, so the resulting MKV shows up with a real title in VLC / mpv /
+      Plex. We pass `-metadata` and `title=...` as two SEPARATE argv entries
+      (no shell quoting needed — `subprocess.run` is invoked with cmd list,
+      never via shell=True) and strip control characters / newlines from the
+      title so a weird YouTube title can't smuggle a ffmpeg flag into the
+      command vector.
+    * Writes per-stream subtitle language metadata
+      (`-metadata:s:s:<i> language=<iso>`) for every subtitle index i where
+      `sub_languages[i]` is non-empty. Without this, ffmpeg defaults every
+      subtitle track to `language=und` (undefined) — which is exactly what
+      the user reported. The lang is recovered from yt-dlp's standard
+      filename convention `Title.<lang>.<ext>` via `_extract_lang_from_filename`,
+      so no info-dict inspection is needed.
+
+    `sub_languages` (optional) is an ordered list, one entry per element of
+    `subtitle_files`. If absent or shorter than `subtitle_files`, missing
+    entries are treated as '' (no language flag written). Longer lists are
+    tolerated but ignored past `len(subtitle_files)`.
     """
     if not subtitle_files:
         return None
@@ -241,6 +296,25 @@ def _merge_subs_into_mkv(video_file, subtitle_files):
     for i in range(len(converted)):
         cmd.append('-map'); cmd.append(f'{i + 1}:0')
     cmd.extend(['-c:v', 'copy', '-c:a', 'copy', '-c:s', 'srt'])
+
+    # Container-level title metadata. Strip control chars / newlines so a
+    # weird YouTube title can't smuggle a new ffmpeg flag into the argv list
+    # (e.g. a title like "Foo\n-codec libx264" must NOT be reinterpreted as
+    # a codec switch). `\r` and `\n` are dropped; other printable chars pass.
+    if title:
+        safe_title = re.sub(r'[\x00-\x1f\x7f]', '', str(title)).strip()
+        if safe_title:
+            cmd.extend(['-metadata', f'title={safe_title}'])
+
+    # Per-stream subtitle language metadata. Only emit a `language=` flag
+    # when the input list has an entry at this index AND that entry is a
+    # non-empty string — an empty lang MUST NOT add `-metadata:s:s:i
+    # language=` (nothing after the `=`) which ffmpeg rejects.
+    if sub_languages:
+        for i, lang in enumerate(sub_languages[:len(converted)]):
+            if lang:
+                cmd.extend([f'-metadata:s:s:{i}', f'language={lang}'])
+
     cmd.append(tmp_file)
 
     try:
@@ -416,12 +490,28 @@ def download(bot, uid, url, media_type, video_quality=None, audio_quality=None, 
             if f.suffix not in ('.vtt', '.srt'): continue
             if video_stem in f.stem or f.stem.startswith(video_stem + '.'):
                 watched_subs.append(str(f))
+        # Sort alphabetically so per-track language / map ordering is
+        # deterministic across platforms. DOWNLOADS_DIR.iterdir() order
+        # is undefined on Linux ext4 (inode order), insertion order on
+        # some other FSes, alphabetical on Windows NTFS, etc. Without
+        # this sort the `-metadata:s:s:<i> language=` flags below would
+        # map to whatever stream idx ffmpeg happens to assign at
+        # merge time, which can disagree on repeat runs of the same
+        # video on different machines — users would see their EN track
+        # labelled "es" in some sessions.
+        watched_subs.sort()
 
     # Subtitle handling per user mode (skipped for audio/thumb)
     if media_type == 'video' and watched_subs:
         if actual_sub_mode == 'embed':
             if bot.has_ffmpeg:
-                merged = _merge_subs_into_mkv(video_file, watched_subs)
+                # Recover per-track language tags from yt-dlp's standard
+                # `Title.<lang>.<ext>` filename convention so the merged
+                # MKV shows up as `language=eng` / `language=spa` etc in
+                # VLC / mpv / Plex instead of the default `language=und`.
+                sub_langs = [_extract_lang_from_filename(s) for s in watched_subs]
+                merged = _merge_subs_into_mkv(
+                    video_file, watched_subs, title=title, sub_languages=sub_langs)
                 if merged:
                     fp = merged
                 else:

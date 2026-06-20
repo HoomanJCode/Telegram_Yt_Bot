@@ -22,6 +22,7 @@ from app.downloader import (
     _is_subtitle_throttle,
     _extract_with_subtitle_fallback,
     _effective_sub_mode_for_container,
+    _extract_lang_from_filename,
     SUBTITLE_OPTS_KEYS,
     MIN_DISK_FREE_BYTES,
     StorageFullError,

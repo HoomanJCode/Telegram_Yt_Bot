@@ -28,6 +28,7 @@ from app.downloader import (
     VIDEO_QUALITY_FMT,
     AUDIO_QUALITY_FMT,
 )
+from config import Config, _env_int
 
 
 class TestSanitizeFilename(unittest.TestCase):
@@ -368,7 +369,11 @@ class TestOptsWithProxy(unittest.TestCase):
 
 
 class TestHasDiskSpace(unittest.TestCase):
-    """Pre-flight check in download() that refuses when <5GB free."""
+    """Pre-flight check in download() that refuses when free disk drops below
+    the threshold derived from Config.MIN_DISK_FREE_MB (default 1024 MB = 1 GB).
+    The 5 GB hard-coded threshold was incorrect for small VPSes (e.g. 9.4 GB
+    total disk with 4.7 GB free), so the threshold is now env-tunable.
+    """
 
     def test_passes_when_well_above_threshold(self):
         with patch('app.downloader.shutil.disk_usage') as mock_usage:
@@ -376,14 +381,16 @@ class TestHasDiskSpace(unittest.TestCase):
             self.assertTrue(_has_disk_space())
 
     def test_passes_at_exact_threshold(self):
-        # 5 GB exactly -> still allowed (>= comparison, not strict).
+        # MIN_DISK_FREE_BYTES exactly -> still allowed (>= comparison, not strict).
+        # The actual default comes from Config.MIN_DISK_FREE_MB * 1024 * 1024,
+        # so we use the same constant here to stay in sync with operator tuning.
         with patch('app.downloader.shutil.disk_usage') as mock_usage:
-            mock_usage.return_value = MagicMock(free=5 * 1024 ** 3)
+            mock_usage.return_value = MagicMock(free=MIN_DISK_FREE_BYTES)
             self.assertTrue(_has_disk_space())
 
     def test_fails_one_byte_below_threshold(self):
         with patch('app.downloader.shutil.disk_usage') as mock_usage:
-            mock_usage.return_value = MagicMock(free=5 * 1024 ** 3 - 1)
+            mock_usage.return_value = MagicMock(free=MIN_DISK_FREE_BYTES - 1)
             self.assertFalse(_has_disk_space())
 
     def test_fails_well_below_threshold(self):
@@ -397,9 +404,26 @@ class TestHasDiskSpace(unittest.TestCase):
                    side_effect=OSError('not a real disk')):
             self.assertTrue(_has_disk_space())
 
-    def test_default_threshold_is_5gb(self):
-        # Sanity: ensure constant matches the friendly-error wording.
-        self.assertEqual(MIN_DISK_FREE_BYTES, 5 * 1024 ** 3)
+    def test_threshold_derived_from_config(self):
+        # Sanity: ensure MIN_DISK_FREE_BYTES is derived from
+        # Config.MIN_DISK_FREE_MB so operators can tune it via env var.
+        # This relationship holds regardless of the configured value (the
+        # documented default OR an operator-overridden one) — it is the only
+        # invariant that matters for the disk-full pre-flight check.
+        self.assertEqual(MIN_DISK_FREE_BYTES, Config.MIN_DISK_FREE_MB * 1024 * 1024)
+
+    def test_default_threshold_is_1gb_when_env_not_set(self):
+        # The documented default is 1 GB (1024 MB). Skip this assertion if
+        # the operator already exported MIN_DISK_FREE_MB before the test
+        # run — we don't want to fight their chosen value in CI or dev
+        # shells. The derivation invariant above is the one that absolutely
+        # must hold regardless of env state.
+        if 'MIN_DISK_FREE_MB' in os.environ:
+            self.skipTest(
+                'MIN_DISK_FREE_MB is set in this environment; '
+                'the documented default is not asserted.')
+        self.assertEqual(Config.MIN_DISK_FREE_MB, 1024)
+        self.assertEqual(MIN_DISK_FREE_BYTES, 1024 * 1024 * 1024)
 
     def test_custom_threshold_passes_argument_through(self):
         with patch('app.downloader.shutil.disk_usage') as mock_usage:
@@ -541,13 +565,76 @@ class TestStorageFullError(unittest.TestCase):
 
     def test_can_be_raised_and_caught(self):
         with self.assertRaises(StorageFullError):
-            raise StorageFullError('Less than 5 GB free on bot storage')
+            raise StorageFullError('Less than 1 GB free on bot storage')
 
     def test_message_preserved(self):
         try:
             raise StorageFullError('disk is fully dry')
         except StorageFullError as e:
             self.assertEqual(str(e), 'disk is fully dry')
+
+
+class TestEnvIntHelper(unittest.TestCase):
+    """Drive config._env_int — the helper that guarantees env-var int
+    parsing never crashes bot startup.
+
+    Counterpart to Config.MIN_DISK_FREE_MB validation: missing / empty /
+    whitespace-only / non-numeric input must return the default; valid
+    integers (including 0 and negatives — clamping is the call site's job,
+    not the helper's) must pass through unchanged.
+    """
+
+    _TEST_KEY = '_TEST_ENV_INT_DUMMY_KEY_'
+
+    def setUp(self):
+        # Snapshot and clear so each test starts in a known state.
+        self._saved = os.environ.pop(self._TEST_KEY, None)
+
+    def tearDown(self):
+        if self._saved is None:
+            os.environ.pop(self._TEST_KEY, None)
+        else:
+            os.environ[self._TEST_KEY] = self._saved
+
+    def test_unset_returns_default(self):
+        # getenv returns None for unset → helper uses default.
+        self.assertEqual(_env_int(self._TEST_KEY, 99), 99)
+
+    def test_empty_string_returns_default(self):
+        os.environ[self._TEST_KEY] = ''
+        self.assertEqual(_env_int(self._TEST_KEY, 99), 99)
+
+    def test_whitespace_only_returns_default(self):
+        os.environ[self._TEST_KEY] = '   '
+        self.assertEqual(_env_int(self._TEST_KEY, 99), 99)
+
+    def test_valid_positive_int(self):
+        os.environ[self._TEST_KEY] = '2048'
+        self.assertEqual(_env_int(self._TEST_KEY, 99), 2048)
+
+    def test_zero_passes_through(self):
+        # Call site clamps; helper must return 0 verbatim.
+        os.environ[self._TEST_KEY] = '0'
+        self.assertEqual(_env_int(self._TEST_KEY, 99), 0)
+
+    def test_negative_passes_through_unchanged(self):
+        # Negatives are intentionally NOT clamped here (that is the call
+        # site's job: max(0, _env_int(...))). A future refactor that lost
+        # this distinction would silently change MIN_DISK_FREE_MB semantics.
+        os.environ[self._TEST_KEY] = '-5'
+        self.assertEqual(_env_int(self._TEST_KEY, 99), -5)
+
+    def test_non_numeric_returns_default(self):
+        os.environ[self._TEST_KEY] = 'not_a_number'
+        self.assertEqual(_env_int(self._TEST_KEY, 99), 99)
+
+    def test_whitespace_around_value_is_stripped(self):
+        os.environ[self._TEST_KEY] = '  1024  '
+        self.assertEqual(_env_int(self._TEST_KEY, 99), 1024)
+
+    def test_unsigned_int_boundary(self):
+        os.environ[self._TEST_KEY] = '9223372036854775807'  # sys.maxsize
+        self.assertEqual(_env_int(self._TEST_KEY, 99), 9223372036854775807)
 
 
 if __name__ == '__main__':

@@ -15,9 +15,12 @@ WARP_PROXY = 'http://127.0.0.1:40000'
 
 
 # Minimum free disk space required before starting a download, in bytes.
-# 5 GB comfortably absorbs yt-dlp's worst-case temp usage during HLS/DASH mux
-# (separate audio + video streams + fragments + final MKV all coexisting).
-MIN_DISK_FREE_BYTES = 5 * 1024 ** 3
+# Derived at import from Config.MIN_DISK_FREE_MB so operators can tune the
+# threshold via env var without touching code (default 1024 MB = 1 GB).  The
+# old hard-coded 5 GB incorrectly rejected requests on small VPSes with
+# <10 GB total disk even when plenty of room remained for a single download +
+# mux peak.  See config.py for the full rationale.
+MIN_DISK_FREE_BYTES = Config.MIN_DISK_FREE_MB * 1024 * 1024
 
 
 # Keys that turn on yt-dlp's subtitle fetch.  When a download fails with a
@@ -256,9 +259,10 @@ def download(bot, uid, url, media_type, video_quality=None, audio_quality=None, 
     # Storage-full short-circuit: refuse before touching yt-dlp so the user
     # gets a clear `disk_error` message instead of an opaque yt-dlp OSError.
     if not _has_disk_space():
+        free_mb = Config.MIN_DISK_FREE_MB
         raise StorageFullError(
-            'Less than 5 GB free on bot storage — refusing to start a download '
-            'that would crash mid-flight.')
+            f'Less than {free_mb} MB free on bot storage — refusing to start '
+            'a download that would crash mid-flight.')
 
     base_opts = {
         'cookiefile': _cookie_file(bot, uid),

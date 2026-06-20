@@ -429,36 +429,71 @@ VIDEO_CONTAINER_SHORT = {
 }
 
 VIDEO_QUALITY_FMT = {
-    # Every entry pins `bv*` (bestvideo) to `[vcodec^=avc]` so yt-dlp
-    # restricts selection to H.264 / AVC streams. Root-cause for the
-    # 2026-06-20 user report: without the codec pin, yt-dlp picked a
-    # 1080p60+ / 1440p / 2160p YouTube stream -- YouTube serves those
-    # as VP9 or AV1 only -- and multiplexed it into MKV with the
-    # Matroska codec ID `V_VP9` (or `V_AV1`). Older TVs (and many
-    # mid-range sets) do not have VP9 / AV1 hardware decoders and
-    # report the symptom as `video codec:none` when they see a
-    # stream with a fourCC they cannot decode. AVC is the universal
-    # codec: every TV made in the last ~15 years decodes it. Trade-off
-    # is a quality ceiling: YouTube's 2160p / 1440p / 1080p60+ tiers
-    # do not serve H.264, so 4K-quality downloads are no longer
-    # possible; max usable resolution drops to ~1080p H.264 (the
-    # highest tier YouTube serves in AVC). Operators who want VP9 /
-    # AV1 back can override per-download via a future `video_codec`
-    # user setting (--add separate round per render).
-    #
-    # The audio fallback `b/b[vcodec^=avc]` mirrors the video pin
-    # so the merged single-stream fallback is also AVC when the
-    # height-bound + audio combination is unavailable. `worst`
-    # deliberately stays pinned to none -- it is the unconditional
-    # smallest-stream fallback and a codec pin there would break the
-    # "any 360p will do" UX for old videos that only have VP9 sources.
-    'best':   'bv*[vcodec^=avc]+ba/b[vcodec^=avc]',
-    '2160p':  'bv*[vcodec^=avc][height<=2160]+ba/b[vcodec^=avc][height<=2160]',
-    '1440p':  'bv*[vcodec^=avc][height<=1440]+ba/b[vcodec^=avc][height<=1440]',
-    '1080p':  'bv*[vcodec^=avc][height<=1080]+ba/b[vcodec^=avc][height<=1080]',
-    '720p':   'bv*[vcodec^=avc][height<=720]+ba/b[vcodec^=avc][height<=720]',
-    '480p':   'bv*[vcodec^=avc][height<=480]+ba/b[vcodec^=avc][height<=480]',
-    '360p':   'bv*[vcodec^=avc][height<=360]+ba/b[vcodec^=avc][height<=360]',
+# Every entry pins `bv*` (bestvideo) to `[vcodec^=avc]` so yt-dlp
+# restricts selection to H.264 / AVC streams. Root-cause for the
+# 2026-06-20 user report: without the codec pin, yt-dlp picked a
+# 1080p60+ / 1440p / 2160p YouTube stream -- YouTube serves those
+# as VP9 or AV1 only -- and multiplexed it into MKV with the
+# Matroska codec ID `V_VP9` (or `V_AV1`). Older TVs (and many
+# mid-range sets) do not have VP9 / AV1 hardware decoders and
+# report the symptom as `video codec:none` when they see a
+# stream with a fourCC they cannot decode. AVC is the universal
+# codec: every TV made in the last ~15 years decodes it. Trade-off
+# is a quality ceiling: YouTube's 2160p / 1440p / 1080p60+ tiers
+# do not serve H.264, so 4K-quality downloads are no longer
+# possible; max usable resolution drops to ~1080p H.264 (the
+# highest tier YouTube serves in AVC). Operators who want VP9 /
+# AV1 back can override per-download via a future `video_codec`
+# user setting (--add separate round per render).
+#
+# 2026-06-21 audio pin: every entry except `worst` adds a
+# `[acodec^=aac]` PREFERENCE tier to the channel-selection chain.
+# Root-cause for the 2026-06-21 user report: without an audio
+# codec pin, yt-dlp picks Opus for 1080p+ YouTube streams --
+# Opus is reaching more modern decoders but is NOT in many PC
+# players' default codec DB. Symptom on Windows: PotPlayer /
+# MPC-HC with LAV Filters / certain VLC builds report the audio
+# track as 'audio codec: none' even though they decode the audio
+# via fallback (hence "plays anyway" reports -- the audio IS
+# playing, just labeled incompletely). The chain
+# `bv*[vcodec^=avc]+ba[acodec^=aac]/bv*[vcodec^=avc]+ba/
+# b[vcodec^=avc]` says: AVC video + AAC audio (preferred) /
+# AVC video + any audio (fallback when AAC is not served -- most
+# 4K videos where YouTube serves Opus-only audio) / AVC merged
+# single-stream (last resort). AAC is the universal codec:
+# every PC made in the last ~15 years decodes it. Trade-off:
+# the same height-bound quality ceiling the AVC video pin
+# imposes -- 4K videos whose AAC stream is missing still get
+# Opus audio (downgraded but decodable on the user's TV), so
+# `format_unavailable` is hit only when BOTH AVC+AAC fail.
+# Operator-facing note: the PC-player symptom ("audio codec:
+# none") is FIXED for videos where YouTube serves an AAC audio
+# stream (most 720p and below + some 1080p videos). For 1080p+
+# videos whose AAC stream is missing (typical 4K + some
+# 1080p60+ videos), the chain falls through to the second tier
+# (Opus audio) and the PC-player label "audio codec: none"
+# persists for THOSE SPECIFIC DOWNLOADS. The user's TV still
+# plays fine -- this asymmetry is because modern smart TVs ship
+# with Opus in their codec pack while many mid-range PC players
+# label Opus tracks incompletely. The remaining edge case is
+# solvable only via an ffmpeg Opus -> AAC transcode (universal
+# coverage + ~30-90s download cost), which is a FUTURE per-user
+# `force_aac_transcode` setting -- not in this commit's scope.
+#
+# The merged single-stream fallback `b/b[vcodec^=avc]` mirrors
+# the video pin so the underlying video is also AVC when the
+# height-bound + audio combination is unavailable. `worst`
+# deliberately stays pinned to none (no AVC video, no AAC
+# audio) -- it is the unconditional smallest-stream fallback
+# and any codec pin there would break the "any 360p will do"
+# UX for old videos that only have VP9 sources.
+    'best':   'bv*[vcodec^=avc]+ba[acodec^=aac]/bv*[vcodec^=avc]+ba/b[vcodec^=avc]',
+    '2160p':  'bv*[vcodec^=avc][height<=2160]+ba[acodec^=aac]/bv*[vcodec^=avc][height<=2160]+ba/b[vcodec^=avc][height<=2160]',
+    '1440p':  'bv*[vcodec^=avc][height<=1440]+ba[acodec^=aac]/bv*[vcodec^=avc][height<=1440]+ba/b[vcodec^=avc][height<=1440]',
+    '1080p':  'bv*[vcodec^=avc][height<=1080]+ba[acodec^=aac]/bv*[vcodec^=avc][height<=1080]+ba/b[vcodec^=avc][height<=1080]',
+    '720p':   'bv*[vcodec^=avc][height<=720]+ba[acodec^=aac]/bv*[vcodec^=avc][height<=720]+ba/b[vcodec^=avc][height<=720]',
+    '480p':   'bv*[vcodec^=avc][height<=480]+ba[acodec^=aac]/bv*[vcodec^=avc][height<=480]+ba/b[vcodec^=avc][height<=480]',
+    '360p':   'bv*[vcodec^=avc][height<=360]+ba[acodec^=aac]/bv*[vcodec^=avc][height<=360]+ba/b[vcodec^=avc][height<=360]',
     'worst':  'worst',
 }
 

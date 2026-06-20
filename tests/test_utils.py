@@ -83,6 +83,43 @@ class TestQualityConstants(unittest.TestCase):
                 f'the pin yt-dlp picks VP9/AV1 streams which the '
                 f"TVs report as 'video codec:none'.")
 
+    def test_video_quality_fmt_pins_to_aac_audio_codec(self):
+        # Regression pin for the 2026-06-21 'audio codec: none' PC
+        # player report. Symmetric to the AVC video pin -- YouTube
+        # serves 1080p+ streams with Opus audio, which some PC
+        # players (PotPlayer, MPC-HC with LAV Filters, certain VLC
+        # builds) label 'audio codec: none' even when they decode
+        # the audio via fallback. Pinning audio to AAC ensures
+        # cu-dlp picks the AAC stream where YouTube serves one
+        # (most 720p and below + some 1080p videos), falling back
+        # to Opus only when AAC isn't served (most 4K videos).
+        #
+        # POSITION MATTERS: yt-dlp's `/` alternate-format chain
+        # follows 'first match wins'. Anchor on `startswith(...)` so
+        # a future maintainer who reorders the chain (e.g. puts the
+        # AAC pin in the LAST fallback tier thinking the existing
+        # pin is 'conservative enough') fails this test -- on the
+        # reordered chain, Alt 1 (`bv*[vcodec^=avc]+ba`) already
+        # succeeds on the wide-audio stream, so the AAC alt is
+        # never reached and the audio pin becomes dead code while
+        # this test stays green on a substring-only assertion.
+        aac_pinned = ('2160p', '1440p', '1080p', '720p', '480p', '360p', 'best')
+        for vq in aac_pinned:
+            expected_prefix = (
+                f'bv*[vcodec^=avc][height<={vq[:-1]}]+ba[acodec^=aac]'
+                if vq != 'best'
+                else 'bv*[vcodec^=avc]+ba[acodec^=aac]'
+            )
+            self.assertTrue(
+                VIDEO_QUALITY_FMT[vq].startswith(expected_prefix),
+                f"VIDEO_QUALITY_FMT[{vq!r}] must START with "
+                f"{expected_prefix!r} -- position matters because "
+                f"yt-dlp's '/' chain tests each alternative 'first "
+                f"match wins'; the AAC pin must be the FIRST "
+                f"preference tier or it becomes dead code. "
+                f"Got: {VIDEO_QUALITY_FMT[vq]!r}"
+            )
+
     def test_worst_video_stays_unpinned(self):
         # Sanity: 'worst' deliberately stays a single-stream
         # `worst` token (no codec pin). Pinning worst to avc1 would

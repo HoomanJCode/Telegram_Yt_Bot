@@ -910,6 +910,190 @@ class TestFormatDescription(unittest.TestCase):
 
 
 
+
+    class TestFormatUploader(unittest.TestCase):
+        """Drive _format_uploader -- renders channel name with TV emoji."""
+
+        def test_none_returns_empty_string(self):
+                self.assertEqual(_format_uploader(None), "")
+
+        def test_empty_string_returns_empty_string(self):
+                self.assertEqual(_format_uploader(""), "")
+
+        def test_whitespace_only_returns_empty_string(self):
+                self.assertEqual(_format_uploader("   "), "")
+                self.assertEqual(_format_uploader("\t"), "")
+
+        def test_short_renders_with_tv_emoji(self):
+                result = _format_uploader("TechChannel")
+                self.assertIn(chr(0x1F4FA), result)
+                self.assertIn("TechChannel", result)
+
+        def test_strips_surrounding_whitespace(self):
+                result = _format_uploader("   TechChannel   ")
+                self.assertIn("TechChannel", result)
+                self.assertNotIn("   TechChannel", result)
+
+        def test_truncates_at_50_chars(self):
+                long_in = "A" * 200
+                result = _format_uploader(long_in)
+                # Channel name portion must be <= 50.
+                _, channel = result.split(" ", 1)
+                self.assertEqual(len(channel), 50)
+
+        def test_exactly_50_chars_passes_through(self):
+                text = "B" * 50
+                result = _format_uploader(text)
+                self.assertTrue(result.endswith("B" * 50))
+
+        def test_escapes_markdown_special_chars(self):
+                result = _format_uploader("a_b *bold* `[ Broken!")
+                self.assertIn(r"\_b", result)
+                self.assertIn(r"\*bold\*", result)
+                self.assertNotIn("a_b ", result)
+
+    class TestFormatViews(unittest.TestCase):
+        """Drive _format_views -- raw int -> compact human-readable with K/M/B."""
+
+        def test_none_returns_empty_string(self):
+                self.assertEqual(_format_views(None), "")
+
+        def test_zero_returns_empty_string(self):
+                self.assertEqual(_format_views(0), "")
+
+        def test_negative_returns_empty_string(self):
+                self.assertEqual(_format_views(-100), "")
+
+        def test_non_int_returns_empty_string(self):
+                self.assertEqual(_format_views("lots"), "")
+                self.assertEqual(_format_views([]), "")
+
+        def test_small_int_no_suffix(self):
+                # < 1000 renders the bare integer.
+                result = _format_views(999)
+                self.assertIn("999", result)
+                self.assertNotIn("K", result)
+                self.assertNotIn("M", result)
+                self.assertNotIn("B", result)
+
+        def test_one_thousand_uses_k_strips_dot_zero(self):
+                # 1000 -> "1K" not "1.0K".
+                self.assertIn("1K views", _format_views(1000))
+                self.assertNotIn("1.0K", _format_views(1000))
+
+        def test_1500_k_with_one_decimal(self):
+                self.assertIn("1.5K views", _format_views(1500))
+
+        def test_just_under_thousand_no_suffix(self):
+                self.assertIn("999 views", _format_views(999))
+
+        def test_one_million_uses_m_strips_dot_zero(self):
+                self.assertIn("1M views", _format_views(1_000_000))
+                self.assertNotIn("1.0M", _format_views(1_000_000))
+
+        def test_3_2_million(self):
+                self.assertIn("3.2M views", _format_views(3_200_000))
+
+        def test_one_billion_uses_b(self):
+                self.assertIn("1B views", _format_views(1_000_000_000))
+                self.assertIn("1.5B views", _format_views(1_500_000_000))
+
+        def test_eye_emoji_always_present(self):
+                # Every non-empty result is U+1F441-prefixed.
+                EYE = chr(0x1F441)
+                for n in (1, 999, 1000, 12345, 1_000_000, 5_000_000_000):
+                    result = _format_views(n)
+                    self.assertTrue(result.startswith(EYE),
+                        f"view={n} result={result!r} must start with eye emoji")
+
+    class TestFormatUploadDate(unittest.TestCase):
+        """Drive _format_upload_date -- renders yt-dlp date as ISO with calendar emoji."""
+
+        def test_none_returns_empty_string(self):
+                self.assertEqual(_format_upload_date(None), "")
+
+        def test_empty_string_returns_empty_string(self):
+                self.assertEqual(_format_upload_date(""), "")
+
+        def test_whitespace_only_returns_empty_string(self):
+                self.assertEqual(_format_upload_date("   "), "")
+
+        def test_yyyymmdd_format_with_dashes(self):
+                # 20231215 -> 2023-12-15.
+                result = _format_upload_date("20231215")
+                self.assertIn("2023-12-15", result)
+                self.assertIn(chr(0x1F4C5), result)
+
+        def test_already_dashed_passes_through(self):
+                # Some non-YouTube extractors use ISO format natively.
+                result = _format_upload_date("2023-12-15")
+                self.assertIn("2023-12-15", result)
+
+        def test_strips_surrounding_whitespace(self):
+                result = _format_upload_date("  20231215  ")
+                self.assertIn("2023-12-15", result)
+
+        def test_garbage_falls_back_to_verbatim(self):
+                result = _format_upload_date("yesterday")
+                self.assertIn("yesterday", result)
+                self.assertIn(chr(0x1F4C5), result)
+
+        def test_short_garbage_passed_through(self):
+                # 7 digits: not the canonical 8, fall back to verbatim.
+                result = _format_upload_date("2023121")
+                self.assertIn("2023121", result)
+
+    class TestFormatMeta(unittest.TestCase):
+        """Drive _format_meta -- combines uploader/views/date into one block."""
+
+        def test_all_none_returns_empty_string(self):
+                self.assertEqual(_format_meta(None, None, None), "")
+
+        def test_all_empty_or_zero_returns_empty_string(self):
+                self.assertEqual(_format_meta("", 0, ""), "")
+
+        def test_only_uploader_returns_only_uploader(self):
+                result = _format_meta("ChannelName", None, None)
+                self.assertIn("ChannelName", result)
+                self.assertNotIn("views", result)
+                self.assertEqual(result.count(NL), 0)
+
+        def test_only_views_returns_only_views(self):
+                result = _format_meta(None, 12345, None)
+                self.assertIn("12.3K views", result)
+                self.assertEqual(result.count(NL), 0)
+
+        def test_only_date_returns_only_date(self):
+                result = _format_meta(None, None, "20231215")
+                self.assertIn("2023-12-15", result)
+                self.assertEqual(result.count(NL), 0)
+
+        def test_uploader_plus_views_combined(self):
+                result = _format_meta("Ch", 1000, None)
+                self.assertIn("Ch", result)
+                self.assertIn("1K views", result)
+                self.assertEqual(result.count(NL), 1)
+
+        def test_all_three_combined_three_lines(self):
+                result = _format_meta("Ch", 1000, "20231215")
+                self.assertIn("Ch", result)
+                self.assertIn("1K views", result)
+                self.assertIn("2023-12-15", result)
+                self.assertEqual(result.count(NL), 2)
+
+        def test_zero_views_skipped_in_combo(self):
+                # 0 view_count skipped even if uploader + date present.
+                result = _format_meta("Ch", 0, "20231215")
+                self.assertIn("Ch", result)
+                self.assertIn("2023-12-15", result)
+                self.assertNotIn("views", result)
+
+        def test_meta_escapes_when_present(self):
+                # Markdown specials in any input still esc.
+                result = _format_meta("a_b", None, None)
+                self.assertIn(r"\_b", result)
+
+
 class TestFormatComments(unittest.TestCase):
     """Drive `_format_comments` — the helper that turns yt-dlp's
     `info['comments']` list into a short, Telegram-friendly excerpt for

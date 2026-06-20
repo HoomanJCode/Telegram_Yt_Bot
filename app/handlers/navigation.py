@@ -130,19 +130,35 @@ async def show_format_choice(bot, uid, url, video_id, msg):
         # rather than concatenating a 0-length emoji prefix that would
         # leave a blank line above the duration row.
         desc_text = _format_description(info.get('description'))
-        # Inline the description block into `headline` (rather than as a
-        # separate f-string segment) so the structural test that asserts
-        # the safe-text-overflow template literal keeps passing — the
-        # `f"{headline}{extras}\n\nChoose format:"` literal anchors
-        # this exact shape, and re-defining headline conditionally
-        # preserves all four code-level pins (or-empty defensiveness,
-        # SAFE_TEXT_MAX, normal + overflow branch templates).
+        # uploader + view_count + upload_date come from the SAME
+        # extract_info call as title/description/comments (all in
+        # info dict, no extra fetch). Each is independently optional:
+        # uploader may be None on non-YouTube extractors; view_count is
+        # None on live / upcoming streams; upload_date can be missing
+        # for scheduled content. `_format_meta` joins the non-empty
+        # fields with single newlines.
+        meta_text = _format_meta(
+            info.get('uploader'),
+            info.get('view_count'),
+            info.get('upload_date'),
+        )
+        # Build `headline` from optional parts (title + duration are
+        # always present; description + meta are each independently
+        # optional). List-of-parts joined with chr(10) avoids the
+        # 2-arm if/else repetition the previous round had — a future
+        # maintainer reading this block now sees one natural
+        # conditional-rebuild pipeline rather than two parallel
+        # conditional literals. Structural-pin tests still match:
+        # `if desc_text:` literal is preserved by `if desc_text:`,
+        # the template f-strings (`{headline}{extras}` + overflow
+        # variant) flow through unchanged.
+        parts = [f"📹 *{esc(title[:200])}*"]
         if desc_text:
-            headline = (
-                f"📹 *{esc(title[:200])}*\n\U0001F4D6 {desc_text}\n"
-                f"⏱ {mins}:{secs:02d}")
-        else:
-            headline = f"📹 *{esc(title[:200])}*\n⏱ {mins}:{secs:02d}"
+            parts.append(f"\U0001F4D6 {desc_text}")
+        if meta_text:
+            parts.append(meta_text)
+        parts.append(f"⏱ {mins}:{secs:02d}")
+        headline = chr(10).join(parts)
         extras = f"\n\n\U0001F4AC Top comments:\n{comments_block}" if comments_block else ''
         from app.handlers.formats import format_choice_kb
         # Telegram's edit_text caps the rendered text at TELEGRAM_TEXT_MAX

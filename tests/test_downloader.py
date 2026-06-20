@@ -1354,6 +1354,32 @@ class TestCommentSliceDefensiveness(unittest.TestCase):
         )
 
 
+        self.assertIn(
+            '_format_meta',
+            src,
+            'show_format_choice must call _format_meta so'
+            ' uploader + view_count + upload_date render inline'
+            ' below the title (zero extra fetches since all'
+            ' fields are in the same info dict).'
+        )
+        self.assertIn(
+            "info.get('uploader')",
+            src,
+            'show_format_choice must read uploader from the'
+            ' info dict for the channel-name rendering.'
+        )
+        self.assertIn(
+            "info.get('view_count')",
+            src,
+            'show_format_choice must read view_count from the'
+            ' info dict for the views-counter rendering.'
+        )
+        self.assertIn(
+            "info.get('upload_date')",
+            src,
+            'show_format_choice must read upload_date from the'
+            ' info dict for the date rendering.'
+        )
         # Also pin that the overflow policy uses SAFE_TEXT_MAX and headline
         # rather than a duplicated f-string — defends against a refactor
         # that reverts to mid-comment truncation (renders half a line

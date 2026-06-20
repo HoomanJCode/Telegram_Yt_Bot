@@ -68,6 +68,112 @@ def _format_description(desc):
     return esc(text)
 
 
+def _format_uploader(uploader):
+    """Render the channel name with the U+1F4FA TV emoji prefix.
+
+    yt-dlp's `info['uploader']` carries the channel name as a plain
+    string. Truncates at 50 chars to keep the format-picker kb legible
+    when a channel name is excessively long. Returns '' for None /
+    empty / whitespace-only input so callers branch with `if u:`
+    cleanly without showing a placeholder row above the duration line.
+
+    Markdown escape runs LAST so underscores in channel names
+    (e.g. `john_doe`) render as literal chars in the surrounding
+    ParseMode.MARKDOWN message instead of italic-styling the underline.
+    """
+    if not uploader:
+        return ''
+    s = str(uploader).strip()[:50]
+    return f'\U0001F4FA {esc(s)}'
+
+
+def _format_views(view_count):
+    """Render yt-dlp's view_count int as a compact human-readable summary.
+
+    yt-dlp returns the raw view count (e.g. 1234567); rendering that
+    verbatim is hard to scan in a chat-format-choice screen, so we
+    format with K / M / B suffixes (one decimal place) like the
+    YouTube web UI does. Returns '' for None / non-int / non-positive
+    so callers branch with `if v:` cleanly. Live and upcoming streams
+    return None from yt-dlp's extractor; monthly-churn channels with
+    view-bombing can also return 0 transiently.
+
+    Suffix rules:
+      * below 1000:                bare integer ('999 views')
+      * 1000 up to 999999:         K suffix, one decimal ('1.2K views')
+      * 1000000 up to 999999999:   M suffix, one decimal ('3.4M views')
+      * 1000000000 and above:      B suffix, one decimal ('1.5B views')
+
+    The .0 suffix is stripped so 1000 -> '1K', not '1.0K'.
+    """
+    if view_count is None:
+        return ''
+    try:
+        n = int(view_count)
+    except (TypeError, ValueError):
+        return ''
+    if n <= 0:
+        return ''
+    if n < 1000:
+        s = str(n)
+    elif n < 1_000_000:
+        s = f'{n/1000:.1f}K'.rstrip('0').rstrip('.')
+    elif n < 1_000_000_000:
+        s = f'{n/1_000_000:.1f}M'.rstrip('0').rstrip('.')
+    else:
+        s = f'{n/1_000_000_000:.1f}B'.rstrip('0').rstrip('.')
+    return f'\U0001F441 {s} views'
+
+
+def _format_upload_date(upload_date):
+    """Render yt-dlp's upload_date as ISO-style YYYY-MM-DD with calendar prefix.
+
+    yt-dlp's standard extractor returns YYYYMMDD (8 digits, no
+    separators, e.g. '20231215'). Always-present metadata that ships
+    in the SAME `extract_info()` call as title + description + comments
+    so zero extra fetch cost. Returns '' for None / empty / whitespace.
+
+    Falls back to escaped raw input if the format is unexpected — some
+    non-YouTube extractors use YYYY-MM-DD natively (10 chars including
+    dashes) and we pass that through; anything else is escaped verbatim
+    so a future yt-dlp format change doesn't crash chat rendering.
+    """
+    if not upload_date:
+        return ''
+    s = str(upload_date).strip()
+    if len(s) == 8 and s.isdigit():
+        formatted = f'{s[:4]}-{s[4:6]}-{s[6:8]}'
+    elif len(s) == 10 and '-' in s:
+        formatted = s
+    else:
+        formatted = s
+    return f'\U0001F4C5 {esc(formatted)}'
+
+
+def _format_meta(uploader, view_count, upload_date):
+    """Combine uploader + view_count + upload_date into a compact block.
+
+    All 3 fields are independently optional: info.uploader may be None
+    for some non-YouTube extractors, info.view_count is None for live
+    / upcoming streams, info.upload_date can be absent for scheduled
+    content. The combined text joins the non-empty parts with single
+    newline so each field is on its own visible chat line. Returns
+    '' if all 3 are empty so callers branch with `if meta:` cleanly
+    without an empty placeholder row.
+    """
+    parts = []
+    u = _format_uploader(uploader)
+    if u:
+        parts.append(u)
+    v = _format_views(view_count)
+    if v:
+        parts.append(v)
+    d = _format_upload_date(upload_date)
+    if d:
+        parts.append(d)
+    return chr(10).join(parts)
+
+
 def _format_comments(comments):
     """Render a yt-dlp `comments` list as a short, Telegram-friendly excerpt.
 

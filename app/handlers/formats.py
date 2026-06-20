@@ -52,6 +52,31 @@ def _more_format_buttons(idx, current_media_type):
         ])
     return rows
 
+def _VIDEO_VARIANT_BUTTONS():
+    # Each entry maps a format-choice callback_data to the file
+    # extension(s) that mark that variant "already downloaded". Central
+    # here so format_choice_kb and choose_format agree on the
+    # extension list without a parallel hard-coded list (the prior
+    # architecture drifted once and would have drifted again).
+    #   * 'fmt_video_mkv' → 'auto' container picker → `merge_output_format`
+    #     is NOT set, so yt-dlp picks the natural container. The
+    #     post-run ffmpeg MKV mux in downloader._embed_subs_to_mkv
+    #     rewraps to .mkv when sub mode='embed', which is the
+    #     default. We accept .mkv as the canonical match.
+    #   * 'fmt_video_mp4' → 'mp4' container picker → `merge_output_format=mp4`
+    #     forces .mp4 as the on-disk extension, so the cache check is
+    #     exact (no need for variant fallback).
+    return {
+        'fmt_video_mkv': ('.mkv',),
+        'fmt_video_mp4': ('.mp4',),
+    }
+
+
+def _video_variant_extensions(fmt):
+    """Extension tuple for a format-choice callback, or None for non-video."""
+    return _VIDEO_VARIANT_BUTTONS().get(fmt)
+
+
 def format_choice_kb(bot, uid, video_id):
     # Existing-detection uses the soft-fail-safe _path_on_disk so a transient
     # filesystem blip on the previously-downloaded file doesn't trigger a
@@ -62,17 +87,35 @@ def format_choice_kb(bot, uid, video_id):
     }
     kb = []
     # The video row is split into two buttons so the user explicitly picks
-    # MP4 vs the natural container (MKV). Both buttons always do a fresh
-    # download with the chosen container — there is no ✅ "Already
-    # Downloaded" marker on the video variants because doing so would
-    # falsely imply that clicking the OTHER variant was a no-op. Users
-    # can have multiple variants of the same video in their history.
-    # Trade-off reminders in the labels make the format ↔ subtitle
-    # relationship explicit (MP4 lacks soft-sub embed).
-    kb.append([InlineKeyboardButton(
-        "🎬 Video (MKV) — best quality + auto-subs", callback_data='fmt_video_mkv')])
-    kb.append([InlineKeyboardButton(
-        "🎬 Video (MP4) — universal compat, subs separate", callback_data='fmt_video_mp4')])
+    # MP4 vs the natural container (MKV). 2026-06-21 update: each button
+    # now independently shows a ✅ 'Downloaded' marker when its OWN
+    # container variant is cached. Iterate _VIDEO_VARIANT_BUTTONS() rather
+    # than hardcoding the (button -> extension) mapping so the keyboard
+    # marker and the choose_format dedup branch share ONE source of
+    # truth. A future maintainer who edits the mapping cannot silently
+    # drift one side. The cross-variant intent is preserved -- having an
+    # MKV does NOT mark the MP4 button as cached because the user might
+    # want a fresh MP4 render (e.g. to share with iOS / older Android
+    # friends). Trade-off reminders in the labels make the format ↔
+    # subtitle relationship explicit (MP4 lacks soft-sub embed).
+    video_buttons = {
+        'fmt_video_mkv': ("🎬 Video (MKV) — best quality + auto-subs",
+                          "✅ 🎬 Video (MKV) - Downloaded"),
+        'fmt_video_mp4': ("🎬 Video (MP4) — universal compat, subs separate",
+                          "✅ 🎬 Video (MP4) - Downloaded"),
+    }
+    for fmt, (plain, downloaded) in video_buttons.items():
+        # _video_variant_extensions(...) returns the per-callback
+        # extension tuple — sentinel None would mean a non-video button
+        # snuck into this loop, which we guard against with `bool(exts)`
+        # so a future maintainer adding a non-video variant here would
+        # fail to match (positive assertion in the test suite) rather
+        # than silently fall back to plain (false negative on ✅).
+        exts = _video_variant_extensions(fmt)
+        cached = bool(exts) and find_existing(
+            bot, uid, video_id, 'video', extensions=frozenset(exts))
+        kb.append([InlineKeyboardButton(
+            downloaded if cached else plain, callback_data=fmt)])
     a_label = f"🎵 Audio ({'MP3' if bot.has_ffmpeg else 'M4A'})"
     if 'audio' in existing_media_types:
         a_label = "✅ 🎵 Audio - Downloaded"
@@ -102,17 +145,35 @@ async def choose_format(bot, u, c):
     if fmt not in mt_map:
         return
     mt, container_override = mt_map[fmt]
-    # Audio and thumb have only one variant in their picker, so dedup by
-    # find_existing is still meaningful: a second click is genuinely
-    # redundant work the user didn't intend. Video skips dedup because
-    # the two variants (MKV / MP4) are independent download artifacts
-    # even for the same video_id.
-    if mt in ('audio', 'thumb'):
-        existing = find_existing(bot, uid, video_id, mt)
+    # Audio / thumb have only one variant, so a re-click dedupes cleanly.
+    # Video dedup is container-aware (2026-06-21): the user's MKV button
+    # only short-circuits when a CACHED .mkv is present, the MP4 button
+    # only when a CACHED .mp4 is present. The cross-variant intent is
+    # preserved -- having an MKV does NOT mark MP4 as cached because
+    # the user might want a fresh MP4 render to share with iOS / older
+    # Android friends. Mirrors the per-button ✅ "Downloaded" markers
+    # in format_choice_kb above.
+    if mt == 'audio':
+        existing = find_existing(bot, uid, video_id, 'audio')
         if existing:
             await q.answer("Already downloaded!")
             await show_delivery(bot, q.message, existing, bot.videos[uid].index(existing))
             return
+    elif mt == 'thumb':
+        existing = find_existing(bot, uid, video_id, 'thumb')
+        if existing:
+            await q.answer("Already downloaded!")
+            await show_delivery(bot, q.message, existing, bot.videos[uid].index(existing))
+            return
+    elif mt == 'video':
+        exts = _video_variant_extensions(fmt)
+        if exts:
+            existing = find_existing(bot, uid, video_id, 'video',
+                                     extensions=frozenset(exts))
+            if existing:
+                await q.answer("Already downloaded!")
+                await show_delivery(bot, q.message, existing, bot.videos[uid].index(existing))
+                return
     from app.handlers.messages import download_task
     async with bot._download_semaphore:
         await download_task(bot, uid, url, q.message, mt,
@@ -292,12 +353,21 @@ async def also_get_other_format(bot, u, c):
     record = videos[idx]
     url = record.url
     video_id = record.video_id
-    # Dedup: audio + thumb download tasks recognize an existing record
-    # and short-circuit. We surface the existing record's delivery screen
-    # rather than re-downloading. (For video dedup is intentionally
-    # disabled — there can be multiple valid MKV / MP4 variants of the
-    # same video_id and the user might want a fresh MP4 even if an old
-    # MKV exists.)
+    # Dedup mirrors choose_format for audio + thumb: a second copy of
+    # the same media_type is genuinely redundant work the user didn't
+    # intend, so we surface the existing record's delivery screen
+    # rather than re-downloading.
+    #
+    # Video dedup is intentionally NOT container-aware here (documented
+    # asymmetry with choose_format): this branch is reached via
+    # morefmt_video with container_override=None, which defers to the
+    # user's stored video_container preference. We can't pick a single
+    # extension to dedup against -- .mkv might collide with the user's
+    # stored 'mp4' preference and false-positive into an "already
+    # downloaded" toast the user did not ask for. The 2026-06-21 fix
+    # addresses the equivalent MKV-button-re-click case in
+    # choose_format where the user explicitly picks the container from
+    # the keyboard.
     if mt in ('audio', 'thumb'):
         existing = find_existing(bot, uid, video_id, mt)
         if existing:

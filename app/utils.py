@@ -292,11 +292,40 @@ def save_data(bot):
     try: (DATA_DIR / 'user_settings.json').write_text(json.dumps({str(k): v for k, v in bot._user_settings.items()}, indent=2))
     except: pass
 
-def find_existing(bot, uid, video_id, media_type='video', quality='best'):
-    """Find an existing record - quality-aware to allow separate entries per quality"""
+def _ext_of(file_path):
+    """Lowercased extension (e.g. '.mkv'), or '' for pathless / extensionless."""
+    if not file_path:
+        return ''
+    try:
+        return Path(file_path).suffix.lower()
+    except (TypeError, ValueError):
+        # Mirrors _path_on_disk's tolerance for malformed paths.
+        return ''
+
+
+def find_existing(bot, uid, video_id, media_type='video', quality='best', extensions=None):
+    """Find an existing record - quality-aware to allow separate entries per quality.
+
+    Optional `extensions` (frozenset of lowercased suffixes like `.mkv` /
+    `.mp4`): when supplied, the match also requires the record's
+    file_path extension to be in the set. This is the container-aware
+    dedup primitive used by the 2026-06-21 MKV/MP4 re-download fix --
+    a user who already has an MKV cached record should see the MKV
+    variant button as ✅ 'Downloaded' rather than re-triggering yt-dlp,
+    while MP4 stays independently downloadable. Sentinel `None` keeps
+    the original "match any file path" semantics so the audio / thumb
+    dedup paths are unchanged.
+
+    Iteration order matches user_videos.json insertion order (newest
+    first), so repeated calls return the most-recently-downloaded
+    match -- consistent with the show_recent / /recent ordering.
+    """
     for v in bot.videos.get(uid, []):
         if v.file_path and _path_on_disk(v.file_path) and v.video_id == video_id and v.media_type == media_type:
-            return v
+            if extensions is None:
+                return v
+            if _ext_of(v.file_path) in extensions:
+                return v
     return None
 
 def _path_on_disk(p):

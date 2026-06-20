@@ -359,6 +359,142 @@ class TestFindExistingSignature(unittest.TestCase):
         self.assertIsNone(find_existing(bot, 999, 'fakevid', 'video'))
 
 
+class TestFindExistingExtensions(unittest.TestCase):
+    """Container-aware dedup (2026-06-21 MKV/MP4 re-download fix).
+
+    Exercises the new `extensions=frozenset(...)` parameter on
+    `find_existing`. The contract:
+      * Sentinel `extensions=None` (default) preserves pre-fix behavior:
+        match any file_path whose extension matches the media_type.
+      * When `extensions` is supplied, the match further requires
+        the file's extension (lowercased) to be in the set.
+      * Iteration order matches user_videos.json insertion order so
+        newest-first is preserved when multiple records qualify.
+      * Case-only differences (`.MKV` on Windows NTFS vs `.mkv`)
+        must NOT silently miss a match.
+      * Paths that point to genuinely-deleted files (pruned away by
+        _path_on_disk) must NOT match even if their extension fits.
+    """
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path as _P
+        from app.models import VideoRecord
+        self._tmp = tempfile.mkdtemp()
+        # Three distinct files for the same video_id, one per container.
+        self._mkv = str(_P(self._tmp) / 'movie.mkv')
+        self._mp4 = str(_P(self._tmp) / 'movie.mp4')
+        self._webm = str(_P(self._tmp) / 'movie.webm')
+        # Path that NEVER gets created (operator-removed file).
+        self._missing = str(_P(self._tmp) / 'gone.mkv')
+        for real in (self._mkv, self._mp4, self._webm):
+            _P(real).write_bytes(b'x')
+        # Insertion order is intentional: newest-first per downloader.
+        self._rec_mp4 = VideoRecord(
+            'p4', 'http://a', 'vid1', self._mp4, 100,
+            '2024-01-01 00:00:00', media_type='video')
+        self._rec_mkv = VideoRecord(
+            'kv', 'http://a', 'vid1', self._mkv, 200,
+            '2024-01-02 00:00:00', media_type='video')
+        self._rec_webm = VideoRecord(
+            'wm', 'http://a', 'vid1', self._webm, 300,
+            '2024-01-03 00:00:00', media_type='video')
+        self._rec_missing = VideoRecord(
+            'gone', 'http://a', 'vid1', self._missing, 400,
+            '2024-01-04 00:00:00', media_type='video')
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_none_extensions_returns_first_record_unfiltered(self):
+        # Sentinel None preserves the pre-fix 'match any' behavior.
+        bot = _make_bot(videos={1: [self._rec_mp4, self._rec_mkv]})
+        result = find_existing(bot, 1, 'vid1', 'video')
+        self.assertIs(result, self._rec_mp4,
+            'with extensions=None, first matching record (mp4) wins')
+
+    def test_mkv_set_matches_only_mkv(self):
+        bot = _make_bot(videos={1: [self._rec_mp4, self._rec_mkv, self._rec_webm]})
+        result = find_existing(bot, 1, 'vid1', 'video',
+                              extensions=frozenset(['.mkv']))
+        self.assertIs(result, self._rec_mkv)
+
+    def test_mp4_set_matches_only_mp4(self):
+        bot = _make_bot(videos={1: [self._rec_mp4, self._rec_mkv, self._rec_webm]})
+        result = find_existing(bot, 1, 'vid1', 'video',
+                              extensions=frozenset(['.mp4']))
+        self.assertIs(result, self._rec_mp4)
+
+    def test_combined_set_matches_either_extension(self):
+        # The format_choice_kb markup is per-container, but a future
+        # helper could ask for mp4-or-mkv. Make sure the union works.
+        # Production keeps newest-first via `insert(0, rec)`, so users
+        # see their freshest download at index 0. The fixture mirrors
+        # that ordering by putting rec_mkv FIRST; iteration returns
+        # the index-0 match (mkv wins, matching production semantics).
+        bot = _make_bot(videos={1: [self._rec_mkv, self._rec_mp4]})
+        result = find_existing(bot, 1, 'vid1', 'video',
+                              extensions=frozenset(['.mkv', '.mp4']))
+        self.assertIs(result, self._rec_mkv)
+
+    def test_unknown_extension_returns_none(self):
+        bot = _make_bot(videos={1: [self._rec_mp4, self._rec_mkv]})
+        self.assertIsNone(
+            find_existing(bot, 1, 'vid1', 'video',
+                         extensions=frozenset(['.avi'])))
+
+    def test_missing_file_with_matching_extension_still_returns_none(self):
+        # _path_on_disk guards prune a deleted file even when its
+        # extension matches the filter. Regression for: a record that
+        # survived prune_missing but whose file has been removed since.
+        bot = _make_bot(videos={1: [self._rec_missing]})
+        self.assertIsNone(
+            find_existing(bot, 1, 'vid1', 'video',
+                         extensions=frozenset(['.mkv'])))
+
+    def test_returns_none_for_unknown_video_id(self):
+        bot = _make_bot(videos={1: [self._rec_mkv]})
+        self.assertIsNone(
+            find_existing(bot, 1, 'not-present', 'video',
+                         extensions=frozenset(['.mkv'])))
+
+    def test_returns_none_for_wrong_media_type(self):
+        # media_type mismatch must short-circuit BEFORE the extension
+        # filter even runs -- a video .mkv file does not match an
+        # audio lookup.
+        bot = _make_bot(videos={1: [self._rec_mkv]})
+        self.assertIsNone(
+            find_existing(bot, 1, 'vid1', 'audio',
+                         extensions=frozenset(['.mkv'])))
+
+    def test_uppercase_extension_still_matches(self):
+        # Windows NTFS preserves case by default but yt-dlp / our
+        # ffmpeg mux can emit uppercased suffixes (`.MKV`). Without
+        # the lower() coercion on _ext_of, the MKV button would
+        # silently skip an uppercased cached record.
+        import tempfile
+        from pathlib import Path as _P
+        from app.models import VideoRecord
+        upper = str(_P(self._tmp) / 'upcased.MKV')
+        _P(upper).write_bytes(b'x')
+        rec = VideoRecord('u', 'http://a', 'vidU', upper, 100,
+                          '2024-01-01', media_type='video')
+        bot = _make_bot(videos={1: [rec]})
+        result = find_existing(bot, 1, 'vidU', 'video',
+                              extensions=frozenset(['.mkv']))
+        self.assertIs(result, rec)
+
+    def test_empty_extensions_frozenset_never_matches(self):
+        # Defensive: callers should never pass frozenset(), but if a
+        # future maintainer does, the predicate must short-circuit to
+        # None rather than return a 'wrong' record by accident.
+        bot = _make_bot(videos={1: [self._rec_mkv]})
+        self.assertIsNone(
+            find_existing(bot, 1, 'vid1', 'video',
+                         extensions=frozenset()))
+
+
 class TestPathOnDisk(unittest.TestCase):
     """_path_on_disk is the soft-fail-safe existence check.
 

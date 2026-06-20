@@ -100,9 +100,9 @@ async def _username(bot):
 async def show_format_choice(bot, uid, url, video_id, msg):
     from app.handlers.messages import _ensure
     if not await _ensure(bot, uid):
-        await msg.reply_text("❌ Cookies expired. Upload with /cookies")
+        await msg.reply_text("❌ Cookies expired. Upload with /cookies", reply_to_message_id=msg.message_id)
         return
-    s = await msg.reply_text("🔍 Fetching info...")
+    s = await msg.reply_text("🔍 Fetching info...", reply_to_message_id=msg.message_id)
     try:
         info = await asyncio.get_event_loop().run_in_executor(None, fetch_info, bot, uid, url)
         title, duration = info.get('title', '?'), info.get('duration', 0)

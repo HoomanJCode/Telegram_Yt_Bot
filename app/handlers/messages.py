@@ -26,7 +26,7 @@ async def on_msg(bot, u, c):
     if not url: return
     video_id = extract_video_id(url)
     if not video_id:
-        if is_private: await msg.reply_text("❌ Invalid URL."); return
+        if is_private: await msg.reply_text("❌ Invalid URL.", reply_to_message_id=msg.message_id); return
 
     if is_group:
         if not await _check_group(bot, msg.chat_id, c.bot): return
@@ -35,7 +35,7 @@ async def on_msg(bot, u, c):
             await _group_download(bot, uid, url, msg, 'video', video_id)
         return
 
-    if not await _ensure(bot, uid): await msg.reply_text("❌ Upload cookies first! /cookies"); return
+    if not await _ensure(bot, uid): await msg.reply_text("❌ Upload cookies first! /cookies", reply_to_message_id=msg.message_id); return
     nav_clear(bot, uid)
     # Auto-format: skip the keyboard, route to download_task directly.
     auto = get_auto_format(bot, uid)
@@ -105,7 +105,7 @@ async def _group_download(bot, uid, url, msg, media_type, video_id):
 
 async def download_task(bot, uid, url, msg, media_type, container_override=None):
     from app.downloader import download_thumb
-    s = await msg.reply_text(f"⏳ Downloading {media_type}...")
+    s = await msg.reply_text(f"⏳ Downloading {media_type}...", reply_to_message_id=msg.message_id)
     try:
         if media_type == 'thumb':
             fp, title, vid, sub_files = await asyncio.get_event_loop().run_in_executor(None, download_thumb, bot, uid, url)

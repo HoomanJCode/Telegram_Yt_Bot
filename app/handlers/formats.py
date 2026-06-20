@@ -133,7 +133,7 @@ async def show_delivery(bot, msg, record, idx):
                         await msg.reply_document(
                             document=open(sub, 'rb'),
                             filename=Path(sub).name,
-                            caption=f"📝 Subtitle: {Path(sub).name}",
+                            caption=f"📝 Subtitle: {Path(sub).name}", reply_to_message_id=msg.message_id,
                         )
                     else:
                         from urllib.parse import quote
@@ -141,6 +141,7 @@ async def show_delivery(bot, msg, record, idx):
                             f"📝 Subtitle too large for Telegram ({size_kb/1024:.1f}MB)\n"
                             f"📥 `{bot.base_url}/{quote(Path(sub).name)}`",
                             parse_mode=ParseMode.MARKDOWN,
+                            reply_to_message_id=msg.message_id,
                         )
         except Exception:
             pass
@@ -162,7 +163,7 @@ async def show_delivery(bot, msg, record, idx):
         kb = _group_delivery_kb(bot, msg.chat.id)
         await msg.reply_text(
             f"{emoji} *{esc(record.title[:200])}*\n📦 {mb:.2f} MB | {record.media_type}\n🕒 {record.download_time}{sub_hint}\n\nChoose delivery:",
-            parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+            parse_mode=ParseMode.MARKDOWN, reply_markup=kb, reply_to_message_id=msg.message_id)
         return
     # Private-chat path: build the standard delivery kb then append the
     # "Also get" rows so the user can grab the OTHER formats (audio /
@@ -180,7 +181,7 @@ async def show_delivery(bot, msg, record, idx):
         sub_hint = f"\n📝 {len(pending_subs)} subtitle file(s) attached"
     await msg.reply_text(
         f"{emoji} *{esc(record.title[:200])}*\n📦 {mb:.2f} MB | {record.media_type}\n🕒 {record.download_time}{sub_hint}\n\nChoose delivery:",
-        parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+        parse_mode=ParseMode.MARKDOWN, reply_markup=kb, reply_to_message_id=msg.message_id)
 
 def delivery_kb(bot, uid, idx=None):
     idx_str = str(idx) if idx is not None else 'new'
@@ -208,7 +209,8 @@ async def send_link_direct(bot, msg, record):
         f"⚠️ File will be deleted after {bot.config.STORAGE_DAYS} days.",
         parse_mode=ParseMode.MARKDOWN,
         disable_web_page_preview=False,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📥 Download", url=url)], [InlineKeyboardButton("🔙 Menu", callback_data='b')]]))
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📥 Download", url=url)], [InlineKeyboardButton("🔙 Menu", callback_data='b')]]),
+        reply_to_message_id=msg.message_id)
 
 async def send_telegram(bot, u, c):
     q = u.callback_query; await q.answer(); uid = u.effective_user.id; data = q.data
@@ -232,7 +234,8 @@ async def send_link(bot, u, c):
         f"⚠️ File will be deleted after {bot.config.STORAGE_DAYS} days.",
         parse_mode=ParseMode.MARKDOWN,
         disable_web_page_preview=False,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📥 Download", url=url)], [InlineKeyboardButton("🔙 Menu", callback_data='b')]]))
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📥 Download", url=url)], [InlineKeyboardButton("🔙 Menu", callback_data='b')]]),
+        reply_to_message_id=q.message.message_id)
     await q.message.delete()
 
 async def back_to_formats(bot, u, c):
@@ -283,7 +286,8 @@ async def also_get_other_format(bot, u, c):
         # Record gone (pruned, removed, etc.) — let the user pick again.
         await q.message.reply_text(
             "⚠️ That entry is no longer available. Try again from /recent.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('📹 Recent', callback_data='r'), InlineKeyboardButton('🔙 Menu', callback_data='b')]]))
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('📹 Recent', callback_data='r'), InlineKeyboardButton('🔙 Menu', callback_data='b')]]),
+            reply_to_message_id=q.message.message_id)
         return
     record = videos[idx]
     url = record.url

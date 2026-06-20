@@ -30,6 +30,35 @@ def _env_int(key, default):
     except ValueError:
         return default
 
+
+# The 5 Python `logging` standard levels that `setLevel()` accepts. Anything
+# else (e.g. an operator typo like "VERBOSE") is treated as garbage so we
+# fall back to the default instead of raising AttributeError deep inside
+# logging internals when a wrong-but-resolvable name slips through.
+_LOG_LEVEL_NAMES = ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL')
+
+
+def _env_log_level(key, default='INFO'):
+    """Parse an env var as a Python `logging` level name.
+
+    Returns the actual `logging.{LEVEL}` int constant (e.g. `logging.INFO`)
+    so the caller can pass it straight into `logger.setLevel(...)`. Case-
+    and whitespace-insensitive: `' debug '`, `'Debug'`, and `'DEBUG'` all
+    return the same `logging.DEBUG`. On missing/empty/unknown value,
+    returns the default (also as a `logging.LEVEL` constant), so a
+    fat-fingered `LOG_LEVEL=VBOSE` quietly falls back to a sensible level
+    rather than crashing the bot's log setup. The validation set is
+    intentionally restricted to the 5 standard levels — even though
+    `logging.getLevelNamesMapping()` exposes additional numeric levels,
+    operators probably don't want to dial those in and almost certainly
+    didn't mean `NOTSET` (= 0, = capture everything, = storage death
+    sentence).
+    """
+    raw = os.getenv(key, default).strip().upper()
+    if raw not in _LOG_LEVEL_NAMES:
+        return getattr(logging, default.upper())
+    return getattr(logging, raw)
+
 class Config:
     BOT_TOKEN = os.getenv('BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
     BASE_DOWNLOAD_LINK = os.getenv('BASE_DOWNLOAD_LINK', 'http://your-server-ip:8000')
@@ -56,6 +85,19 @@ class Config:
     # _env_int so missing/empty/non-numeric values fall back to the default
     # instead of crashing bot startup.
     MIN_DISK_FREE_MB = max(0, _env_int('MIN_DISK_FREE_MB', 1024))
+    # Bot log level. Operators running on a constrained VPS reported
+    # `bot.log` filling their disk because the `yt_bot` logger was pinned
+    # at INFO unconditionally — every download / cookie-restore / menu
+    # event landed in journalctl → /var/log/<service>/bot{,_error}.log.
+    # Default stays at INFO (matches the previous behaviour, so an upgrade
+    # is non-disruptive for existing operators) but setting
+    # `LOG_LEVEL=WARNING` in `.env` (or systemd's EnvironmentFile) cleanly
+    # suppresses the noisy downloads-log for production while keeping
+    # WARNING/ERROR visible for genuine issues. Parsed via _env_log_level
+    # so missing/empty/garbage values fall back silently instead of
+    # crashing bot startup. Valid values: DEBUG, INFO, WARNING, ERROR,
+    # CRITICAL (case-insensitive, whitespace tolerated).
+    LOG_LEVEL = _env_log_level('LOG_LEVEL', 'INFO')
     # NOTE: this value is captured into app.downloader.MIN_DISK_FREE_BYTES
     # at module import time. A bot restart is required for changes to
     # MIN_DISK_FREE_MB to take effect — live-tweaking Config at runtime

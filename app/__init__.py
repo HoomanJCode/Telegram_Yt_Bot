@@ -1,6 +1,7 @@
 """YouTube Downloader Telegram Bot"""
 import asyncio
 import logging
+from config import Config
 from telegram import Update
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
@@ -14,12 +15,26 @@ from app.handlers.messages import on_msg
 from app.handlers.inline import inline_query
 from app.handlers.cookies import ask_cookies, recv_cookies
 
+# Root + library logger levels. Root stays at WARNING (caught by
+# `logging.basicConfig`) so third-party libraries' DEBUG chatter can't
+# accidentally flood journalctl even if the operator dials `yt_bot`
+# down to INFO. We DO NOT override the library list here with the
+# configured level — operators troubleshooting Telegram / HTTP issues
+# usually want a tight WARNING floor on those dependencies regardless
+# of how chatty the bot itself is.
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.WARNING)
 for lib in ('httpx', 'httpcore', 'telegram', 'telegram.ext', 'aiohttp'):
     logging.getLogger(lib).setLevel(logging.WARNING)
 
+# Bot's own log level is operator-tunable via the `LOG_LEVEL` env var
+# (default: INFO, the historical baseline). Operators on tight VPSes
+# historically reported `bot.log` filling their disk; setting
+# `LOG_LEVEL=WARNING` in `.env` silences the per-download / per-cookie
+# chatter while keeping real warnings / errors visible. Resolved by
+# Config.LOG_LEVEL at import time so a bot restart is required for
+# changes — same contract as the other env-driven settings.
 logger = logging.getLogger('yt_bot')
-logger.setLevel(logging.INFO)
+logger.setLevel(Config.LOG_LEVEL)
 h = logging.StreamHandler()
 h.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 logger.addHandler(h)

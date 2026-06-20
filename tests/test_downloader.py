@@ -9,6 +9,7 @@ import os
 import shutil
 import tempfile
 import unittest
+import logging
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -30,7 +31,7 @@ from app.downloader import (
     VIDEO_QUALITY_FMT,
     AUDIO_QUALITY_FMT,
 )
-from config import Config, _env_int
+from config import Config, _env_int, _env_log_level
 
 
 class TestSanitizeFilename(unittest.TestCase):
@@ -637,6 +638,135 @@ class TestEnvIntHelper(unittest.TestCase):
     def test_unsigned_int_boundary(self):
         os.environ[self._TEST_KEY] = '9223372036854775807'  # sys.maxsize
         self.assertEqual(_env_int(self._TEST_KEY, 99), 9223372036854775807)
+
+
+class TestEnvLogLevelHelper(unittest.TestCase):
+    """Drive config._env_log_level — the helper that guarantees env-var
+    log-level parsing never crashes bot startup and never returns an
+    unknown level (which would AttributeError inside logging internals).
+
+    Counterpart to Config.LOG_LEVEL: operators running the bot on tight
+    VPSes can keep `bot.log` from filling their storage by setting
+    `LOG_LEVEL=WARNING` in `.env` (or systemd EnvironmentFile). Default
+    is INFO so an upgrade is non-disruptive; garbage values silently
+    fall back to the default rather than crash.
+
+    Mirrors TestEnvIntHelper's setUp/tearDown env-snap pattern.
+    """
+
+    _TEST_KEY = '_TEST_ENV_LOG_LEVEL_DUMMY_KEY_'
+
+    def setUp(self):
+        self._saved = os.environ.pop(self._TEST_KEY, None)
+
+    def tearDown(self):
+        if self._saved is None:
+            os.environ.pop(self._TEST_KEY, None)
+        else:
+            os.environ[self._TEST_KEY] = self._saved
+
+    # ---- default-resolution path ---------------------------------
+
+    def test_unset_returns_default_level(self):
+        self.assertEqual(_env_log_level(self._TEST_KEY, 'INFO'), logging.INFO)
+
+    def test_unset_returns_specified_default(self):
+        self.assertEqual(_env_log_level(self._TEST_KEY, 'WARNING'), logging.WARNING)
+
+    def test_empty_string_returns_default(self):
+        os.environ[self._TEST_KEY] = ''
+        self.assertEqual(_env_log_level(self._TEST_KEY, 'INFO'), logging.INFO)
+
+    def test_whitespace_only_returns_default(self):
+        os.environ[self._TEST_KEY] = '   '
+        self.assertEqual(_env_log_level(self._TEST_KEY, 'INFO'), logging.INFO)
+
+    # ---- valid names ---------------------------------------------
+
+    def test_debug_returns_logging_debug(self):
+        os.environ[self._TEST_KEY] = 'DEBUG'
+        self.assertEqual(_env_log_level(self._TEST_KEY, 'INFO'), logging.DEBUG)
+
+    def test_info_returns_logging_info(self):
+        os.environ[self._TEST_KEY] = 'INFO'
+        self.assertEqual(_env_log_level(self._TEST_KEY, 'WARNING'), logging.INFO)
+
+    def test_warning_returns_logging_warning(self):
+        os.environ[self._TEST_KEY] = 'WARNING'
+        self.assertEqual(_env_log_level(self._TEST_KEY, 'INFO'), logging.WARNING)
+
+    def test_error_returns_logging_error(self):
+        os.environ[self._TEST_KEY] = 'ERROR'
+        self.assertEqual(_env_log_level(self._TEST_KEY, 'INFO'), logging.ERROR)
+
+    def test_critical_returns_logging_critical(self):
+        os.environ[self._TEST_KEY] = 'CRITICAL'
+        self.assertEqual(_env_log_level(self._TEST_KEY, 'INFO'), logging.CRITICAL)
+
+    # ---- input tolerance -----------------------------------------
+
+    def test_lowercase_value_accepted(self):
+        # Operators commonly type 'debug' lowercase after editing
+        # .env in their preferred editor case; we don't want them to
+        # discover the case-sensitivity the hard way.
+        os.environ[self._TEST_KEY] = 'debug'
+        self.assertEqual(_env_log_level(self._TEST_KEY, 'INFO'), logging.DEBUG)
+
+    def test_mixed_case_value_accepted(self):
+        os.environ[self._TEST_KEY] = 'Warning'
+        self.assertEqual(_env_log_level(self._TEST_KEY, 'INFO'), logging.WARNING)
+
+    def test_whitespace_around_value_stripped(self):
+        os.environ[self._TEST_KEY] = '  DEBUG  '
+        self.assertEqual(_env_log_level(self._TEST_KEY, 'INFO'), logging.DEBUG)
+
+    # ---- invalid / dangerous values ------------------------------
+
+    def test_unknown_value_returns_default(self):
+        # 'VERBOSE' is a common mistake for users familiar with other
+        # loggers (log4j at TRACE, java.util.logging levels, etc.).
+        # Without the validation guard a typo would AttributeError inside
+        # logging internals on the very first log call after startup.
+        os.environ[self._TEST_KEY] = 'VERBOSE'
+        self.assertEqual(_env_log_level(self._TEST_KEY, 'INFO'), logging.INFO)
+
+    def test_unknown_value_returns_specified_default(self):
+        # The default param works when garbage is supplied.
+        os.environ[self._TEST_KEY] = 'NOPE'
+        self.assertEqual(_env_log_level(self._TEST_KEY, 'WARNING'), logging.WARNING)
+
+    def test_alias_names_rejected(self):
+        # Accept only the canonical 5 — `WARN` (Java-style alias for
+        # WARNING) and `FATAL` (alias for CRITICAL) might feel friendly
+        # but a permissive alias map becomes an operator-debugging trap
+        # when one reader's `WARN` matches and another reader's tool
+        # only knows `WARNING`. Canonical-only.
+        for alias in ('WARN', 'TRACE', 'FATAL', 'NOTSET', 'SEVERE'):
+            os.environ[self._TEST_KEY] = alias
+            self.assertEqual(
+                _env_log_level(self._TEST_KEY, 'INFO'), logging.INFO,
+                f'level={alias!r} should be rejected, falling back to INFO')
+
+    def test_notset_rejected_silently(self):
+        # NOTSET (= 0) is the most dangerous possible value because it
+        # captures everything the root logger has configured — operator
+        # disks fills within hours. Must silently fall back, never
+        # honor it.
+        os.environ[self._TEST_KEY] = 'NOTSET'
+        self.assertEqual(_env_log_level(self._TEST_KEY, 'INFO'), logging.INFO)
+
+    # ---- returns-real-constant contract --------------------------
+
+    def test_returned_value_is_a_logging_level_constant(self):
+        # The caller passes the result straight into `logger.setLevel()`.
+        # Returning a string instead of an int would raise TypeError in
+        # logging.setLevel. The contract: returned value MUST be one of
+        # the canonical logging.LEVEL constants.
+        os.environ[self._TEST_KEY] = 'INFO'
+        result = _env_log_level(self._TEST_KEY, 'INFO')
+        self.assertEqual(result, logging.INFO)
+        # Sanity: it's an int.
+        self.assertIsInstance(result, int)
 
 
 class TestMp4ContainerCascade(unittest.TestCase):

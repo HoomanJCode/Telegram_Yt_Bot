@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from app.utils import (
-    esc, _format_comments,
+    esc, _format_comments, _format_description,
     VIDEO_QUALITY_OPTIONS, AUDIO_QUALITY_OPTIONS, SUBTITLE_MODE_OPTIONS,
     AUTO_FORMAT_OPTIONS, AUTO_FORMAT_LABELS, AUTO_FORMAT_SHORT,
     VIDEO_CONTAINER_OPTIONS, VIDEO_CONTAINER_LABELS, VIDEO_CONTAINER_SHORT,
@@ -818,6 +818,96 @@ class TestConfigAdmin(unittest.TestCase):
         self.assertFalse(Config.is_admin(200))
         # Even if there were no WHITELIST_USERS, is_admin should not change.
         self.assertTrue(Config.is_admin(100))
+
+
+class TestFormatDescription(unittest.TestCase):
+    """Drive `_format_description` -- the helper that renders a 4-5 line
+    description excerpt from yt-dlp info[description] for the format-choice
+    screen. Operations applied in order: strip, collapse paragraph-break
+    patterns to single newlines, truncate to 300 chars with U+2026, escape
+    via esc(). Returns empty string for None/blank input so callers can
+    branch with `if desc_text:` cleanly without occupying vertical chat space.
+    """
+
+    NL = chr(10)
+    NL2 = NL + NL
+
+    def test_none_returns_empty_string(self):
+        # Defensive: yt-dlp can return None for the description field.
+        self.assertEqual(_format_description(None), "")
+
+    def test_empty_string_returns_empty_string(self):
+        self.assertEqual(_format_description(""), "")
+
+    def test_whitespace_only_returns_empty_string(self):
+        # Whitespace-only input renders as empty so the caller does not get
+        # a blank line under the emoji header.
+        self.assertEqual(_format_description("   "), "")
+        self.assertEqual(_format_description("	"), "")
+        self.assertEqual(_format_description(self.NL + "   " + self.NL), "")
+
+    def test_short_input_returned_verbatim(self):
+        # 50-char descriptions render verbatim (no ellipsis, no collapse
+        # since input has no double-newline). esc() still runs.
+        self.assertEqual(_format_description("Hello world"), "Hello world")
+
+    def test_long_input_truncates_at_300_chars_with_ellipsis(self):
+        # 1000 chars in -> at most 300 chars of body + U+2026 ellipsis suffix.
+        long_in = "a" * 1000
+        result = _format_description(long_in)
+        self.assertTrue(result.endswith("…"),
+            "overflow must signal truncation with the U+2026 ellipsis")
+        self.assertEqual(len(result), 300 + 1)
+        self.assertEqual(result, "a" * 300 + "…")
+
+    def test_exactly_300_chars_no_ellipsis(self):
+        # Boundary: 300 chars exact stays 300 chars. Cap is INCLUSIVE.
+        text = "b" * 300
+        result = _format_description(text)
+        self.assertEqual(result, text)
+        self.assertNotIn("…", result)
+
+    def test_paragraph_breaks_collapse_to_single_newline(self):
+        # YouTube uses double-newline paragraph breaks. Rendering them verbatim
+        # would crowd the chat; collapse to single newlines so the excerpt fits
+        # in 4-5 visible lines for a typical video. Single newlines pass through.
+        result = _format_description("Para 1" + self.NL2 + "Para 2" + self.NL2 + "Para 3")
+        self.assertEqual(result, "Para 1" + self.NL + "Para 2" + self.NL + "Para 3")
+        self.assertEqual(_format_description("line1" + self.NL + "line2"),
+                         "line1" + self.NL + "line2")
+
+    def test_escapes_markdown_special_chars(self):
+        # Common markdown breakers in YT-descriptions: underscores in handles,
+        # asterisks, brackets. Without esc() the surrounding ParseMode.MARKDOWN
+        # message breaks. Assert escape runs AND no bare chars leak through.
+        result = _format_description("_italics_ *bold* `[ Broken!")
+        self.assertIn(r"\_italics\_", result)
+        self.assertIn(r"\*bold\*", result)
+        self.assertNotIn(" _italics_", result)
+
+    def test_strip_trailing_whitespace(self):
+        # Some descriptions have trailing newlines. Strip defensively.
+        result = _format_description("Real content" + self.NL2 + self.NL)
+        self.assertEqual(result, "Real content")
+
+    def test_strip_handles_leading_whitespace(self):
+        # Some descriptions start with newlines.
+        self.assertEqual(_format_description(self.NL + "Hello"), "Hello")
+
+    def test_pass_through_unicode_letters(self):
+        # Non-ASCII letters (Persian, Arabic, CJK) pass through unchanged.
+        persian = "سلام دنيا"
+        self.assertEqual(_format_description(persian), persian)
+
+    def test_combined_collapse_then_truncate(self):
+        # Order of ops: strip -> collapse -> truncate -> escape. Long description
+        # with double-newline paragraphs: collapse first then truncate (otherwise
+        # the slice would cut a multi-byte UTF-8 sequence mid-encoding).
+        text = "p1" + self.NL2 + "a" * 350 + self.NL2 + "p2"
+        result = _format_description(text)
+        self.assertTrue(result.endswith("…"))
+        self.assertNotIn(self.NL2, result)
+
 
 
 class TestFormatComments(unittest.TestCase):

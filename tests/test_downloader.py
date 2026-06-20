@@ -1337,6 +1337,23 @@ class TestCommentSliceDefensiveness(unittest.TestCase):
             'so yt-dlp None / missing-key responses do not '
             'TypeError-collapse the whole format-choice screen '
             'via the outer try/except.')
+        self.assertIn(
+            'if desc_text:',
+            src,
+            'show_format_choice must REBUILD the headline'
+            ' conditionally on desc_text so the description'
+            ' flows through to Telegram; without it the feature'
+            ' is a silent no-op.'
+        )
+        self.assertIn(
+            r'\U0001F4D6',
+            src,
+            'show_format_choice must include the U+1F4D6 book emoji'
+            ' between title and duration so the description block'
+            ' is visually distinguishable from the comments block.'
+        )
+
+
         # Also pin that the overflow policy uses SAFE_TEXT_MAX and headline
         # rather than a duplicated f-string — defends against a refactor
         # that reverts to mid-comment truncation (renders half a line

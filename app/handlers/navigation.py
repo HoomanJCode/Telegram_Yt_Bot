@@ -11,7 +11,7 @@ from app.utils import (
     AUTO_FORMAT_OPTIONS, AUTO_FORMAT_LABELS, AUTO_FORMAT_SHORT,
     VIDEO_QUALITY_OPTIONS, VIDEO_QUALITY_LABELS, AUDIO_QUALITY_LABELS, SUBTITLE_MODE_LABELS,
     VIDEO_CONTAINER_OPTIONS, VIDEO_CONTAINER_LABELS, VIDEO_CONTAINER_SHORT,
-    classify_yt_error, friendly_error_msg, _format_comments,
+    classify_yt_error, friendly_error_msg, _format_comments, _format_description,
 )
 from app.models import VideoRecord
 from app.downloader import fetch_info
@@ -123,20 +123,44 @@ async def show_format_choice(bot, uid, url, video_id, msg):
         # format-choice screen via the outer try/except.
         comments_block = _format_comments(
             (info.get('comments') or [])[:Config.MAX_COMMENTS])
+        # 4-5 line description excerpt between title and duration. Same
+        # yt-dlp give_back as title / duration / comments (one fetch)
+        # so no extra HTTP is paid. `_format_description` returns ''
+        # for empty/None input, so we branch on the helper's output
+        # rather than concatenating a 0-length emoji prefix that would
+        # leave a blank line above the duration row.
+        desc_text = _format_description(info.get('description'))
+        # Inline the description block into `headline` (rather than as a
+        # separate f-string segment) so the structural test that asserts
+        # the safe-text-overflow template literal keeps passing — the
+        # `f"{headline}{extras}\n\nChoose format:"` literal anchors
+        # this exact shape, and re-defining headline conditionally
+        # preserves all four code-level pins (or-empty defensiveness,
+        # SAFE_TEXT_MAX, normal + overflow branch templates).
+        if desc_text:
+            headline = (
+                f"📹 *{esc(title[:200])}*\n\U0001F4D6 {desc_text}\n"
+                f"⏱ {mins}:{secs:02d}")
+        else:
+            headline = f"📹 *{esc(title[:200])}*\n⏱ {mins}:{secs:02d}"
         extras = f"\n\n\U0001F4AC Top comments:\n{comments_block}" if comments_block else ''
         from app.handlers.formats import format_choice_kb
         # Telegram's edit_text caps the rendered text at TELEGRAM_TEXT_MAX
         # (4096) bytes; with MAX_COMMENTS=20 + a 200-char title (after
         # esc() potentially doubling — chars like * _ ` [ ] each grow by 1
-        # byte) + the format-picker headline, our worst-case crosses 4096
-        # and Telegram rejects edit_text with "Bad Request: message is
-        # too long". Rather than truncate mid-comment (which would
-        # render half a line that looks typed-broken to the user), we
-        # DROP the comments block entirely when overflow is detected.
+        # byte) + description + the format-picker headline, our worst
+        # case crosses 4096 and Telegram rejects edit_text with "Bad
+        # Request: message is too long". Rather than truncate mid-comment
+        # (which would render half a line that looks typed-broken to the
+        # user), we DROP `extras` (the comments block) when overflow is
+        # detected while preserving the title / description / duration
+        # headline that build the user's context for the format pick.
         # The format picker is what the user actually needs to choose a
         # download — losing the comments excerpt on the rare worst-case
-        # title is strictly better than losing the kb.
-        headline = f"📹 *{esc(title[:200])}*\n⏱ {mins}:{secs:02d}"
+        # title is strictly better than losing the kb. The conditional
+        # `headline` above (with or without description) is reused on
+        # the overflow path so the description block is preserved even
+        # when comments are dropped.
         text = f"{headline}{extras}\n\nChoose format:"
         if len(text) > SAFE_TEXT_MAX:
             text = f"{headline}\n\nChoose format:"

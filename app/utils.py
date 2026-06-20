@@ -34,6 +34,40 @@ def esc(text):
     return text
 
 
+def _format_description(desc):
+    """Render a 4-5 line description excerpt from yt-dlp's
+    `info['description']` for the format-choice screen.
+
+    Returns '' for empty / None input so the caller can skip the
+    block cleanly with `if desc_block:` rather than a placeholder
+    string that occupies vertical space.
+
+    300-char cap keeps the format-picker kb legible — YouTube
+    descriptions often run into several thousand characters verbatim
+    and would crowd the chat if rendered in full.
+
+    Operations applied (in order):
+      1. `strip()` — trims trailing whitespace that YouTube
+         descriptions sometimes have.
+      2. `replace('\\n\\n', '\\n')` — YouTube uses `\\n\\n` paragraph
+         breaks which double vertical space in a chat; collapsing to
+         single `\\n` keeps the excerpt at ~4-5 visible lines for a
+         typical video.
+      3. Slice `[:300]` + `U+2026` ellipsis when over limit.
+      4. Markdown escape via `esc()` — underscores (`install_pkg`),
+         asterisks (`*bold*`), backticks (code), and brackets are
+         present in descriptions constantly; without escape the
+         surrounding ParseMode.MARKDOWN message would either render
+         half of it or error out.
+    """
+    if not desc:
+        return ''
+    text = str(desc).strip().replace('\n\n', '\n')
+    if len(text) > 300:
+        text = text[:300] + '\u2026'
+    return esc(text)
+
+
 def _format_comments(comments):
     """Render a yt-dlp `comments` list as a short, Telegram-friendly excerpt.
 

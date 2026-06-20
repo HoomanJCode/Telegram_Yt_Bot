@@ -9,7 +9,7 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 from app.fileserver import FileServer
 from app.bot import YouTubeDownloaderBot
-from app.handlers.commands import start_cmd, help_cmd, recent_cmd, cancel_cmd
+from app.handlers.commands import start_cmd, help_cmd, recent_cmd, status_cmd, cancel_cmd
 from app.handlers.messages import on_msg
 from app.handlers.inline import inline_query
 from app.handlers.cookies import ask_cookies, recv_cookies
@@ -35,6 +35,7 @@ def main():
     app.add_handler(CommandHandler('start', lambda u, c: start_cmd(bot, u, c)))
     app.add_handler(CommandHandler('help', lambda u, c: help_cmd(bot, u, c)))
     app.add_handler(CommandHandler('recent', lambda u, c: recent_cmd(bot, u, c)))
+    app.add_handler(CommandHandler('status', lambda u, c: status_cmd(bot, u, c)))
     app.add_handler(ConversationHandler(
         entry_points=[CommandHandler('cookies', lambda u, c: ask_cookies(bot, u, c)),
                       CallbackQueryHandler(lambda u, c: ask_cookies(bot, u, c), pattern='^c$')],

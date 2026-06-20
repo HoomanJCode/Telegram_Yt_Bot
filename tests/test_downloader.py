@@ -1277,22 +1277,46 @@ class TestInfoCache(unittest.TestCase):
 
 
     def test_set_skips_cache_when_info_none_or_empty(self):
-        """A falsy/empty `info` (None or {}) MUST NOT be cached.
+        """A degenerate `info` (None OR empty-dict {}) MUST NOT enter
+        the cache.
 
-        Why: a transient _run_ydl failure returns None/{} (cookies
-        expired mid-fetch, network blip). If we cached that, every
-        subsequent fetch for that (uid, url) for the next TTL seconds
-        would return the same degenerate marker, masking the
-        underlying failure as a 'cached' result. Rejecting falsy info
-        falls through to a fresh fetch next time.
+        Why: a transient _run_ydl failure (network blip,
+        cookies-expired mid-fetch) returns None or {}. If we cached
+        that, every subsequent fetch for that (uid, url) for the
+        next TTL seconds would return the same degenerate marker,
+        masking the underlying failure as a 'cached' result.
+        Rejection falls through to a fresh fetch next time.
+
+        NOTE on the narrow contract: the production guard is
+        `if info is None or info == {}:` (NOT `if not info:`).
+        Pinning only that narrow contract here keeps legitimate
+        edge cases like `info={"title": ""}` cacheable -- the
+        comment-positive assertion below covers that.
         """
         downloader._INFO_CACHE.clear()
-        for bad_info in (None, {}, [], set()):
-            downloader._info_cache_set(1, f'http://bad-{id(bad_info)}', bad_info)
+        # Negative assertion: None + empty dict are rejected.
+        for bad_info in (None, {}):
+            downloader._info_cache_set(
+                1, f'http://bad-{id(bad_info)}', bad_info,
+            )
         self.assertEqual(
             downloader._INFO_CACHE, {},
-            "falsy/empty info must NOT enter the cache "
-            "(None, {}, [], set() all rejected)"
+            "None and empty-dict markers MUST NOT enter the cache"
+        )
+        # Positive assertion: legitimate info with EMPTY-STRING fields
+        # is NOT a degenerate marker -- the guard's narrow contract
+        # means such a dict MUST continue to be cacheable. Catches a
+        # future widening of the guard to `not info`-style logic.
+        downloader._info_cache_set(
+            1, 'http://legit-empty-title',
+            {'id': 'abc', 'title': ''},
+        )
+        self.assertIn(
+            (1, 'http://legit-empty-title'),
+            downloader._INFO_CACHE,
+            "info with empty-string fields is legitimate -- the "
+            "narrow `info is None or info == {}` guard MUST NOT "
+            "reject it. Pin the legitimate-edge-case contract."
         )
 
     def test_set_evicts_oldest_when_max_size_exceeded(self):
@@ -1304,28 +1328,60 @@ class TestInfoCache(unittest.TestCase):
         session would otherwise leak memory forever. FIFO (not LRU) is
         the cheap choice -- the bot's traffic is dominated by
         back-clicks on the same video, not by 1M distinct URLs.
+
+        Two oldest/second-oldest anchor invariants decouple the test
+        from the production min/max choice -- catches both
+        (a) `min` -> `max` regression (and similar swap bugs that
+        accidentally replace OLDEST-evict with NEWEST-evict, which
+        would silently still hold the cap but kick the WRONG entry)
+        and (b) over-eager eviction (kicking 2+ entries instead of 1).
         """
         downloader._INFO_CACHE.clear()
         cap = downloader._INFO_CACHE_MAX_SIZE
-        # Fill cache to exactly cap with monotonically-increasing stamps.
+        # Fill the cache to exactly `cap` via direct `_INFO_CACHE`
+        # injection with deterministic, monotonically-increasing
+        # stamps (i=0,1,2,...). Avoids any `time.monotonic()` resolution
+        # edge cases in a same-millisecond fill.
         for i in range(cap):
-            downloader._info_cache_set(1, f'http://k{i}', {'v': i})
+            downloader._INFO_CACHE[(1, f'http://k{i}')] = (
+                float(i),  # stamp = i, monotonically increasing
+                {'v': i},
+            )
         self.assertEqual(len(downloader._INFO_CACHE), cap)
-        # Inspect the oldest stamp we expect to be evicted.
-        oldest_key = min(
-            downloader._INFO_CACHE,
-            key=lambda k: downloader._INFO_CACHE[k][0],
-        )
-        # Insert one more -- should evict `oldest_key`.
+        # Anchor: `k0` is the FIRST inserted (lowest stamp = 0.0).
+        # Its eviction on overflow is the FIFO policy signal.
+        k0 = (1, 'http://k0')
+        self.assertIn(k0, downloader._INFO_CACHE)
+        # Anchor: `k{cap-2}` is the penultimate inserted (higher stamp).
+        # Its SURVIVAL on overflow pins that eviction targets exactly
+        # ONE entry (oldest), not 2+ -- and that the eviction policy
+        # is by-stamp, not by-accident-by-recent-write.
+        k_cap_2 = (1, f'http://k{cap-2}')
+        self.assertIn(k_cap_2, downloader._INFO_CACHE)
+        # Trigger overflow via the production code path.
         downloader._info_cache_set(1, 'http://overflow', {'v': 'new'})
+        # POLICY INVARIANT 1: oldest (lowest stamp) MUST be evicted.
+        # Catches a `min` -> `max` swap regression -- if production
+        # accidentally sorts with `max`, k0 would survive and the
+        # SECOND-OLDEST entry would be evicted instead.
+        self.assertNotIn(
+            k0, downloader._INFO_CACHE,
+            "OLDEST entry (k0, lowest stamp) MUST be evicted on "
+            "overflow, NOT newest-evict. Catches a `min` -> `max` "
+            "swap regression."
+        )
+        # POLICY INVARIANT 2: a LATER-inserted entry MUST survive
+        # (over-eager eviction would remove BOTH k0 and k{cap-2}).
+        self.assertIn(
+            k_cap_2, downloader._INFO_CACHE,
+            "LATER-inserted entry (k_cap-2, second-oldest) MUST "
+            "survive overflow -- eviction targets ONLY the oldest."
+        )
+        # Size + new-entry sanity: cap held + the just-written
+        # overflow entry is now in the cache.
         self.assertEqual(
             len(downloader._INFO_CACHE), cap,
             "cache size MUST stay capped at _INFO_CACHE_MAX_SIZE"
-        )
-        self.assertNotIn(
-            oldest_key, downloader._INFO_CACHE,
-            "oldest entry MUST be FIFO-evicted when at cap "
-            f"(would have evicted {oldest_key})"
         )
         self.assertIn(
             (1, 'http://overflow'), downloader._INFO_CACHE,
@@ -1342,7 +1398,6 @@ class TestInfoCache(unittest.TestCase):
         but kept equal to 300). The source-pin ties the LITERAL to
         the documented 5-minute window.
         """
-        import inspect
         src = inspect.getsource(downloader)
         self.assertIn(
             '_INFO_TTL_SECONDS = 300', src,

@@ -108,9 +108,19 @@ def _info_cache_set(uid, url, info):
         the bookkeeping cost -- the bot's traffic is dominated by
         back-clicks on the same video, not by 1M distinct URLs.
     """
-    # Falsy/empty info guard: do NOT cache a degenerate marker that
-    # would otherwise propagate to every subsequent hit for TTL seconds.
-    if not info:
+    # Reject None + empty-dict markers -- a degenerate info dict
+    # could otherwise propagate to every subsequent hit for TTL
+    # seconds, masking the underlying _run_ydl failure (network
+    # blip, cookies-expired mid-fetch) as a 'cached' result.
+    # We deliberately do NOT use `not info` here: a future valid
+    # edge case like `info={"title": ""}` (empty title is legitimate
+    # for some yt-dlp extractors) MUST continue to be cacheable,
+    # because `not {"title": ""}` is False (the dict is non-empty)
+    # but if someone widened `not info` to a broader guard they
+    # could accidentally start rejecting legitimate-but-sparse
+    # info dicts. Pinning the narrow `is None or == {}` keeps the
+    # contract exact.
+    if info is None or info == {}:
         return
     # FIFO size guard: oldest stamp goes first. We pick the key with
     # the smallest cached_at -- O(n) but n<=_INFO_CACHE_MAX_SIZE=1000

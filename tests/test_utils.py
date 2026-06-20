@@ -689,6 +689,70 @@ class TestClassifyYtError(unittest.TestCase):
         self.assertEqual(classify_yt_error(msg), 'disk_error')
 
 
+    # ----- format_unavailable -----------------------------------
+    #
+    # Post-pin (2026-06-20 'video codec:none' TV report) regression:
+    # VIDEO_QUALITY_FMT now constrains yt-dlp to AVC streams; a user
+    # picking 2160p / 1440p on a YouTube video (which serves those
+    # tiers as VP9/AV1 only) gets yt-dlp's "no format available"
+    # error. Without this classifier the user would see the generic
+    # 'unknown' message ('try again in a moment') even though
+    # retrying won't help -- they need to drop resolution. The four
+    # patterns below mirror the exact phrasings yt-dlp emits across
+    # versions.
+
+    def test_format_unavailable_you_have_requested(self):
+        # Canonical yt-dlp format-selector failure wording.
+        # The classifier anchors on the full-sentence fragment
+        # 'you have requested a format that' (more discriminating
+        # than the bare 'you have requested a format' which would
+        # over-match unrelated future yt-dlp phrasings).
+        msg = ('ERROR: You have requested a format that is not available')
+        self.assertEqual(classify_yt_error(msg), 'format_unavailable')
+
+    def test_format_unavailable_unrelated_you_have_requested_does_not_match(self):
+        # Pin the FRAGMENT-WIDTH invariant: a hypothetical future
+        # yt-dlp message like 'you have requested a format change'
+        # (a config-mutation notice, NOT a format-selector failure)
+        # must NOT misclassify -- the classifier anchors on the
+        # canonical full-sentence 'you have requested a format that'.
+        msg = ('ERROR: You have requested a format change mid-download')
+        self.assertNotEqual(classify_yt_error(msg), 'format_unavailable')
+        self.assertEqual(classify_yt_error(msg), 'unknown')
+
+    def test_format_unavailable_requested_format_not_available(self):
+        # Stripped-variant yt-dlp emits on the same failure path.
+        msg = ('ERROR: requested format not available')
+        self.assertEqual(classify_yt_error(msg), 'format_unavailable')
+
+    def test_format_unavailable_no_video_formats_matched(self):
+        # Alternative yt-dlp wording on the same code path.
+        msg = ('ERROR: no video formats matched for "best"')
+        self.assertEqual(classify_yt_error(msg), 'format_unavailable')
+
+    def test_format_unavailable_no_video_format_found(self):
+        # Same idea, slightly older yt-dlp wording.
+        msg = ('ERROR: no video format found')
+        self.assertEqual(classify_yt_error(msg), 'format_unavailable')
+
+    def test_format_unavailable_does_not_shadow_disk_error(self):
+        # Regression guard: the new category's order is important.
+        # Its fragments are all specific to the format-selector
+        # domain, so 'no space left on device' must still hit
+        # disk_error, not format_unavailable.
+        msg = ('ERROR: unable to write data: [Errno 28] No space left on device')
+        self.assertEqual(classify_yt_error(msg), 'disk_error')
+
+    def test_format_unavailable_does_not_shadow_unavailable(self):
+        # 'Video unavailable' must still hit 'unavailable' (the
+        # generic YouTube-side 'video is gone' bucket), not
+        # format_unavailable. format-selector patterns are narrower
+        # than 'video unavailable' so this is structural but worth
+        # pinning against a future fragment widening.
+        msg = 'Video unavailable.'
+        self.assertEqual(classify_yt_error(msg), 'unavailable')
+
+
 class TestFriendlyErrorMsg(unittest.TestCase):
     """Each category should map to a user-friendly message."""
 
@@ -697,11 +761,23 @@ class TestFriendlyErrorMsg(unittest.TestCase):
             'live_not_started', 'live_ended', 'unavailable', 'private',
             'age_restricted', 'members_only', 'geo_blocked', 'removed',
             'cookies_required', 'playability', 'subtitle_throttled',
-            'disk_error', 'unknown',
+            'format_unavailable', 'disk_error', 'unknown',
         )
         for category in categories:
             msg = friendly_error_msg(category)
             self.assertTrue(msg, f'category {category!r} has empty msg')
+
+    def test_format_unavailable_message_directs_to_lower_resolution(self):
+        # The friendly message must give an actionable hint
+        # ('lower quality' / '1080p or 720p'), not the generic
+        # 'try again in a moment' wording from 'unknown'. Without
+        # this the user is stuck -- retrying won't help because
+        # YouTube doesn't serve AVC above 1080p.
+        msg = friendly_error_msg('format_unavailable').lower()
+        self.assertTrue(
+            '1080p' in msg or '720p' in msg or 'lower' in msg,
+            f'format_unavailable message must guide the user to a '
+            f'lower resolution; got: {msg!r}')
 
     def test_subtitle_throttled_message_mentions_subs(self):
         msg = friendly_error_msg('subtitle_throttled').lower()

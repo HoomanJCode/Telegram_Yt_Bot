@@ -421,7 +421,16 @@ AUDIO_QUALITY_FMT = {
 
 VIDEO_QUALITY_LABELS = {
     'best': '🏆 Best', '2160p': '📺 4K', '1440p': '📺 1440p', '1080p': '📺 1080p',
-    '720p': '📺 720p', '480p': '📺 480p', '360p': '📺 360p', 'worst': '⬇️ Worst',
+    '720p': '📺 720p', '480p': '📺 480p', '360p': '📺 360p',
+    # The '(any codec)' annotation on `worst` is structurally important:
+    # VIDEO_QUALITY_FMT pins every other entry to `[vcodec^=avc]` for
+    # TV compat (the 2026-06-20 'video codec:none' fix), but `worst` is
+    # deliberately exempt. Users who click `worst` need to know they
+    # opted out of the codec-pin guarantee so a YouTube video that
+    # only has VP9 sources will still produce a VP9-fallback file
+    # their TV may reject. Without this annotation the user has no
+    # way to connect 'I picked worst' to 'my TV said no'.
+    'worst': '⬇️ Worst (any codec)',
 }
 AUDIO_QUALITY_LABELS = {
     'best': '🏆 Best', '320': '🎵 320kbps', '256': '🎵 256kbps',
@@ -519,7 +528,28 @@ _YT_ERROR_PATTERNS = (
     # `HTTP Error 429` / `Too Many Requests` (e.g., format-fetch rate-limits)
     # fall through to `unknown` so the user gets an honest "try again"
     # message instead of a misleading "video downloaded" claim.
+    # Both new categories live at the end so they do not shadow the more
+    # specific yt-dlp error families above.
     ('subtitle_throttled', ('unable to download video subtitles',)),
+    # Post-pin (2026-06-20 'video codec:none' TV fix) regression.
+    # VIDEO_QUALITY_FMT now constrains yt-dlp to AVC streams via
+    # `[vcodec^=avc]`, so picking 2160p / 1440p on a YouTube video
+    # (which serves those tiers VP9 / AV1 only) yields yt-dlp's
+    # generic 'no format available' error. Without this classifier
+    # the user would see the 'unknown' message ('try again in a
+    # moment'), which is misleading because retrying won't help --
+    # they need to drop resolution. The four fragments are narrow
+    # yt-dlp format-selector wording; the leading 'you have
+    # requested a format that' is the canonical full-sentence form
+    # (the bare 'you have requested a format' is intentionally NOT
+    # used because it would over-match unrelated future yt-dlp
+    # phrasings). KNOWN LIMITATION: the fragment set is empirical
+    # -- a future yt-dlp wording change may silently leak into
+    # 'unknown'. Worth revisiting when yt-dlp versions drift.
+    ('format_unavailable', ('you have requested a format that',
+                              'requested format not available',
+                              'no video formats matched',
+                              'no video format found')),
     ('disk_error', ('less than 5 gb free', 'no space left on device',
                     'errno 28')),
 )
@@ -539,6 +569,7 @@ _YT_ERROR_MESSAGES = {
     'cookies_required': '🔑 Login required. Upload fresh cookies with /cookies.',
     'playability':      '🚫 YouTube refused playback. Try again or refresh cookies.',
     'subtitle_throttled': '✅ Video downloaded without subtitles (YouTube rate-limited them). Try again in a minute if you need them.',
+    'format_unavailable': '📺 Requested quality unavailable in H.264. Try a lower quality like 1080p or 720p — YouTube serves H.264 most reliably up to 1080p.',
     'disk_error':       '💾 Bot storage full. Free up some space or wait a few minutes and retry.',
     'unknown':          '❌ Failed to fetch video info. Try again in a moment.',
 }

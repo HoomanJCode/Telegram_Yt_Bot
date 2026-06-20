@@ -65,6 +65,32 @@ class TestQualityConstants(unittest.TestCase):
         for res in ('2160p', '1440p', '1080p', '720p', '480p', '360p'):
             self.assertIn(f'height<={res[:-1]}', VIDEO_QUALITY_FMT[res])
 
+    def test_video_quality_fmt_pins_to_avc_codec(self):
+        # Regression pin for the 2026-06-20 MKV / 'video codec:none'
+        # TV report. Every height-bound entry must include the
+        # `[vcodec^=avc]` prefix-match filter on `bv*` so yt-dlp
+        # restricts selection to H.264 streams (avc1.640028,
+        # avc1.4d401e, etc.). Without this filter yt-dlp picks the
+        # highest-height VP9 / AV1 stream YouTube serves for those
+        # tiers and muxes it into MKV with codec id `V_VP9` /
+        # `V_AV1` — which older TVs refuse to decode.
+        avc_pinned = ('2160p', '1440p', '1080p', '720p', '480p', '360p', 'best')
+        for vq in avc_pinned:
+            self.assertIn(
+                '[vcodec^=avc]', VIDEO_QUALITY_FMT[vq],
+                f'VIDEO_QUALITY_FMT[{vq!r}] must pin to AVC so older '
+                f'TVs can decode the resulting MKV / MP4 -- without '
+                f'the pin yt-dlp picks VP9/AV1 streams which the '
+                f"TVs report as 'video codec:none'.")
+
+    def test_worst_video_stays_unpinned(self):
+        # Sanity: 'worst' deliberately stays a single-stream
+        # `worst` token (no codec pin). Pinning worst to avc1 would
+        # break downloads on videos that ONLY have VP9 sources -- the
+        # user picked 'worst' specifically to accept any codec.
+        self.assertEqual(VIDEO_QUALITY_FMT['worst'], 'worst')
+        self.assertNotIn('[vcodec^=avc]', VIDEO_QUALITY_FMT['worst'])
+
     def test_audio_quality_fmt_uses_bitrate_filters(self):
         for br in ('320', '256', '192', '128', '96'):
             self.assertIn(f'abr<={br}', AUDIO_QUALITY_FMT[br])

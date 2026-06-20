@@ -376,13 +376,36 @@ VIDEO_CONTAINER_SHORT = {
 }
 
 VIDEO_QUALITY_FMT = {
-    'best':   'bv*+ba/b',
-    '2160p':  'bv*[height<=2160]+ba/b[height<=2160]',
-    '1440p':  'bv*[height<=1440]+ba/b[height<=1440]',
-    '1080p':  'bv*[height<=1080]+ba/b[height<=1080]',
-    '720p':   'bv*[height<=720]+ba/b[height<=720]',
-    '480p':   'bv*[height<=480]+ba/b[height<=480]',
-    '360p':   'bv*[height<=360]+ba/b[height<=360]',
+    # Every entry pins `bv*` (bestvideo) to `[vcodec^=avc]` so yt-dlp
+    # restricts selection to H.264 / AVC streams. Root-cause for the
+    # 2026-06-20 user report: without the codec pin, yt-dlp picked a
+    # 1080p60+ / 1440p / 2160p YouTube stream -- YouTube serves those
+    # as VP9 or AV1 only -- and multiplexed it into MKV with the
+    # Matroska codec ID `V_VP9` (or `V_AV1`). Older TVs (and many
+    # mid-range sets) do not have VP9 / AV1 hardware decoders and
+    # report the symptom as `video codec:none` when they see a
+    # stream with a fourCC they cannot decode. AVC is the universal
+    # codec: every TV made in the last ~15 years decodes it. Trade-off
+    # is a quality ceiling: YouTube's 2160p / 1440p / 1080p60+ tiers
+    # do not serve H.264, so 4K-quality downloads are no longer
+    # possible; max usable resolution drops to ~1080p H.264 (the
+    # highest tier YouTube serves in AVC). Operators who want VP9 /
+    # AV1 back can override per-download via a future `video_codec`
+    # user setting (--add separate round per render).
+    #
+    # The audio fallback `b/b[vcodec^=avc]` mirrors the video pin
+    # so the merged single-stream fallback is also AVC when the
+    # height-bound + audio combination is unavailable. `worst`
+    # deliberately stays pinned to none -- it is the unconditional
+    # smallest-stream fallback and a codec pin there would break the
+    # "any 360p will do" UX for old videos that only have VP9 sources.
+    'best':   'bv*[vcodec^=avc]+ba/b[vcodec^=avc]',
+    '2160p':  'bv*[vcodec^=avc][height<=2160]+ba/b[vcodec^=avc][height<=2160]',
+    '1440p':  'bv*[vcodec^=avc][height<=1440]+ba/b[vcodec^=avc][height<=1440]',
+    '1080p':  'bv*[vcodec^=avc][height<=1080]+ba/b[vcodec^=avc][height<=1080]',
+    '720p':   'bv*[vcodec^=avc][height<=720]+ba/b[vcodec^=avc][height<=720]',
+    '480p':   'bv*[vcodec^=avc][height<=480]+ba/b[vcodec^=avc][height<=480]',
+    '360p':   'bv*[vcodec^=avc][height<=360]+ba/b[vcodec^=avc][height<=360]',
     'worst':  'worst',
 }
 

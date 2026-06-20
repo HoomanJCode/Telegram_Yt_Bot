@@ -343,6 +343,15 @@ def _merge_subs_into_mkv(video_file, subtitle_files, title=None, sub_languages=N
     return None
 
 def fetch_info(bot, uid, url):
+    """One-shot metadata fetch for the format-choice screen.
+
+    Returns the same dict yt-dlp would have returned from `extract_info(
+    download=False)`: keys include `title`, `description`, `duration`,
+    `uploader`, `tags`, `chapters`, `thumbnails`, ... AND, iff the operator
+    has opted in via `Config.MAX_COMMENTS > 0`, a `comments` list. Comments
+    are NOT fetched by default (yt-dlp skips the Innertube `/next` call) so
+    the info fetch stays fast for the common path.
+    """
     base = {
         'format': 'best',
         'cookiefile': _cookie_file(bot, uid),
@@ -351,7 +360,25 @@ def fetch_info(bot, uid, url):
         'no_js_runtimes': True,
         'js_runtimes': {'quickjs': {'path': '/usr/local/bin/qjs'}},
     }
-    return _run_ydl(base, 'fetch_info',
+    # Comment fetching is opt-in via Config.MAX_COMMENTS (capped at 20 in
+    # config.py so a misconfiguration can't escalate). We force
+    # `comment_sort=new` so yt-dlp returns the MOST-RECENT comments —
+    # without it, yt-dlp's YouTube extractor returns "Top by relevance"
+    # which is per-creator-curation, not chronological. The
+    # [str(N)] list-of-string wrapping mirrors how CLI args are parsed
+    # (--extractor-args "youtube:max_comments=5") and is required by
+    # yt-dlp's extractor_args key/value shape. When MAX_COMMENTS == 0 we
+    # OMIT extractor_args entirely so yt-dlp's no-comment fast path stays
+    # fast (no Innertube /next round-trip).
+    opts = dict(base)
+    if Config.MAX_COMMENTS > 0:
+        opts['extractor_args'] = {
+            'youtube': {
+                'max_comments': [str(Config.MAX_COMMENTS)],
+                'comment_sort': ['new'],
+            }
+        }
+    return _run_ydl(opts, 'fetch_info',
                     lambda ydl: ydl.extract_info(url, download=False))
 
 def download(bot, uid, url, media_type, video_quality=None, audio_quality=None, sub_mode=None, container=None):

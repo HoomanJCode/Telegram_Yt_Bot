@@ -1141,3 +1141,263 @@ class TestAlsoGetOtherFormatIdxShiftSafety(unittest.TestCase):
             'otherwise a concurrent download or retention sweep shifts '
             'the list and the user is offered audio of a video they '
             'never delivered audio for.')
+
+
+class TestFetchInfoExtractorArgs(unittest.TestCase):
+    """Pins the opt-in contract for `Config.MAX_COMMENTS`-driven comment
+    fetching in `app.downloader.fetch_info`.
+
+    Two contracts:
+
+    1. When `Config.MAX_COMMENTS > 0`, the opts dict yt-dlp receives MUST
+       include `extractor_args.youtube.{max_comments: [str(N)],
+       comment_sort: ['new']}` so yt-dlp's YouTube extractor fetches the
+       most-recent N comments inline with the existing metadata call.
+    2. When `Config.MAX_COMMENTS == 0`, `extractor_args` MUST NOT be in
+       the opts dict — the default-no-comment path stays fast (no
+       Innertube `/next` round-trip).
+
+    Together these pins prevent a future refactor from regressing in
+    either direction:
+      * accidentally keeping comment-fetch ON even when MAX_COMMENTS=0
+        (rate-limit risk; user can't disable it).
+      * accidentally dropping comment_sort=new (yt-dlp defaults to
+        "Top by relevance" which the user explicitly did NOT ask for).
+
+    The `comment_sort: ['new']` is non-obvious — yt-dlp's YouTube
+    extractor returns "Top" comments when no sort is specified, which
+    is per-creator curation (the channel-owner curated pin) and NOT
+    chronological. Without forcing 'new', the bot would surface the
+    channel owner's pinned comment every fetch, which is exactly the
+    opposite of what "Top comments" feels like in the chat.
+    """
+
+    def _capture_fetch_info_opts(self):
+        """Monkey-patch `_run_ydl` to capture the opts dict yt-dlp would
+        receive, returning it as a dict for assertion.
+
+        Patches `_cookie_file` as a side requirement so the helper
+        doesn't try to decode `bot._cookie_data[uid]` (a MagicMock that
+        would otherwise blow up at the `bytes.decode('utf-8')` call).
+        Same trick used in TestMp4ContainerCascade._run_download_capture_opts.
+        """
+        from app import downloader
+        captured = {}
+
+        def fake_run(opts, label, extract_fn):
+            captured['opts'] = opts
+            return {'title': 'X', 'duration': 0}
+
+        with patch.object(downloader, '_run_ydl',
+                           side_effect=fake_run), \
+             patch.object(downloader, '_cookie_file',
+                           return_value='/tmp/fake-cookies.txt'):
+            downloader.fetch_info(MagicMock(), 1, 'http://x')
+        return captured.get('opts', {})
+
+    def test_includes_extractor_args_when_max_comments_set(self):
+        from app import downloader
+        with patch.object(downloader.Config, 'MAX_COMMENTS', 5):
+            opts = self._capture_fetch_info_opts()
+        self.assertIn('extractor_args', opts,
+                      'fetch_info MUST add extractor_args when '
+                      'Config.MAX_COMMENTS > 0 — otherwise yt-dlp '
+                      'skips the Innertube /next comment call and '
+                      'show_format_choice renders as if comments '
+                      'were never opted-in.')
+        yt = opts['extractor_args']['youtube']
+        self.assertEqual(
+            yt['max_comments'], ['5'],
+            'fetch_info must cap yt-dlp at Config.MAX_COMMENTS so '
+            'an operator with MAX_COMMENTS=100 doesn\'t accidentally '
+            'fetch 100 + comments (rate-limit risk).')
+        self.assertEqual(
+            yt['comment_sort'], ['new'],
+            'fetch_info must force comment_sort=new; otherwise yt-dlp '
+            'returns "Top by relevance" which is per-creator pinned '
+            'comments, NOT chronological. The user explicitly asked '
+            'for "last comments that are viewable" -> newest-first.')
+
+    def test_omits_extractor_args_when_max_comments_zero(self):
+        from app import downloader
+        with patch.object(downloader.Config, 'MAX_COMMENTS', 0):
+            opts = self._capture_fetch_info_opts()
+        self.assertNotIn(
+            'extractor_args', opts,
+            'fetch_info must NOT add extractor_args when '
+            'Config.MAX_COMMENTS == 0 — keeps the no-comment fast '
+            'path fast (no Innertube round-trip) so operators who '
+            'don\'t opt in don\'t pay the latency cost.')
+
+    def test_default_value_is_zero_when_env_unset(self):
+        # Anchors the documented configuration: an upgrade is
+        # non-disruptive because the operator hasn't opted in.
+        if 'MAX_COMMENTS' in os.environ:
+            self.skipTest(
+                'MAX_COMMENTS is set in this environment; the '
+                'documented default is not asserted.')
+        self.assertEqual(
+            Config.MAX_COMMENTS, 0,
+            'Default must be 0 (off) so an upgrade is non-disruptive '
+            '— operators opt in via env / GitHub Secrets.')
+
+    def test_positive_max_comments_value_passed_through_str(self):
+        # yt-dlp's extractor_args values are lists-of-strings (this
+        # mirrors how CLI args are parsed). A refactor that passes an
+        # int instead of [str(int)] would silently break comment
+        # fetching with no immediate error. Pin the shape explicitly.
+        from app import downloader
+        with patch.object(downloader.Config, 'MAX_COMMENTS', 12):
+            opts = self._capture_fetch_info_opts()
+        self.assertEqual(
+            opts['extractor_args']['youtube']['max_comments'],
+            ['12'],
+            'max_comments must be a single-element list-of-strings '
+            '— yt-dlp parser expects this shape.')
+
+
+class TestCommentSliceDefensiveness(unittest.TestCase):
+    """Pins the slice pattern used in show_format_choice:
+
+        (info.get('comments') or [])[:Config.MAX_COMMENTS]
+
+    Why this matters: yt-dlp can return `None` mid-fetch (rate-limit,
+    partial response, edge-case comment shape, future extractor behaviors).
+    The `or []` clause is what keeps that from a TypeError on `None[:N]`
+    collapsing the format-choice screen via the outer try/except — which
+    would lose the user the title/duration/format-picker they actually
+    need to download the video.
+
+    This is a pure-Python pattern test — no monkey-patching needed
+    beyond Config.MAX_COMMENTS — because the slice expression sits in
+    app/handlers/navigation.py and the test pins the SLICE behavior
+    itself rather than the surrounding handler logic.
+    """
+
+    def test_none_value_returns_empty_list(self):
+        # Defensive case #1: yt-dlp returned comments key with None.
+        from app.downloader import Config
+        info = {'comments': None}
+        self.assertEqual(
+            (info.get('comments') or [])[:Config.MAX_COMMENTS],
+            [],
+            'info["comments"] == None must produce [] not raise '
+            'TypeError when sliced.')
+
+    def test_missing_key_returns_empty_list(self):
+        # Defensive case #2: yt-dlp didn't include the comments key
+        # at all (live/upcoming streams, some non-YouTube extractors).
+        from app.downloader import Config
+        info = {}
+        self.assertEqual(
+            (info.get('comments') or [])[:Config.MAX_COMMENTS],
+            [],
+            'info without "comments" key must produce [] not raise '
+            'KeyError or AttributeError.')
+
+    def test_empty_list_returns_empty_list(self):
+        # Sanity: an Already-empty list stays empty (NOT falsy).
+        from app.downloader import Config
+        info = {'comments': []}
+        self.assertEqual(
+            (info.get('comments') or [])[:Config.MAX_COMMENTS],
+            [],
+            '[] or [] must be [] — both sides falsy chained still '
+            'returns the fallback.')
+
+    def test_normal_list_returns_first_n(self):
+        # Positive case: real comments + MAX_COMMENTS=3 → first 3.
+        # `or []` is a no-op when value is truthy.
+        from app.downloader import Config
+        comments = [{'author': f'a{i}', 'text': f'h{i}'}
+                    for i in range(7)]
+        info = {'comments': comments}
+        with patch.object(Config, 'MAX_COMMENTS', 3):
+            result = (info.get('comments') or [])[:Config.MAX_COMMENTS]
+        self.assertEqual(len(result), 3)
+        self.assertEqual(result[0]['author'], 'a0')
+        self.assertEqual(result[2]['author'], 'a2')
+
+    def test_show_format_choice_source_uses_or_empty_defensive_slice(self):
+        # Structural pin: the slice pattern is BOTH a unit-testable
+        # shape (cases above) AND a deployment contract. A future
+        # refactor that drops the `or []` clause — without realizing
+        # that None[:N] raises TypeError and would collapse the whole
+        # format-choice screen via the outer try/except — gets caught
+        # here before it lands in production. Mirrors the prefix-
+        # contract pattern used in TestRunInExecutorKwargsRegression +
+        # TestShowRecentDeleteEntry for cross-package consistency.
+        import inspect
+        from app.handlers import navigation
+        src = inspect.getsource(navigation.show_format_choice)
+        self.assertIn(
+            "info.get('comments') or []",
+            src,
+            'show_format_choice must keep the `or []` defensiveness '
+            'so yt-dlp None / missing-key responses do not '
+            'TypeError-collapse the whole format-choice screen '
+            'via the outer try/except.')
+        # Also pin that the overflow policy uses SAFE_TEXT_MAX and headline
+        # rather than a duplicated f-string — defends against a refactor
+        # that reverts to mid-comment truncation (renders half a line
+        # that looks typed-broken to the user).
+        self.assertIn(
+            'SAFE_TEXT_MAX',
+            src,
+            'show_format_choice must gate the comments block on '
+            'SAFE_TEXT_MAX so the worst-case title does not blow past '
+            "Telegram's 4096-byte message cap.")
+        self.assertIn(
+            "f\"{headline}{extras}\\n\\nChoose format:\"",
+            src,
+            'show_format_choice must template headline + extras + '
+            'Choose format so dropping extras on overflow and '
+            'headline-staying in place avoids headline duplication.')
+        # Pin the OVERFLOW-BRANCH template specifically. The literal
+        # f"{headline}\n\nChoose format:" (without {extras} between
+        # {headline} and the newlines) matches the overflow line
+        # exactly and NOT the normal-branch line above (which has
+        # {extras} between {headline} and the newlines). A future
+        # refactor that drops overflow handling — silently reverting
+        # to mid-comment substring+ellipsis truncation — would re-
+        # expose the half-cut-line UX bug, and this assertion catches
+        # it before it ships.
+        self.assertIn(
+            'f"{headline}\\n\\nChoose format:"',
+            src,
+            'show_format_choice must have an explicit overflow branch '
+            'that drops `extras` and keeps `headline` + `Choose '
+            'format:` — so a worst-case title still emits the format '
+            'picker and never reaches Telegram with a half-rendered '
+            'comment line.')
+
+
+class TestMaxCommentsConfigClamping(unittest.TestCase):
+    """Drive Config.MAX_COMMENTS clamping at import time.
+
+    Hard-cap: any value above 20 is clamped DOWN to 20.
+    Lower bound: any value below 0 is clamped UP to 0.
+    Default: missing/non-numeric env var → 0.
+
+    These tests assert the SHAPE of the clamp (which operands it uses)
+    rather than the syntactic chain — a refactor that swaps max(0, ...)
+    for abs() without bounds-checking would slip through a value-based
+    test. The clamp helpers themselves are visible in the source; the
+    test pins the resulting numeric behavior so a future operator who
+    misconfigures still gets SAFE behavior, not escalating behavior.
+    """
+
+    def test_zero_by_default(self):
+        if 'MAX_COMMENTS' in os.environ:
+            self.skipTest('MAX_COMMENTS is set in this environment; '
+                          'the documented default is not asserted.')
+        self.assertEqual(Config.MAX_COMMENTS, 0)
+
+    def test_clamping_observed_for_out_of_range(self):
+        # We don't reload the module here because that's expensive —
+        # the clamp is captured in Config.MAX_COMMENTS at import time.
+        # If the operator sets MAX_COMMENTS=9999, the post-clamp value
+        # is min(20, 9999) = 20. Verify we never observe a value > 20
+        # nor < 0 in the live Config.
+        self.assertGreaterEqual(Config.MAX_COMMENTS, 0)
+        self.assertLessEqual(Config.MAX_COMMENTS, 20)

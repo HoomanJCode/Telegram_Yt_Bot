@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from app.utils import (
+    esc, _format_comments,
     VIDEO_QUALITY_OPTIONS, AUDIO_QUALITY_OPTIONS, SUBTITLE_MODE_OPTIONS,
     AUTO_FORMAT_OPTIONS, AUTO_FORMAT_LABELS, AUTO_FORMAT_SHORT,
     VIDEO_CONTAINER_OPTIONS, VIDEO_CONTAINER_LABELS, VIDEO_CONTAINER_SHORT,
@@ -817,6 +818,84 @@ class TestConfigAdmin(unittest.TestCase):
         self.assertFalse(Config.is_admin(200))
         # Even if there were no WHITELIST_USERS, is_admin should not change.
         self.assertTrue(Config.is_admin(100))
+
+
+class TestFormatComments(unittest.TestCase):
+    """Drive `_format_comments` — the helper that turns yt-dlp's
+    `info['comments']` list into a short, Telegram-friendly excerpt for
+    the format-choice screen.
+
+    Operator-toggled via `Config.MAX_COMMENTS`: when it's 0 the helper
+    is never called. When the operator opts in, the rendering rules
+    below are what the user sees in the chat.
+
+    Designed against yt-dlp's documented comment-dict shape
+    {author, text, like_count, ...}, but defensively tolerates partial
+    dicts / None values because YouTube sometimes returns malformed
+    comment objects mid-fetch (network drop, sign-in challenge, etc.).
+    """
+
+    def test_empty_list_returns_empty_string(self):
+        # Render-as-empty (not a placeholder) so the caller can use
+        # `if comments_block:` to skip the section cleanly.
+        self.assertEqual(_format_comments([]), '')
+
+    def test_none_returns_empty_string(self):
+        # Defensive default: even if a buggy caller (or a future
+        # refactor) pipes `None` through, the rendering path stays safe.
+        self.assertEqual(_format_comments(None), '')
+
+    def test_single_comment_renders_author_and_text(self):
+        out = _format_comments([{'author': 'alice', 'text': 'hi'}])
+        self.assertIn('@alice', out)
+        self.assertIn('hi', out)
+
+    def test_long_text_truncates_at_140_chars_with_ellipsis(self):
+        # 200-char input must produce a single line whose text-body is
+        # ≤ 140 chars + U+2026 ellipsis. The whole line (incl. author
+        # badge + ': ' separator) stays under ~200 chars even for the
+        # worst-case "{} : " padding.
+        long = 'a' * 200
+        out = _format_comments([{'author': 'a', 'text': long}])
+        # 140 'a's then ellipsis; line total well under 200.
+        self.assertIn('a' * 140 + '\u2026', out)
+        # And does NOT contain the 200x 'a' (otherwise the truncate is broken).
+        self.assertNotIn('a' * 141, out)
+
+    def test_missing_author_renders_as_anon(self):
+        out = _format_comments([{'text': 'hi'}])
+        self.assertIn('@anon', out)
+        self.assertIn('hi', out)
+
+    def test_missing_text_renders_with_empty_body(self):
+        # yt-dlp partial-fetch failure (e.g. comment author exposed
+        # but text truncated to ''). We still render the author badge
+        # so a partial comment is visible vs. dropped silently.
+        out = _format_comments([{'author': 'a'}])
+        self.assertIn('@a', out)
+
+    def test_escapes_markdown_chars_in_author_and_text(self):
+        # YouTube usernames often contain underscores (e.g.
+        # `@john_doe`); without esc() that would break the surrounding
+        # ParseMode.MARKDOWN message. Same for `*` / `[` / backtick in
+        # comment bodies. Verify both author and text pass through esc.
+        out = _format_comments([{'author': 'a_b', 'text': '*bold*'}])
+        self.assertIn(r'a\_b', out)
+        self.assertIn(r'\*bold\*', out)
+        # And no bare markdown-special chars leak through.
+        self.assertNotIn(': *bold*', out)
+
+    def test_multiple_comments_render_one_per_line(self):
+        c1 = {'author': 'a', 'text': 'hi'}
+        c2 = {'author': 'b', 'text': 'bye'}
+        c3 = {'author': 'c', 'text': 'greet'}
+        out = _format_comments([c1, c2, c3])
+        # All three lines present, one per line (joined by \n).
+        self.assertIn('@a: hi', out)
+        self.assertIn('@b: bye', out)
+        self.assertIn('@c: greet', out)
+        # Format invariant: at least N-1 newlines for N lines.
+        self.assertGreaterEqual(out.count('\n'), 2)
 
 
 if __name__ == '__main__':

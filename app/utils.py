@@ -33,6 +33,37 @@ def esc(text):
     for c in '*_`[]': text = text.replace(c, '\\' + c)
     return text
 
+
+def _format_comments(comments):
+    """Render a yt-dlp `comments` list as a short, Telegram-friendly excerpt.
+
+    Each comment is shaped as `{author, text, like_count, ...}` per yt-dlp's
+    docs, but partial-dict failures are common when YouTube returns an
+    empty / shaped-differently comment object — we tolerate missing
+    `author` (falls back to 'anon') and missing or empty `text` (renders
+    as an empty line). Each line is truncated at 140 chars + U+2026
+    ellipsis so that even with `Config.MAX_COMMENTS = 20` (~ 20 * 150 chars)
+    the rendered excerpt stays well under Telegram's 4096-char message cap.
+
+    Markdown escape via `esc()` so authors cannot smuggle markup that would
+    disrupt the surrounding ParseMode.MARKDOWN message.
+
+    Returns the empty string (NOT a placeholder) for empty/None input so
+    the caller can branch with `if not block:` cleanly. Live / upcoming
+    videos never carry a `comments` key — yt-dlp returns `info['comments']
+    = []` (defensive default in the caller makes that harmless).
+    """
+    if not comments:
+        return ''
+    lines = []
+    for c in comments:
+        author = str(c.get('author') or 'anon')
+        text = str(c.get('text') or '')
+        if len(text) > 140:
+            text = text[:140].rstrip() + '\u2026'
+        lines.append(f'\U0001F464 @{esc(author)}: {esc(text)}')
+    return '\n'.join(lines)
+
 def load_data(bot):
     from app.models import VideoRecord
     try:

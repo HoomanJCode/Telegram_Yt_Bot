@@ -85,6 +85,16 @@ class Config:
     # _env_int so missing/empty/non-numeric values fall back to the default
     # instead of crashing bot startup.
     MIN_DISK_FREE_MB = max(0, _env_int('MIN_DISK_FREE_MB', 1024))
+
+    # Operator-tunable number of recent YouTube comments to fetch + surface
+    # in the format-choice screen after a download. Default 0 (off) so an
+    # upgrade is non-disruptive; operators on permitted deployments opt in
+    # by setting MAX_COMMENTS in `.env` or GitHub Secrets. Hard-capped at
+    # 20 via min(20, ...) — sustained scraping above this (even with jitter)
+    # attracts YouTube's IP-level rate-limit / block from the Innertube
+    # `/next` comment endpoint. Out-of-range / negative / non-numeric values
+    # silently fall back to 0 (off) so a misconfiguration can't escalate.
+    MAX_COMMENTS = max(0, min(20, _env_int('MAX_COMMENTS', 0)))
     # Bot log level. Operators running on a constrained VPS reported
     # `bot.log` filling their disk because the `yt_bot` logger was pinned
     # at INFO unconditionally — every download / cookie-restore / menu

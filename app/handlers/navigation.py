@@ -11,16 +11,29 @@ from app.utils import (
     AUTO_FORMAT_OPTIONS, AUTO_FORMAT_LABELS, AUTO_FORMAT_SHORT,
     VIDEO_QUALITY_OPTIONS, VIDEO_QUALITY_LABELS, AUDIO_QUALITY_LABELS, SUBTITLE_MODE_LABELS,
     VIDEO_CONTAINER_OPTIONS, VIDEO_CONTAINER_LABELS, VIDEO_CONTAINER_SHORT,
-    classify_yt_error, friendly_error_msg,
+    classify_yt_error, friendly_error_msg, _format_comments,
 )
 from app.models import VideoRecord
 from app.downloader import fetch_info
+from config import Config
 import logging
 
 NAV_MAIN = 'main'
 NAV_RECENT = 'recent'
 NAV_FORMAT = 'format'
 NAV_DELIVERY = 'delivery'
+
+# Telegram's edit_text caps the rendered message text at 4096 bytes. We
+# leave 60 chars of SAFE_TEXT_MAX headroom for the trailing kb string
+# that edit_text handles as a separate field (`reply_markup`), and for
+# minor changes to the headline f-string over time. Below SAFE_TEXT_MAX
+# we always emit extras (the comments block); above, we drop extras and
+# emit only the title / duration / format-picker headline so the user
+# never loses the format picker on a long-title / many-comments worst
+# case. The constants are module-level so a future maintainer searching
+# for "4096" finds the rationale in one place.
+TELEGRAM_TEXT_MAX = 4096
+SAFE_TEXT_MAX = TELEGRAM_TEXT_MAX - 60
 
 def nav_push(bot, uid, action, data=None):
     if uid not in bot._nav_stack: bot._nav_stack[uid] = []
@@ -93,8 +106,43 @@ async def show_format_choice(bot, uid, url, video_id, msg):
         title, duration = info.get('title', '?'), info.get('duration', 0)
         bot._pending_urls[uid] = (url, video_id, title)
         mins, secs = divmod(duration, 60) if duration else (0, 0)
+        # Operator-toggleable: surface the most-recent comments only when
+        # Config.MAX_COMMENTS > 0 (which we set via fetch_info's
+        # extractor_args.youtube.max_comments). yt-dlp returns comments
+        # newest-first because fetch_info forces `comment_sort=new`, so
+        # `[:Config.MAX_COMMENTS]` takes the first N most-recent. Live /
+        # upcoming videos return `info['comments'] == []` which renders as
+        # an empty string and the block is skipped silently (no
+        # placeholder UI for a missing-data edge case).
+        #
+        # `info.get('comments') or []` — defensive guard against yt-dlp
+        # returning a partial/null comments object mid-fetch (rare but
+        # observed on rate-limited responses). The outer `or []` lets
+        # the slice + helper handle it as "no comments" rather than
+        # raising TypeError on `None[:N]` and collapsing the whole
+        # format-choice screen via the outer try/except.
+        comments_block = _format_comments(
+            (info.get('comments') or [])[:Config.MAX_COMMENTS])
+        extras = f"\n\n\U0001F4AC Top comments:\n{comments_block}" if comments_block else ''
         from app.handlers.formats import format_choice_kb
-        await s.edit_text(f"📹 *{esc(title[:200])}*\n⏱ {mins}:{secs:02d}\n\nChoose format:", parse_mode=ParseMode.MARKDOWN, reply_markup=format_choice_kb(bot, uid, video_id))
+        # Telegram's edit_text caps the rendered text at TELEGRAM_TEXT_MAX
+        # (4096) bytes; with MAX_COMMENTS=20 + a 200-char title (after
+        # esc() potentially doubling — chars like * _ ` [ ] each grow by 1
+        # byte) + the format-picker headline, our worst-case crosses 4096
+        # and Telegram rejects edit_text with "Bad Request: message is
+        # too long". Rather than truncate mid-comment (which would
+        # render half a line that looks typed-broken to the user), we
+        # DROP the comments block entirely when overflow is detected.
+        # The format picker is what the user actually needs to choose a
+        # download — losing the comments excerpt on the rare worst-case
+        # title is strictly better than losing the kb.
+        headline = f"📹 *{esc(title[:200])}*\n⏱ {mins}:{secs:02d}"
+        text = f"{headline}{extras}\n\nChoose format:"
+        if len(text) > SAFE_TEXT_MAX:
+            text = f"{headline}\n\nChoose format:"
+        await s.edit_text(
+            text, parse_mode=ParseMode.MARKDOWN,
+            reply_markup=format_choice_kb(bot, uid, video_id))
     except Exception as e:
         category = classify_yt_error(str(e))
         logger.error("Format choice error [%s]: %s", category, str(e)[:200])

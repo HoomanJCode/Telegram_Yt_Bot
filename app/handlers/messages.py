@@ -6,7 +6,12 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode, ChatType
 from app.models import VideoRecord
 from app.downloader import download, fetch_info
-from app.utils import extract_url, extract_video_id, find_existing, esc, ok, get_default_delivery, classify_yt_error, friendly_error_msg
+from app.utils import (
+    extract_url, extract_video_id, find_existing, esc, ok,
+    get_default_delivery, get_auto_format,
+    classify_yt_error, friendly_error_msg,
+)
+from app.utils import AUTO_FORMAT_OPTIONS
 from app.handlers.navigation import nav_clear, show_format_choice, menu
 
 logger = logging.getLogger('yt_bot')
@@ -30,7 +35,19 @@ async def on_msg(bot, u, c):
         return
 
     if not await _ensure(bot, uid): await msg.reply_text("❌ Upload cookies first! /cookies"); return
-    nav_clear(bot, uid); await show_format_choice(bot, uid, url, video_id, msg)
+    nav_clear(bot, uid)
+    # Auto-format: skip the keyboard, route to download_task directly.
+    auto = get_auto_format(bot, uid)
+    if auto != 'ask' and auto in AUTO_FORMAT_OPTIONS:
+        existing = find_existing(bot, uid, video_id, auto)
+        if existing:
+            from app.handlers.formats import show_delivery
+            await show_delivery(bot, msg, existing, bot.videos[uid].index(existing))
+            return
+        async with bot._download_semaphore:
+            await download_task(bot, uid, url, msg, auto)
+        return
+    await show_format_choice(bot, uid, url, video_id, msg)
 
 async def _group_download(bot, uid, url, msg, media_type, video_id):
     try:

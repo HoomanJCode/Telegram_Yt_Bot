@@ -8,6 +8,7 @@ from telegram.constants import ParseMode
 from app.utils import (
     esc, find_existing,
     VIDEO_QUALITY_OPTIONS, AUDIO_QUALITY_OPTIONS, SUBTITLE_MODE_OPTIONS,
+    AUTO_FORMAT_OPTIONS, AUTO_FORMAT_LABELS, AUTO_FORMAT_SHORT,
     VIDEO_QUALITY_LABELS, AUDIO_QUALITY_LABELS, SUBTITLE_MODE_LABELS,
     classify_yt_error, friendly_error_msg,
 )
@@ -42,9 +43,14 @@ def menu(bot, uid):
     vq = settings.get('video_quality', 'best')
     aq = settings.get('audio_quality', 'best')
     sm = settings.get('subtitle_mode', 'embed')
+    af = settings.get('auto_format', 'ask')
     vq_short = 'Best' if vq == 'best' else vq.upper() if vq != 'worst' else '~'
     aq_short = 'Best' if aq == 'best' else f"{aq}k" if aq != 'worst' else '~'
     sm_short = {'embed': 'MKV', 'separate': 'SRT', 'off': 'Off'}.get(sm, 'MKV')
+    # Defensive: stored `af` may be legacy garbage; menu() reads raw
+    # settings for the button label only — `get_auto_format` is the
+    # authoritative validator (used in messages.py:on_msg).
+    af_short = AUTO_FORMAT_SHORT.get(af, 'Ask') if af in AUTO_FORMAT_OPTIONS else 'Ask'
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📹 Recent Downloads", callback_data='r')],
         [InlineKeyboardButton("🍪 Upload Cookies", callback_data='c')],
@@ -54,6 +60,7 @@ def menu(bot, uid):
         [InlineKeyboardButton(f"🌐 Language: {lang.upper()}", callback_data='lang'),
          InlineKeyboardButton(f"📤 Delivery: {delivery_label}", callback_data='delivery'),
          InlineKeyboardButton(f"🍪 {'✅' if has else '❌'}", callback_data='cs')],
+        [InlineKeyboardButton(f"⚡ Auto: {af_short}", callback_data='af')],
         [InlineKeyboardButton(f"📦 {vc} files", callback_data='vc')],
     ])
 
@@ -123,11 +130,13 @@ async def router(bot, u, c):
     elif d == 'vq': await _change_video_quality(bot, u, c)
     elif d == 'aq': await _change_audio_quality(bot, u, c)
     elif d == 'sm': await _change_subtitle_mode(bot, u, c)
+    elif d == 'af': await _change_auto_format(bot, u, c)
     elif d.startswith('setlang_'): await _set_language(bot, u, c)
     elif d.startswith('setdelivery_'): await _set_delivery(bot, u, c)
     elif d.startswith('setvq_'): await _set_video_quality(bot, u, c)
     elif d.startswith('setaq_'): await _set_audio_quality(bot, u, c)
     elif d.startswith('setsm_'): await _set_subtitle_mode(bot, u, c)
+    elif d.startswith('setaf_'): await _set_auto_format(bot, u, c)
     elif d == 'cs': await q.message.reply_text("✅ Cookies active" if uid in bot._cookie_data else "❌ Upload with /cookies")
     elif d == 'vc': await q.message.reply_text(f"📦 {len(bot.videos.get(uid,[]))} files")
     elif d == 'clear_all': await _clear_all(bot, u, c)
@@ -265,6 +274,48 @@ async def _set_subtitle_mode(bot, u, c):
     bot.save()
     await q.message.reply_text(
         f"📝 Subtitle mode set to {SUBTITLE_MODE_LABELS.get(qkey, qkey)}",
+        reply_markup=menu(bot, uid))
+    await q.message.delete()
+
+
+async def _change_auto_format(bot, u, c):
+    """Show the auto-format picker inline-keyboard."""
+    q = u.callback_query; uid = u.effective_user.id
+    stored = bot._user_settings.get(uid, {}).get('auto_format', 'ask')
+    current = stored if stored in AUTO_FORMAT_OPTIONS else 'ask'
+    rows = []
+    for opt in AUTO_FORMAT_OPTIONS:
+        marker = '✅' if current == opt else '⬜'
+        if opt == 'ask':
+            desc = ' (show video/audio/thumb keyboard on link send)'
+        elif opt == 'video':
+            desc = ' (auto-download video on link send)'
+        elif opt == 'audio':
+            desc = ' (auto-download audio on link send)'
+        else:
+            desc = ' (auto-download thumbnail on link send)'
+        rows.append([InlineKeyboardButton(
+            f"{marker} {AUTO_FORMAT_LABELS.get(opt, opt)}{desc}",
+            callback_data=f'setaf_{opt}')])
+    rows.append([InlineKeyboardButton("🔙 Back", callback_data='b')])
+    await q.message.reply_text(
+        "⚡ Default format when you send a YouTube link (private chat only):",
+        reply_markup=InlineKeyboardMarkup(rows))
+    await q.message.delete()
+
+
+async def _set_auto_format(bot, u, c):
+    q = u.callback_query; await q.answer()
+    uid = u.effective_user.id
+    qkey = q.data[len('setaf_'):]
+    if qkey not in AUTO_FORMAT_OPTIONS:
+        return
+    if uid not in bot._user_settings or not isinstance(bot._user_settings.get(uid), dict):
+        bot._user_settings[uid] = {}
+    bot._user_settings[uid]['auto_format'] = qkey
+    bot.save()
+    await q.message.reply_text(
+        f"⚡ Auto-format set to {AUTO_FORMAT_LABELS.get(qkey, qkey)}",
         reply_markup=menu(bot, uid))
     await q.message.delete()
 

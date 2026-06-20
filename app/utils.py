@@ -85,6 +85,28 @@ VIDEO_QUALITY_OPTIONS = ['best', '2160p', '1440p', '1080p', '720p', '480p', '360
 AUDIO_QUALITY_OPTIONS = ['best', '320', '256', '192', '128', '96', 'worst']
 SUBTITLE_MODE_OPTIONS = ['embed', 'separate', 'off']
 
+
+AUTO_FORMAT_OPTIONS = ['ask', 'video', 'audio', 'thumb']
+# When a user pastes a YouTube link in private chat, the bot normally shows
+# a "Choose format" keyboard (video / audio / thumbnail). auto_format lets
+# the user skip that step: 'video' / 'audio' / 'thumb' short-circuits
+# straight to download_task(...) on link arrival; 'ask' (default) keeps the
+# existing keyboard UX. Private chat only — groups already hard-code
+# media_type='video' and we deliberately don't mix per-user settings into
+# shared group delivery.
+AUTO_FORMAT_LABELS = {
+    'ask':   '❓ Ask each time',
+    'video': '🎬 Auto Video',
+    'audio': '🎵 Auto Audio',
+    'thumb': '🖼️ Auto Thumb',
+}
+AUTO_FORMAT_SHORT = {
+    'ask':   '?',
+    'video': 'V',
+    'audio': 'A',
+    'thumb': 'T',
+}
+
 VIDEO_QUALITY_FMT = {
     'best':   'bv*+ba/b',
     '2160p':  'bv*[height<=2160]+ba/b[height<=2160]',
@@ -127,6 +149,7 @@ def _ensure_settings(bot, uid):
     s.setdefault('video_quality', 'best')
     s.setdefault('audio_quality', 'best')
     s.setdefault('subtitle_mode', 'embed')
+    s.setdefault('auto_format', 'ask')
     return s
 
 def get_video_quality(bot, uid):
@@ -138,6 +161,23 @@ def get_audio_quality(bot, uid):
 def get_subtitle_mode(bot, uid):
     """'embed' = merge into MKV; 'separate' = send .srt alongside; 'off' = no subs"""
     return _ensure_settings(bot, uid).get('subtitle_mode', 'embed')
+
+
+def get_auto_format(bot, uid):
+    """Private-chat auto-format on YouTube-link arrival.
+
+    Returns one of `AUTO_FORMAT_OPTIONS`:
+      * 'ask'   (default) — show the video/audio/thumb keyboard.
+      * 'video' / 'audio' / 'thumb' — skip the keyboard and route
+        directly to download_task(...) with the chosen media_type.
+
+    Validates the stored value: if user_settings.json was hand-edited to
+    contain a value outside AUTO_FORMAT_OPTIONS (e.g. legacy data), we
+    fall back to 'ask' rather than letting an unknown value reach
+    `download_task`, which only knows 'video' / 'audio' / 'thumb'.
+    """
+    val = _ensure_settings(bot, uid).get('auto_format', 'ask')
+    return val if val in AUTO_FORMAT_OPTIONS else 'ask'
 
 
 # ----- yt-dlp error classification -----# Categorize the text of a yt-dlp / Telegram exception so handlers can show a

@@ -167,6 +167,7 @@ async def settings_cmd(bot, u, c):
     from app.utils import ok
     from app.utils import (
         VIDEO_QUALITY_LABELS, AUDIO_QUALITY_LABELS, SUBTITLE_MODE_LABELS,
+        AUTO_FORMAT_LABELS,
     )
     from app.handlers.navigation import menu
     uid = u.effective_user.id
@@ -179,6 +180,7 @@ async def settings_cmd(bot, u, c):
     aq = settings.get('audio_quality', 'best')
     sm = settings.get('subtitle_mode', 'embed')
     delivery = settings.get('default_delivery', 'ask')
+    af = settings.get('auto_format', 'ask')
     delivery_labels = {
         'ask': 'Ask each time', 'telegram': 'Telegram', 'link': 'Link',
     }
@@ -187,7 +189,8 @@ async def settings_cmd(bot, u, c):
         f"🎬 Video: {VIDEO_QUALITY_LABELS.get(vq, vq)}\n"
         f"🎵 Audio: {AUDIO_QUALITY_LABELS.get(aq, aq)}\n"
         f"📝 Subs: {SUBTITLE_MODE_LABELS.get(sm, sm)}\n"
-        f"📤 Delivery: {delivery_labels.get(delivery, delivery)}"
+        f"📤 Delivery: {delivery_labels.get(delivery, delivery)}\n"
+        f"⚡ Auto-format: {AUTO_FORMAT_LABELS.get(af, af)}"
     )
     await u.message.reply_text(
         intro, parse_mode='Markdown', reply_markup=menu(bot, uid))

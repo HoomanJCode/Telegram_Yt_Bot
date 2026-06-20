@@ -8,9 +8,10 @@ from unittest.mock import MagicMock
 
 from app.utils import (
     VIDEO_QUALITY_OPTIONS, AUDIO_QUALITY_OPTIONS, SUBTITLE_MODE_OPTIONS,
+    AUTO_FORMAT_OPTIONS, AUTO_FORMAT_LABELS, AUTO_FORMAT_SHORT,
     VIDEO_QUALITY_FMT, AUDIO_QUALITY_FMT,
     VIDEO_QUALITY_LABELS, AUDIO_QUALITY_LABELS, SUBTITLE_MODE_LABELS,
-    get_video_quality, get_audio_quality, get_subtitle_mode,
+    get_video_quality, get_audio_quality, get_subtitle_mode, get_auto_format,
     get_default_delivery, _ensure_settings,
     classify_yt_error, friendly_error_msg,
 )
@@ -65,6 +66,25 @@ class TestQualityConstants(unittest.TestCase):
         for br in ('320', '256', '192', '128', '96'):
             self.assertIn(f'abr<={br}', AUDIO_QUALITY_FMT[br])
 
+    def test_auto_format_options_complete(self):
+        # Must include 'ask' (default) plus the three media_types that
+        # download_task understands.
+        self.assertEqual(set(AUTO_FORMAT_OPTIONS),
+                         {'ask', 'video', 'audio', 'thumb'})
+
+    def test_auto_format_labels_present_for_all_options(self):
+        for opt in AUTO_FORMAT_OPTIONS:
+            self.assertIn(opt, AUTO_FORMAT_LABELS)
+            self.assertIsInstance(AUTO_FORMAT_LABELS[opt], str)
+            self.assertGreater(len(AUTO_FORMAT_LABELS[opt]), 0)
+
+    def test_auto_format_short_single_char_per_option(self):
+        # Compact one-glyph labels so the menu's "⚡ Auto: V"-style
+        # row stays compact.
+        for opt in AUTO_FORMAT_OPTIONS:
+            self.assertIn(opt, AUTO_FORMAT_SHORT)
+            self.assertEqual(len(AUTO_FORMAT_SHORT[opt]), 1)
+
 
 class TestSettingsGetters(unittest.TestCase):
     def test_default_delivery_is_ask(self):
@@ -87,6 +107,10 @@ class TestSettingsGetters(unittest.TestCase):
         bot = _make_bot()
         self.assertEqual(get_subtitle_mode(bot, 1), 'embed')
 
+    def test_default_auto_format_is_ask(self):
+        bot = _make_bot()
+        self.assertEqual(get_auto_format(bot, 1), 'ask')
+
     def test_video_quality_returns_set_value(self):
         bot = _make_bot({1: {'video_quality': '1080p'}})
         self.assertEqual(get_video_quality(bot, 1), '1080p')
@@ -103,11 +127,49 @@ class TestSettingsGetters(unittest.TestCase):
         bot = _make_bot({1: {'subtitle_mode': 'off'}})
         self.assertEqual(get_subtitle_mode(bot, 1), 'off')
 
+    def test_auto_format_returns_set_value_video(self):
+        bot = _make_bot({1: {'auto_format': 'video'}})
+        self.assertEqual(get_auto_format(bot, 1), 'video')
+
+    def test_auto_format_returns_set_value_audio(self):
+        bot = _make_bot({1: {'auto_format': 'audio'}})
+        self.assertEqual(get_auto_format(bot, 1), 'audio')
+
+    def test_auto_format_returns_set_value_thumb(self):
+        bot = _make_bot({1: {'auto_format': 'thumb'}})
+        self.assertEqual(get_auto_format(bot, 1), 'thumb')
+
+    def test_auto_format_invalid_value_falls_back_to_ask(self):
+        # Defensive: garbage stored values (legacy data, hand-edited JSON)
+        # must NOT reach download_task; fall back to 'ask'.
+        bot = _make_bot({1: {'auto_format': 'garbage'}})
+        self.assertEqual(get_auto_format(bot, 1), 'ask')
+
+    def test_auto_format_handles_legacy_mp4_value(self):
+        bot = _make_bot({1: {'auto_format': 'mp4'}})
+        self.assertEqual(get_auto_format(bot, 1), 'ask')
+
+    def test_auto_format_invalid_value_does_not_mutate_persisted_dict(self):
+        # Defensive fallback is read-only — must NOT auto-correct the
+        # underlying settings dict.
+        bot = _make_bot({1: {'auto_format': 'garbage'}})
+        get_auto_format(bot, 1)
+        self.assertEqual(bot._user_settings[1]['auto_format'], 'garbage')
+
     def test_getters_isolate_between_users(self):
         bot = _make_bot({1: {'video_quality': '720p'}})
         self.assertEqual(get_video_quality(bot, 1), '720p')
         # User 2 has no entry — should return default
         self.assertEqual(get_video_quality(bot, 2), 'best')
+
+    def test_auto_format_isolates_between_users(self):
+        bot = _make_bot()
+        # Need to ensure user 1's settings dict exists before mutating it.
+        _ensure_settings(bot, 1)
+        bot._user_settings[1]['auto_format'] = 'video'
+        self.assertEqual(get_auto_format(bot, 1), 'video')
+        # User 2 has no settings — falls back to 'ask'
+        self.assertEqual(get_auto_format(bot, 2), 'ask')
 
 
 class TestEnsureSettings(unittest.TestCase):
@@ -119,16 +181,19 @@ class TestEnsureSettings(unittest.TestCase):
             'video_quality': 'best',
             'audio_quality': 'best',
             'subtitle_mode': 'embed',
+            'auto_format': 'ask',
         })
 
     def test_ensure_preserves_existing_values(self):
         bot = _make_bot({1: {'video_quality': '720p', 'audio_quality': '320',
-                             'subtitle_mode': 'separate', 'default_delivery': 'telegram'}})
+                             'subtitle_mode': 'separate', 'default_delivery': 'telegram',
+                             'auto_format': 'video'}})
         s = _ensure_settings(bot, 1)
         self.assertEqual(s['video_quality'], '720p')
         self.assertEqual(s['audio_quality'], '320')
         self.assertEqual(s['subtitle_mode'], 'separate')
         self.assertEqual(s['default_delivery'], 'telegram')
+        self.assertEqual(s['auto_format'], 'video')
 
     def test_ensure_fills_missing_keys_without_overwriting(self):
         bot = _make_bot({1: {'video_quality': '720p'}})
@@ -138,6 +203,7 @@ class TestEnsureSettings(unittest.TestCase):
         self.assertEqual(s['audio_quality'], 'best')
         self.assertEqual(s['subtitle_mode'], 'embed')
         self.assertEqual(s['default_delivery'], 'ask')
+        self.assertEqual(s['auto_format'], 'ask')
 
     def test_ensure_rebuilds_when_existing_value_is_not_dict(self):
         # Legacy: settings stored as a plain string 'ask'
@@ -148,6 +214,7 @@ class TestEnsureSettings(unittest.TestCase):
             'video_quality': 'best',
             'audio_quality': 'best',
             'subtitle_mode': 'embed',
+            'auto_format': 'ask',
         })
 
     def test_mutations_persist_in_bot_dict(self):

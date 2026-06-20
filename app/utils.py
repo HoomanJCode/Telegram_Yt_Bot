@@ -174,6 +174,36 @@ AUTO_FORMAT_SHORT = {
     'thumb': 'T',
 }
 
+VIDEO_CONTAINER_OPTIONS = ['auto', 'mp4']
+# Controls the output container for video downloads.
+#   * 'auto' (default) — yt-dlp picks the natural container for the stream
+#     combo (typically MKV for vp9+opus, MP4 for h264+aac). Our post-run
+#     ffmpeg MKV mux works on whatever yt-dlp produced, so soft subtitles
+#     can be EMBEDDED into MKV. Best for friends who want max subs control.
+#   * 'mp4'  — yt-dlp's `merge_output_format=mp4` is set so the natural
+#     container is remuxed to MP4 whenever possible. Universal device
+#     compatibility (iOS / older Android / WhatsApp forwards). Trade-off:
+#     MP4 cannot natively mux soft subtitles, so an effective cascade
+#     forces `subtitle_mode='embed'` to behave as `subtitle_mode='separate'`
+#     inside downloader.py and the user gets an .srt alongside the video
+#     file. The user's stored sub_mode preference on disk is NOT mutated
+#     (we do not silently rewrite user_settings); only the EFFECTIVE
+#     sub_mode used during this download is cascaded.
+VIDEO_CONTAINER_LABELS = {
+    'auto': '🔀 Auto (best codec match)',
+    'mp4':  '🎬 MP4 (universal compat)',
+}
+VIDEO_CONTAINER_SHORT = {
+    # Compact one-glyph menu labels mirroring AUTO_FORMAT_SHORT's
+    # `? / V / A / T` so the menu's "🎞 Container: …" row doesn't stick
+    # out next to "⚡ Auto: V". The '•' (U+2022 BULLET) for 'auto' is a
+    # neutral "best fit" marker — deliberately NOT a specific extension
+    # because the natural yt-dlp container depends on stream codecs
+    # (h264+aac → MP4, vp9+opus → WEBM, etc.).
+    'auto': '•',
+    'mp4':  'M',
+}
+
 VIDEO_QUALITY_FMT = {
     'best':   'bv*+ba/b',
     '2160p':  'bv*[height<=2160]+ba/b[height<=2160]',
@@ -217,6 +247,7 @@ def _ensure_settings(bot, uid):
     s.setdefault('audio_quality', 'best')
     s.setdefault('subtitle_mode', 'embed')
     s.setdefault('auto_format', 'ask')
+    s.setdefault('video_container', 'auto')
     return s
 
 def get_video_quality(bot, uid):
@@ -245,6 +276,24 @@ def get_auto_format(bot, uid):
     """
     val = _ensure_settings(bot, uid).get('auto_format', 'ask')
     return val if val in AUTO_FORMAT_OPTIONS else 'ask'
+
+
+def get_video_container(bot, uid):
+    """Per-user output container for video downloads.
+
+    Returns one of `VIDEO_CONTAINER_OPTIONS`:
+      * 'auto' (default) — yt-dlp picks the natural container; MKV
+        subs embed works.
+      * 'mp4'  — yt-dlp remuxes to MP4; effective sub_mode is forced
+        to 'separate' inside downloader.py (MP4 cannot mux soft subs).
+
+    Garbage fallback: any stored value outside VIDEO_CONTAINER_OPTIONS
+    (e.g. legacy data, hand-edited JSON) collapses to 'auto' without
+    mutating the user's settings dict, mirroring the read-only
+    `get_auto_format` contract.
+    """
+    val = _ensure_settings(bot, uid).get('video_container', 'auto')
+    return val if val in VIDEO_CONTAINER_OPTIONS else 'auto'
 
 
 # ----- yt-dlp error classification -----# Categorize the text of a yt-dlp / Telegram exception so handlers can show a

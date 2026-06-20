@@ -10,10 +10,11 @@ from unittest.mock import MagicMock
 from app.utils import (
     VIDEO_QUALITY_OPTIONS, AUDIO_QUALITY_OPTIONS, SUBTITLE_MODE_OPTIONS,
     AUTO_FORMAT_OPTIONS, AUTO_FORMAT_LABELS, AUTO_FORMAT_SHORT,
+    VIDEO_CONTAINER_OPTIONS, VIDEO_CONTAINER_LABELS, VIDEO_CONTAINER_SHORT,
     VIDEO_QUALITY_FMT, AUDIO_QUALITY_FMT,
     VIDEO_QUALITY_LABELS, AUDIO_QUALITY_LABELS, SUBTITLE_MODE_LABELS,
     get_video_quality, get_audio_quality, get_subtitle_mode, get_auto_format,
-    get_default_delivery, _ensure_settings,
+    get_video_container, get_default_delivery, _ensure_settings,
     classify_yt_error, friendly_error_msg,
     find_existing, prune_missing, _path_on_disk,
 )
@@ -85,6 +86,25 @@ class TestQualityConstants(unittest.TestCase):
         for opt in AUTO_FORMAT_OPTIONS:
             self.assertIn(opt, AUTO_FORMAT_SHORT)
             self.assertEqual(len(AUTO_FORMAT_SHORT[opt]), 1)
+
+    def test_video_container_options_complete(self):
+        # Must include 'auto' (default — natural container) AND 'mp4'
+        # (the universal-compat option the user added).
+        self.assertEqual(set(VIDEO_CONTAINER_OPTIONS), {'auto', 'mp4'})
+
+    def test_video_container_labels_present_for_all_options(self):
+        for opt in VIDEO_CONTAINER_OPTIONS:
+            self.assertIn(opt, VIDEO_CONTAINER_LABELS)
+            self.assertIsInstance(VIDEO_CONTAINER_LABELS[opt], str)
+            self.assertGreater(len(VIDEO_CONTAINER_LABELS[opt]), 0)
+
+    def test_video_container_short_single_char_per_option(self):
+        # Compact one-char labels so the menu's "Container: M"-style row
+        # stays compact — visual parity with "Auto: V" / "Auto: A" /
+        # "Auto: T" / "Auto: ?". Mirrors the AUTO_FORMAT_SHORT contract.
+        for opt in VIDEO_CONTAINER_OPTIONS:
+            self.assertIn(opt, VIDEO_CONTAINER_SHORT)
+            self.assertEqual(len(VIDEO_CONTAINER_SHORT[opt]), 1)
 
 
 class TestSettingsGetters(unittest.TestCase):
@@ -172,6 +192,35 @@ class TestSettingsGetters(unittest.TestCase):
         # User 2 has no settings — falls back to 'ask'
         self.assertEqual(get_auto_format(bot, 2), 'ask')
 
+    def test_default_video_container_is_auto(self):
+        bot = _make_bot()
+        self.assertEqual(get_video_container(bot, 1), 'auto')
+
+    def test_video_container_returns_set_value(self):
+        bot = _make_bot({1: {'video_container': 'mp4'}})
+        self.assertEqual(get_video_container(bot, 1), 'mp4')
+
+    def test_video_container_invalid_value_falls_back_to_auto(self):
+        # Defensive: garbage stored values must NOT reach downloader.py;
+        # fall back to 'auto' since downloader expects 'auto' | 'mp4'.
+        bot = _make_bot({1: {'video_container': 'webm'}})
+        self.assertEqual(get_video_container(bot, 1), 'auto')
+
+    def test_video_container_invalid_value_does_not_mutate_settings(self):
+        # Defensive fallback is read-only — must NOT auto-correct the
+        # underlying settings dict (mirrors get_auto_format's contract).
+        bot = _make_bot({1: {'video_container': 'garbage'}})
+        get_video_container(bot, 1)
+        self.assertEqual(bot._user_settings[1]['video_container'], 'garbage')
+
+    def test_video_container_isolates_between_users(self):
+        bot = _make_bot()
+        _ensure_settings(bot, 1)
+        bot._user_settings[1]['video_container'] = 'mp4'
+        self.assertEqual(get_video_container(bot, 1), 'mp4')
+        # User 2 falls back to 'auto'
+        self.assertEqual(get_video_container(bot, 2), 'auto')
+
 
 class TestEnsureSettings(unittest.TestCase):
     def test_ensure_populates_all_defaults(self):
@@ -183,18 +232,20 @@ class TestEnsureSettings(unittest.TestCase):
             'audio_quality': 'best',
             'subtitle_mode': 'embed',
             'auto_format': 'ask',
+            'video_container': 'auto',
         })
 
     def test_ensure_preserves_existing_values(self):
         bot = _make_bot({1: {'video_quality': '720p', 'audio_quality': '320',
                              'subtitle_mode': 'separate', 'default_delivery': 'telegram',
-                             'auto_format': 'video'}})
+                             'auto_format': 'video', 'video_container': 'mp4'}})
         s = _ensure_settings(bot, 1)
         self.assertEqual(s['video_quality'], '720p')
         self.assertEqual(s['audio_quality'], '320')
         self.assertEqual(s['subtitle_mode'], 'separate')
         self.assertEqual(s['default_delivery'], 'telegram')
         self.assertEqual(s['auto_format'], 'video')
+        self.assertEqual(s['video_container'], 'mp4')
 
     def test_ensure_fills_missing_keys_without_overwriting(self):
         bot = _make_bot({1: {'video_quality': '720p'}})
@@ -205,6 +256,7 @@ class TestEnsureSettings(unittest.TestCase):
         self.assertEqual(s['subtitle_mode'], 'embed')
         self.assertEqual(s['default_delivery'], 'ask')
         self.assertEqual(s['auto_format'], 'ask')
+        self.assertEqual(s['video_container'], 'auto')
 
     def test_ensure_rebuilds_when_existing_value_is_not_dict(self):
         # Legacy: settings stored as a plain string 'ask'
@@ -216,6 +268,7 @@ class TestEnsureSettings(unittest.TestCase):
             'audio_quality': 'best',
             'subtitle_mode': 'embed',
             'auto_format': 'ask',
+            'video_container': 'auto',
         })
 
     def test_mutations_persist_in_bot_dict(self):

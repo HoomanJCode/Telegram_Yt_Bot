@@ -1329,7 +1329,18 @@ class TestCommentSliceDefensiveness(unittest.TestCase):
         # TestShowRecentDeleteEntry for cross-package consistency.
         import inspect
         from app.handlers import navigation
+        # Function-body source keeps the EXISTING 8 pins as strict as
+        # they were (they were calibrated against body-only source;
+        # widening to module-level would let imports of e.g.
+        # `SAFE_TEXT_MAX` falsely satisfy a use-site pin). A separate
+        # module-level source `mod_src` is used ONLY for the new
+        # dual-pin pair below, where we explicitly want both the
+        # import line `_format_meta,` AND the call site `_format_meta(`
+        # to be addressable. The 2026-06-20 production bug was: call
+        # present but import missing -- addressable only by reading
+        # both halves.
         src = inspect.getsource(navigation.show_format_choice)
+        mod_src = inspect.getsource(navigation)
         self.assertIn(
             "info.get('comments') or []",
             src,
@@ -1354,13 +1365,39 @@ class TestCommentSliceDefensiveness(unittest.TestCase):
         )
 
 
+        # `_format_meta(` (with the open paren) is the discriminator
+        # between the call site and the import statement. The half-rollout
+        # `_format_meta` call without a corresponding import was the
+        # 2026-06-20 production bug; a loose `'_format_meta'` pin would
+        # match the import line alone and silently re-pass even when the
+        # call site is missing. Pinning `_format_meta(` forces BOTH the
+        # import AND at least one open-paren call to be present in
+        # source, so the bug class can't recur.
+        # `_format_meta(` (with open paren) is the call-site discriminator;
+        # `_format_meta,` (with trailing comma) is the import-line
+        # discriminator. Together they catch BOTH halves of the 2026-
+        # 06-20 bug class: a function-body-only pin matches the
+        # import alone; a module-level-only import pin misses the
+        # call. Pinning both forms against MODULE-level source forces
+        # import + call to coexist.
         self.assertIn(
-            '_format_meta',
-            src,
-            'show_format_choice must call _format_meta so'
-            ' uploader + view_count + upload_date render inline'
-            ' below the title (zero extra fetches since all'
-            ' fields are in the same info dict).'
+            '_format_meta(',
+            mod_src,
+            'show_format_choice must CALL _format_meta(...) (not just'
+            ' import it) so uploader + view_count + upload_date render'
+            ' inline below the title. The `_format_meta(` open-paren'
+            ' discriminator ensures the import alone does not satisfy'
+            ' this contract.'
+        )
+        self.assertIn(
+            '_format_meta,',
+            mod_src,
+            'show_format_choice must IMPORT _format_meta from app.utils'
+            ' (the 2026-06-20 production bug: present call, missing'
+            ' import). The `_format_meta,` trailing-comma discriminator'
+            ' matches the import-line form `_format_meta,` and is not'
+            ' satisfied by the call-site form `_format_meta(` -- so a'
+            ' missing import fails loudly even if the call site is kept.'
         )
         self.assertIn(
             "info.get('uploader')",

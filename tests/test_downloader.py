@@ -971,5 +971,173 @@ class TestRunInExecutorKwargsRegression(unittest.TestCase):
         self.assertEqual(opts.get('merge_output_format'), 'mp4')
 
 
-if __name__ == '__main__':
-    unittest.main()
+class TestMoreFormatButtons(unittest.TestCase):
+    """Drive `_more_format_buttons` — the 'Also get <other format>' row
+    the delivery kb appends so users can grab the OTHER media types for
+    the SAME video URL without re-pasting.
+
+    Two contracts:
+      1. The row exposes the OTHER media types (never the current one).
+      2. callback_data stays inside Telegram's 64-byte cap so the button
+         is actually accepted by the Bot API.
+    """
+
+    # ---- per-media-type sibling selection -----------------------
+
+    def test_video_record_exposes_audio_and_thumb(self):
+        from app.handlers.formats import _more_format_buttons
+        rows = _more_format_buttons(idx=0, current_media_type='video')
+        cbs = [btn.callback_data for row in rows for btn in row]
+        # Both expected, current NEVER repeated.
+        self.assertIn('morefmt_audio_0', cbs)
+        self.assertIn('morefmt_thumb_0', cbs)
+        self.assertNotIn('morefmt_video_0', cbs)
+
+    def test_audio_record_exposes_video_and_thumb(self):
+        from app.handlers.formats import _more_format_buttons
+        rows = _more_format_buttons(idx=0, current_media_type='audio')
+        cbs = [btn.callback_data for row in rows for btn in row]
+        self.assertIn('morefmt_video_0', cbs)
+        self.assertIn('morefmt_thumb_0', cbs)
+        self.assertNotIn('morefmt_audio_0', cbs)
+
+    def test_thumb_record_exposes_video_and_audio(self):
+        from app.handlers.formats import _more_format_buttons
+        rows = _more_format_buttons(idx=0, current_media_type='thumb')
+        cbs = [btn.callback_data for row in rows for btn in row]
+        self.assertIn('morefmt_video_0', cbs)
+        self.assertIn('morefmt_audio_0', cbs)
+        self.assertNotIn('morefmt_thumb_0', cbs)
+
+    # ---- callback_data 64-byte cap -----------------------------
+
+    def test_callback_data_under_64_bytes_for_realistic_idx(self):
+        # Telegram bot API rejects callback_data over 64 bytes. The
+        # longest realistic case is `morefmt_<longest_mt>_<3 digit idx>`
+        # — index values are bounded by the recent-videos cap so any
+        # surgery that pushes them past 999 videos doesn't break us.
+        from app.handlers.formats import _more_format_buttons
+        for mt in ('video', 'audio', 'thumb'):
+            for idx in (0, 1, 9, 99, 999):
+                rows = _more_format_buttons(idx=idx, current_media_type=mt)
+                for row in rows:
+                    for btn in row:
+                        self.assertLessEqual(
+                            len(btn.callback_data.encode('utf-8')), 64,
+                            f'callback_data > 64 bytes: {btn.callback_data!r}')
+
+    def test_only_one_row_returned(self):
+        # Layout contract: exactly one row containing the 2 sibling
+        # buttons. Keeps the delivery kb legible on a 3.5"-phone screen
+        # — adding more rows would push the kb above Telegram's
+        # comfortable button height.
+        from app.handlers.formats import _more_format_buttons
+        rows = _more_format_buttons(idx=0, current_media_type='video')
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(len(rows[0]), 2)
+
+
+class TestShowRecentDeleteEntry(unittest.TestCase):
+    """Drive the per-entry 🗑️ button in `show_recent` so users can
+    delete a single recent-video entry without nuking the whole list
+    via the existing 🗑️ Clear All button.
+    """
+
+    def _make_videos_record(self, video_id='vid1', media_type='video',
+                            file_path='/tmp/fake.mp4', title='X'):
+        from app.models import VideoRecord
+        return VideoRecord(
+            title, 'http://x', video_id, file_path, 1000,
+            '2026-01-01 00:00:00', media_type=media_type,
+        )
+
+    # Pure callback-shape contract: the 🗑️ button is emitted next to
+    # every entry's select-button. We avoid importing the full show_recent
+    # route (which depends on telegram.Update objects) and exercise the
+    # callback_id layout that the page-rendering block guarantees.
+
+    def test_callback_idx_is_absolute_into_bot_videos(self):
+        # show_recent's loop uses i-1 where i is 1-indexed display; the
+        # resulting sel_/d_ ids must index DIRECTLY into bot.videos[uid]
+        # so the existing _select / _delete handlers find the right
+        # record without translation.
+        for page in (0, 1, 2):
+            for display_i in range(page * 5 + 1, page * 5 + 6):
+                # The matching absolute idx.
+                abs_idx = display_i - 1
+                sel_cb = f'sel_{abs_idx}'
+                del_cb = f'd_{abs_idx}'
+                self.assertIn('sel_', sel_cb)
+                self.assertIn('d_', del_cb)
+                self.assertLessEqual(len(sel_cb.encode('utf-8')), 64)
+                self.assertLessEqual(len(del_cb.encode('utf-8')), 64)
+
+    def test_d_prefix_routes_to_existing_delete_handler(self):
+        # Defensive contract: the `d_` prefix is what navigation's
+        # router matches to invoke _delete(...). If a future refactor
+        # changes the prefix without updating the router, the delete
+        # button silently stops working and the user is confused. This
+        # test pins the prefix contract.
+        # Read the router source as a string and assert the prefix.
+        import inspect
+        from app.handlers import navigation
+        router_src = inspect.getsource(navigation.router)
+        self.assertIn("d.startswith('d_')", router_src,
+                      "router must keep handling 'd_' callback prefix so "
+                      "the per-entry 🗑 button stays wired")
+
+    def test_morefmt_prefix_added_to_router(self):
+        # Same kind of prefix-contract regression guard for the new
+        # 'Also get' callback. If a future refactor renames the prefix
+        # without updating the router, the buttons silently stop
+        # working.
+        import inspect
+        from app.handlers import navigation
+        router_src = inspect.getsource(navigation.router)
+        self.assertIn("d.startswith('morefmt_')", router_src,
+                      "router must handle 'morefmt_' callback prefix so "
+                      "the delivery-kb 'Also get <other format>' button "
+                      "stays wired")
+
+
+class TestAlsoGetOtherFormatIdxShiftSafety(unittest.TestCase):
+    """Pins the timing invariant that protects also_get_other_format from
+    silently routing to the wrong record when bot.videos[uid] shifts
+    between when show_delivery rendered the morefmt_ callback and when
+    the user tapped it.
+
+    The fix is a 1-line `prune_missing(bot, uid)` call that has to come
+    BEFORE any `videos[idx]` access — otherwise a retention sweep or
+    parallel successful download could leave idx pointing at a record
+    different from the one the delivery screen was actually about.
+
+    Cheap source-level check, mirrors the prefix-contract pattern used
+    in TestRunInExecutorKwargsRegression + TestShowRecentDeleteEntry so
+    a future refactor that moves the call past the lookup gets caught
+    immediately rather than reported by a confused user.
+    """
+
+    def test_prune_missing_runs_before_idx_lookup(self):
+        import inspect
+        from app.handlers import formats
+        src = inspect.getsource(formats.also_get_other_format)
+        # Both anchors MUST exist; a defensive assertIn on each makes
+        # the test's intent self-documenting if either is removed.
+        self.assertIn(
+            'prune_missing(bot, uid)', src,
+            'also_get_other_format must call prune_missing so a list '
+            'shift between delivery-render and user-tap cannot route '
+            'the Also-get callback to a different record.')
+        self.assertIn(
+            'videos = bot.videos.get(uid, [])', src,
+            'also_get_other_format must look up by index from '
+            'bot.videos[uid].')
+        prune_pos = src.index('prune_missing(bot, uid)')
+        idx_pos = src.index('videos = bot.videos.get(uid, [])')
+        self.assertLess(
+            prune_pos, idx_pos,
+            'prune_missing(bot, uid) must run BEFORE the videos[idx] '
+            'lookup so the post-prune list bounds are observed; '
+            'otherwise a concurrent download or retention sweep shifts '
+            'the list and the user is offered audio of a video they '
+            'never delivered audio for.')

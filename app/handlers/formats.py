@@ -4,7 +4,53 @@ from pathlib import Path
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode, ChatType
 from app.handlers.navigation import nav_push, NAV_FORMAT
-from app.utils import esc, find_existing, get_default_delivery, _path_on_disk
+from app.utils import esc, find_existing, get_default_delivery, _path_on_disk, prune_missing
+
+
+# Friendly labels used by `_more_format_buttons` for the per-media-type
+# "Also get:" rows in show_delivery. Keeping them here so the button
+# copy and any future deep-linking to /help text share a single source.
+_MORE_FORMAT_LABELS = {
+    'video': '🎬 Video',
+    'audio': '🎵 Audio',
+    'thumb': '🖼️ Thumbnail',
+}
+
+
+def _more_format_buttons(idx, current_media_type):
+    """Build the 'Also get' rows for the OTHER media types in a delivery kb.
+
+    Telegram callback_data is capped at 64 bytes; the values we emit
+    ('morefmt_{mt}_{idx}') are well under that cap since mt ∈ {video,
+    audio, thumb} (≤5 chars) and idx is a small int even after months of
+    user history. The cap is exercised explicitly in the test suite so a
+    future rename of the prefix doesn't accidentally push past 64 bytes
+    on longer variant names ('foobar_v', etc.).
+
+    Returns an empty list if there's nothing to advertise (independent
+    of the call site's media_type — for now every media_type has 2
+    siblings, but if a single-variant media type is introduced later
+    the call site stays correct).
+    """
+    siblings = [
+        ('video', '🎬 Video'),
+        ('audio', '🎵 Audio'),
+        ('thumb', '🖼️ Thumbnail'),
+    ]
+    rows = []
+    other = [(mt, label) for mt, label in siblings if mt != current_media_type]
+    # One row, two buttons side-by-side, so the delivery kb stays within
+    # Telegram's recommended visible-rows-on-a-3.5"-phone limit (delivery
+    # kb already has 3 rows, +1 row is fine).
+    if other:
+        rows.append([
+            InlineKeyboardButton(
+                f"➕ {label}",
+                callback_data=f'morefmt_{mt}_{idx}',
+            )
+            for mt, label in other
+        ])
+    return rows
 
 def format_choice_kb(bot, uid, video_id):
     # Existing-detection uses the soft-fail-safe _path_on_disk so a transient
@@ -112,7 +158,23 @@ async def show_delivery(bot, msg, record, idx):
     mb = record.file_size / 1024 / 1024
     nav_push(bot, msg.chat.id, NAV_FORMAT, (record.url, record.video_id))
     from app.handlers.messages import _group_delivery_kb
-    kb = _group_delivery_kb(bot, msg.chat.id) if msg.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP) else delivery_kb(bot, msg.chat.id, idx)
+    if msg.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        kb = _group_delivery_kb(bot, msg.chat.id)
+        await msg.reply_text(
+            f"{emoji} *{esc(record.title[:200])}*\n📦 {mb:.2f} MB | {record.media_type}\n🕒 {record.download_time}{sub_hint}\n\nChoose delivery:",
+            parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+        return
+    # Private-chat path: build the standard delivery kb then append the
+    # "Also get" rows so the user can grab the OTHER formats (audio /
+    # thumb for a video record, video + thumb for an audio record,
+    # video + audio for a thumb record) without re-pasting the URL.
+    kb = delivery_kb(bot, msg.chat.id, idx)
+    more_rows = _more_format_buttons(idx, record.media_type)
+    if more_rows:
+        # InlineKeyboardMarkup.inline_keyboard is a list of rows; we
+        # extend rather than rebuilding so the delivery_kb() layout
+        # stays the source of truth for the first 3 rows.
+        kb.inline_keyboard.extend(more_rows)
     sub_hint = ''
     if pending_subs:
         sub_hint = f"\n📝 {len(pending_subs)} subtitle file(s) attached"
@@ -181,3 +243,71 @@ async def back_to_formats(bot, u, c):
     from app.handlers.navigation import show_format_choice
     await show_format_choice(bot, uid, record.url, record.video_id, q.message)
     await q.message.delete()
+
+
+async def also_get_other_format(bot, u, c):
+    """Handler for the 'Also get <other format>' row the delivery kb shows.
+
+    Invoked via `morefmt_<mt>_<idx>` callback_data. The user tapped this
+    after a record at `idx` was just delivered, requesting that the bot
+    kick off a SECOND download of the SAME video URL but in a different
+    media_type. We look up the source record by index (NOT find_existing
+    on video_id — the user might have multiple variants of the same video
+    and chose THIS record specifically), promote its URL/ID back into
+    `bot._pending_urls` so any downstream "fetch_info" path can re-use it,
+    and run a fresh download_task with container_override=None so
+    downloader's user-setting cascade (video_container, subtitle_mode)
+    applies once more exactly like an unrelated next-click would.
+
+    Dedup mirrors `choose_format`: if the OTHER format already exists as
+    a record (e.g. user clicked Video, then "Also get audio", but they
+    had previously downloaded the same video as audio), we don't
+    re-download — show the existing record's delivery screen instead.
+    """
+    q = u.callback_query; await q.answer(); uid = u.effective_user.id
+    try:
+        _, mt, idx_str = q.data.split('_', 2)
+        idx = int(idx_str)
+    except ValueError:
+        return
+    if mt not in ('video', 'audio', 'thumb'):
+        return
+    # Eagerly prune so a concurrent successful download (which can shift
+    # the 0-indexed bot.videos[uid] list between when show_delivery rendered
+    # the morefmt_ callback and when the user tapped it) can't make us
+    # point at a different record than the one the delivery screen was
+    # actually showing. Mirrors the same defensive call in `_select`.
+    prune_missing(bot, uid)
+    videos = bot.videos.get(uid, [])
+    if not videos or not (0 <= idx < len(videos)):
+        # Record gone (pruned, removed, etc.) — let the user pick again.
+        await q.message.reply_text(
+            "⚠️ That entry is no longer available. Try again from /recent.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('📹 Recent', callback_data='r'), InlineKeyboardButton('🔙 Menu', callback_data='b')]]))
+        return
+    record = videos[idx]
+    url = record.url
+    video_id = record.video_id
+    # Dedup: audio + thumb download tasks recognize an existing record
+    # and short-circuit. We surface the existing record's delivery screen
+    # rather than re-downloading. (For video dedup is intentionally
+    # disabled — there can be multiple valid MKV / MP4 variants of the
+    # same video_id and the user might want a fresh MP4 even if an old
+    # MKV exists.)
+    if mt in ('audio', 'thumb'):
+        existing = find_existing(bot, uid, video_id, mt)
+        if existing:
+            await q.answer("Already downloaded!")
+            await show_delivery(bot, q.message, existing, bot.videos[uid].index(existing))
+            return
+    # Re-prime _pending_urls so a future "back to formats" navigation
+    # lands on this video's format picker rather than the user's last
+    # unrelated URL.
+    bot._pending_urls[uid] = (url, video_id, record.title)
+    from app.handlers.messages import download_task
+    async with bot._download_semaphore:
+        # container_override=None defers to the user's stored video_container
+        # (or 'auto' for audio/thumb paths which ignore container). This
+        # mirrors the auto_format='video' path so the per-user quality
+        # cascade is honored consistently.
+        await download_task(bot, uid, url, q.message, mt, container_override=None)

@@ -124,7 +124,23 @@ async def show_recent(bot, u, c, page=0):
     txt += f"⚠️ {bot.config.STORAGE_DAYS}d retention."
     kb = []
     for i, v in enumerate(pv, page*pp+1):
-        if Path(v.file_path).exists(): kb.append([InlineKeyboardButton(f"{emoji_map.get(v.media_type,'📹')} {i}. {v.title[:40]}", callback_data=f'sel_{page*pp+(i-page*pp-1)}')])
+        # One row per entry: select-button on the left, 🗑️ delete on the
+        # right. The existing callback_data pattern simplifies to `i-1`
+        # because i is 1-indexed display and bot.videos[uid] is 0-indexed
+        # storage; the page offset cancels out exactly so absolute idx is
+        # correct across pagination.
+        if Path(v.file_path).exists():
+            row = [
+                InlineKeyboardButton(
+                    f"{emoji_map.get(v.media_type,'📹')} {i}. {v.title[:40]}",
+                    callback_data=f'sel_{i-1}',
+                ),
+                InlineKeyboardButton(
+                    f"🗑️ #{i}",
+                    callback_data=f'd_{i-1}',
+                ),
+            ]
+            kb.append(row)
     kb.append([InlineKeyboardButton("🗑️ Clear All", callback_data='clear_all')])
     nav = []
     if page > 0: nav.append(InlineKeyboardButton("⬅️", callback_data=f'p_{page-1}'))
@@ -165,6 +181,7 @@ async def router(bot, u, c):
     elif d == 'clear_all': await _clear_all(bot, u, c)
     elif d.startswith('fmt_'): from app.handlers.formats import choose_format; await choose_format(bot, u, c)
     elif d.startswith('backfmt_'): from app.handlers.formats import back_to_formats; await back_to_formats(bot, u, c)
+    elif d.startswith('morefmt_'): from app.handlers.formats import also_get_other_format; await also_get_other_format(bot, u, c)
     elif d.startswith('tg_'): from app.handlers.formats import send_telegram; await send_telegram(bot, u, c)
     elif d.startswith('lk_'): from app.handlers.formats import send_link; await send_link(bot, u, c)
     elif d.startswith('sel_'): await _select(bot, u, c)

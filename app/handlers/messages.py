@@ -1,6 +1,7 @@
 """Message handler for private chats and groups"""
 import asyncio, os, logging
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode, ChatType
@@ -113,10 +114,27 @@ async def download_task(bot, uid, url, msg, media_type, container_override=None)
             # (format_choice_kb's MKV/MP4 buttons, auto_format=='video'
             # branch) get to override the user's stored container
             # setting exactly for this download without mutating it.
+            #
+            # The kwargs MUST be bound via functools.partial before the
+            # call lands on the executor — BaseEventLoop.run_in_executor's
+            # signature is (executor, func, *args), NOT **(executor, func,
+            # *args, **kwargs), so any `container=` / `sub_mode=` /
+            # `video_quality=` kwarg here raises:
+            #
+            #   TypeError: BaseEventLoop.run_in_executor() got an
+            #   unexpected keyword argument 'video_quality'
+            #
+            # which surfaces in the VPS log as
+            # "Download task error [unknown]" and silently breaks every
+            # MKV / MP4 download (caught in the bug on the live bot —
+            # 2026-06-20). `partial(...)` turns the kwargs into POSITIONAL
+            # bound args on the wrapper callable, which run_in_executor
+            # happily forwards to its thread pool.
             fp, title, vid, sub_files = await asyncio.get_event_loop().run_in_executor(
-                None, download, bot, uid, url, media_type,
-                video_quality=None, audio_quality=None,
-                sub_mode=None, container=container_override)
+                None,
+                partial(download, bot, uid, url, media_type,
+                        video_quality=None, audio_quality=None,
+                        sub_mode=None, container=container_override))
         sz = Path(fp).stat().st_size
         record = VideoRecord(title, url, vid, fp, sz, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), media_type=media_type)
         bot.videos.setdefault(uid, []).insert(0, record)

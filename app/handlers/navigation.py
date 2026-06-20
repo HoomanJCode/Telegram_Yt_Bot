@@ -6,7 +6,7 @@ from datetime import datetime
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from app.utils import (
-    esc, find_existing,
+    esc, find_existing, prune_missing,
     VIDEO_QUALITY_OPTIONS, AUDIO_QUALITY_OPTIONS, SUBTITLE_MODE_OPTIONS,
     AUTO_FORMAT_OPTIONS, AUTO_FORMAT_LABELS, AUTO_FORMAT_SHORT,
     VIDEO_QUALITY_LABELS, AUDIO_QUALITY_LABELS, SUBTITLE_MODE_LABELS,
@@ -92,11 +92,22 @@ async def show_format_choice(bot, uid, url, video_id, msg):
 
 async def show_recent(bot, u, c, page=0):
     uid = u.effective_user.id; msg = u.callback_query.message if u.callback_query else u.message
+    # Eagerly drop records whose files no longer exist (operator cleared
+    # downloads/ from VPS, retention sweep, server migration, etc.) so this
+    # listing only shows entries that can actually be delivered, and so the
+    # sel_<idx> callback_data below stays in sync with the post-prune list.
+    pruned = prune_missing(bot, uid)
     videos = bot.videos.get(uid, [])
-    if not videos: await msg.reply_text("📭 No files.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data='b')]])); return
+    if not videos:
+        cleaned_line = f"\n🗑️ Cleaned {pruned} missing entries." if pruned else ""
+        await msg.reply_text(f"📭 No files.{cleaned_line}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data='b')]]))
+        return
     pp, tp = 5, max(1, (len(videos)+4)//5); page = max(0, min(page, tp-1)); pv = videos[page*pp:(page+1)*pp]
     emoji_map = {'video': '🎬', 'audio': '🎵', 'thumb': '🖼️'}
-    txt = f"📹 Downloads ({page+1}/{tp})\n\n"
+    txt = f"📹 Downloads ({page+1}/{tp})"
+    if pruned:
+        txt += f"\n🗑️ Cleaned {pruned} missing entries."
+    txt += "\n\n"
     for i, v in enumerate(pv, page*pp+1):
         ex = "✅" if Path(v.file_path).exists() else "🗑️"
         txt += f"{ex} {emoji_map.get(v.media_type, '📹')} {i}. {esc(v.title[:50])}\n   📦 {v.file_size/1024/1024:.2f}MB | {v.download_time}\n\n"
@@ -328,8 +339,22 @@ async def _clear_all(bot, u, c):
 
 async def _select(bot, u, c):
     q = u.callback_query; uid, idx = u.effective_user.id, int(q.data.split('_')[1])
+    # Eagerly prune: a file deleted between when show_recent rendered this
+    # menu and when the user tapped it would otherwise be delivered (or
+    # blow up downstream show_delivery). After pruning, the indices in
+    # bot.videos[uid] may have shifted — if the clicked record was the
+    # one that got pruned, idx is out of bounds and we bounce to /recent
+    # where the user can pick a fresh entry.
+    prune_missing(bot, uid)
     videos = bot.videos.get(uid, [])
-    if 0 <= idx < len(videos): nav_push(bot, uid, NAV_RECENT); from app.handlers.formats import show_delivery; await show_delivery(bot, q.message, videos[idx], idx); await q.message.delete()
+    if not videos or idx >= len(videos):
+        await show_recent(bot, u, c)
+        await q.message.delete()
+        return
+    nav_push(bot, uid, NAV_RECENT)
+    from app.handlers.formats import show_delivery
+    await show_delivery(bot, q.message, videos[idx], idx)
+    await q.message.delete()
 
 async def _delete(bot, u, c):
     q = u.callback_query; uid, idx = u.effective_user.id, int(q.data.split('_')[1])

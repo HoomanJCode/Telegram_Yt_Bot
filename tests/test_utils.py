@@ -4,6 +4,7 @@ Uses only stdlib unittest so the test suite runs in the deployed environment
 without requiring extra `pip install` steps.
 """
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock
 
 from app.utils import (
@@ -14,8 +15,8 @@ from app.utils import (
     get_video_quality, get_audio_quality, get_subtitle_mode, get_auto_format,
     get_default_delivery, _ensure_settings,
     classify_yt_error, friendly_error_msg,
+    find_existing, prune_missing, _path_on_disk,
 )
-from app.utils import find_existing
 
 
 def _make_bot(settings=None, videos=None):
@@ -239,6 +240,206 @@ class TestFindExistingSignature(unittest.TestCase):
     def test_returns_none_for_unknown_user(self):
         bot = _make_bot()
         self.assertIsNone(find_existing(bot, 999, 'fakevid', 'video'))
+
+
+class TestPathOnDisk(unittest.TestCase):
+    """_path_on_disk is the soft-fail-safe existence check.
+
+    Critical contract (caught in code-review): MUST NOT confuse a
+    recoverable OSError (NFS hiccup, mid-write EACCES, EIO, EBUSY on
+    Windows) with 'file is gone'. Returning False there would let
+    prune_missing permanently drop the user's record from
+    user_videos.json on a transient blip. The function must keep the
+    record on any non-FileNotFoundError and let the next /recent tap
+    retry.
+    """
+
+    def test_returns_true_for_real_file(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(delete=False) as f:
+            p = f.name
+        try:
+            self.assertTrue(_path_on_disk(p))
+        finally:
+            Path(p).unlink(missing_ok=True)
+
+    def test_returns_false_for_genuinely_missing(self):
+        import tempfile
+        self.assertFalse(_path_on_disk(tempfile.gettempdir() + '/definitely-not-here-12345.mp4'))
+
+    def test_returns_true_on_transient_oserror(self):
+        # Patch Path.stat to raise a recoverable OSError — must be treated
+        # as 'still on disk, skip prune'.
+        from unittest.mock import patch
+        with patch.object(Path, 'stat', side_effect=OSError(5, 'EIO: simulated input/output error')):
+            self.assertTrue(_path_on_disk('/any/path/at/all'))
+
+    def test_returns_false_on_filenotfounderror(self):
+        from unittest.mock import patch
+        with patch.object(Path, 'stat', side_effect=FileNotFoundError('gone')):
+            self.assertFalse(_path_on_disk('/any/path'))
+
+    def test_returns_false_for_empty_path(self):
+        self.assertFalse(_path_on_disk(''))
+
+    def test_returns_false_for_none(self):
+        # The p=None guard short-circuits before Path(None) — important
+        # because Path(None) raises TypeError, which would otherwise be
+        # swallowed by the OSError catch and yield the wrong True.
+        self.assertFalse(_path_on_disk(None))
+
+    def test_returns_false_on_malformed_path_valueerror(self):
+        # Round-3 widening: Path('/\\x00bad') raises ValueError at
+        # construction time. Caught and treated as 'gone' (False) so
+        # prune_missing can clean up rather than leak a perpetually
+        # broken entry.
+        self.assertFalse(_path_on_disk('/tmp/\x00bad.mp4'))
+
+
+class TestPruneMissing(unittest.TestCase):
+    """prune_missing drops records whose files were deleted out-of-band.
+
+    Touches real files via tempfile.mkdtemp — Path(v.file_path).exists()
+    is the source of truth, and mocking would test the mock, not the
+    behavior we actually need.
+    """
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path as _P
+        from app.models import VideoRecord
+        self._tmp = tempfile.mkdtemp()
+        # Two files that will exist for the lifetime of the test.
+        self._kept_path = str(_P(self._tmp) / 'kept.mp4')
+        self._kept2_path = str(_P(self._tmp) / 'kept2.mp4')
+        _P(self._kept_path).write_bytes(b'k1')
+        _P(self._kept2_path).write_bytes(b'k2')
+        # One path that never gets created — represents a file that was
+        # already gone before the test started (e.g. operator ran `rm`).
+        self._missing_path = str(_P(self._tmp) / 'missing.mp4')
+        self._kept_video = VideoRecord(
+            'K1', 'http://a', 'vid1', self._kept_path, 101,
+            '2024-01-01 00:00:00', media_type='video')
+        self._missing_video = VideoRecord(
+            'M1', 'http://b', 'vid2', self._missing_path, 202,
+            '2024-01-01 00:00:00', media_type='video')
+        self._kept2_video = VideoRecord(
+            'K2', 'http://c', 'vid3', self._kept2_path, 303,
+            '2024-01-01 00:00:00', media_type='video')
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_returns_zero_when_all_files_exist(self):
+        bot = _make_bot(videos={1: [self._kept_video, self._kept2_video]})
+        removed = prune_missing(bot, 1)
+        self.assertEqual(removed, 0)
+        self.assertEqual(len(bot.videos[1]), 2)
+        bot.save.assert_not_called()
+
+    def test_returns_count_of_missing_records(self):
+        bot = _make_bot(videos={1: [self._kept_video, self._missing_video, self._kept2_video]})
+        removed = prune_missing(bot, 1)
+        self.assertEqual(removed, 1)
+        self.assertEqual(len(bot.videos[1]), 2)
+        self.assertIn(self._kept_video, bot.videos[1])
+        self.assertIn(self._kept2_video, bot.videos[1])
+        self.assertNotIn(self._missing_video, bot.videos[1])
+        bot.save.assert_called_once()
+
+    def test_preserves_order_of_kept_records(self):
+        # Order matters: show_recent / page-rendering relies on stable
+        # indices so the keyboard's sel_<idx> callback_data stays aligned
+        # with the post-prune list.
+        bot = _make_bot(videos={1: [self._missing_video, self._kept_video, self._missing_video]})
+        removed = prune_missing(bot, 1)
+        self.assertEqual(removed, 2)
+        self.assertEqual(bot.videos[1], [self._kept_video])
+
+    def test_all_missing_returns_zero_length_and_saves(self):
+        bot = _make_bot(videos={1: [self._missing_video, self._missing_video]})
+        removed = prune_missing(bot, 1)
+        self.assertEqual(removed, 2)
+        self.assertEqual(bot.videos[1], [])
+        bot.save.assert_called_once()
+
+    def test_unknown_user_returns_zero_without_save(self):
+        bot = _make_bot(videos={})
+        removed = prune_missing(bot, 999)
+        self.assertEqual(removed, 0)
+        bot.save.assert_not_called()
+
+    def test_empty_list_returns_zero_without_save(self):
+        bot = _make_bot(videos={1: []})
+        removed = prune_missing(bot, 1)
+        self.assertEqual(removed, 0)
+        bot.save.assert_not_called()
+
+    def test_mid_session_real_deletion_is_detected(self):
+        # Simulate the operator clearing one of the files between two
+        # /recent clicks. First click sees both; second click after the
+        # delete should prune exactly one.
+        bot = _make_bot(videos={1: [self._kept_video, self._kept2_video]})
+        self.assertEqual(prune_missing(bot, 1), 0)
+        Path(self._kept_path).unlink()
+        removed = prune_missing(bot, 1)
+        self.assertEqual(removed, 1)
+        self.assertEqual(len(bot.videos[1]), 1)
+        self.assertIn(self._kept2_video, bot.videos[1])
+
+    def test_save_called_only_when_anything_changes(self):
+        # IO-cost guard: ensure the eager-purge call sites (show_recent
+        # + _select) don't write user_videos.json needlessly on every
+        # /recent tap.
+        bot = _make_bot(videos={1: [self._kept_video]})
+        prune_missing(bot, 1)
+        bot.save.reset_mock()
+        prune_missing(bot, 1)
+        prune_missing(bot, 1)
+        bot.save.assert_not_called()
+
+    def test_prune_missing_keeps_records_on_transient_oserror(self):
+        # Integration test for the soft-fail contract (TestPathOnDisk
+        # only covers the helper in isolation). The whole point of the
+        # _path_on_disk wrapper is that prune_missing — which writes the
+        # purged result to user_videos.json — must NOT permanently delete
+        # a user's record on a recoverable filesystem blip.
+        from unittest.mock import patch
+        bot = _make_bot(videos={1: [self._kept_video]})
+        with patch.object(Path, 'stat',
+                          side_effect=OSError(5, 'EIO: simulated input/output error')):
+            removed = prune_missing(bot, 1)
+        self.assertEqual(removed, 0)
+        self.assertEqual(bot.videos[1], [self._kept_video])
+        bot.save.assert_not_called()
+
+    def test_prune_missing_mixed_genuine_missing_and_transient_oserror(self):
+        # Realistic mixed scenario: one file was genuinely deleted by
+        # the operator; the OS is having an EIO hiccup affecting stat()
+        # on the other two. prune_missing must remove ONLY the genuinely
+        # missing one and keep both files whose stat() is transiently
+        # failing.
+        from unittest.mock import patch
+        bot = _make_bot(videos={
+            1: [self._kept_video, self._missing_video, self._kept2_video]
+        })
+
+        def fake_stat(path_self):
+            p = str(path_self)
+            if p == self._missing_path:
+                raise FileNotFoundError('genuinely gone')
+            raise OSError(5, 'EIO: simulated input/output error')
+
+        with patch.object(Path, 'stat', new=fake_stat):
+            removed = prune_missing(bot, 1)
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(len(bot.videos[1]), 2)
+        self.assertIn(self._kept_video, bot.videos[1])
+        self.assertIn(self._kept2_video, bot.videos[1])
+        self.assertNotIn(self._missing_video, bot.videos[1])
+        bot.save.assert_called_once()
 
 
 class TestClassifyYtError(unittest.TestCase):

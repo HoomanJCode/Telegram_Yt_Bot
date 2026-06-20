@@ -71,9 +71,76 @@ def save_data(bot):
 def find_existing(bot, uid, video_id, media_type='video', quality='best'):
     """Find an existing record - quality-aware to allow separate entries per quality"""
     for v in bot.videos.get(uid, []):
-        if v.video_id == video_id and v.media_type == media_type and Path(v.file_path).exists():
+        if v.file_path and _path_on_disk(v.file_path) and v.video_id == video_id and v.media_type == media_type:
             return v
     return None
+
+def _path_on_disk(p):
+    """Cheap existence check that does NOT confuse transient OS errors with 'missing'.
+
+    `Path(p).exists()` returns False both for genuinely-deleted files AND
+    for any case where the underlying `stat()` syscall fails for a
+    recoverable reason — NFS hiccup, mid-write EACCES, EIO, EBUSY on
+    Windows, a temporarily-unmounted remote filesystem, etc. For a
+    READ-ONLY consumer (e.g. find_existing for dedup) the False is
+    harmless; it just re-downloads. For a WRITE-AND-PURGE consumer like
+    `prune_missing`, however, returning False means we permanently drop
+    the record from `user_videos.json` — a transient blip on the disk
+    becomes a permanent data loss for the user. We stat() and treat
+    FileNotFoundError as the actual "gone" signal; any other OSError
+    is treated as "still on disk, skip prune and let the next /recent
+    tap retry".
+
+    Malformed paths (e.g. null bytes) raise ValueError from the Path()
+    constructor — this is genuinely-broken stored data, not a transient
+    blip, so we treat it as "gone" (False) so prune_missing cleans it up
+    instead of leaving a perpetually broken entry.
+
+    Empty/None path → False (short-circuited before any Path call: a
+    plain `Path(None)` would raise TypeError, which is NOT an OSError
+    subclass and would otherwise escape both except clauses).
+    """
+    if not p:
+        return False
+    try:
+        Path(p).stat()
+        return True
+    except (FileNotFoundError, ValueError):
+        return False
+    except OSError:
+        return True
+
+def prune_missing(bot, uid):
+    """Drop records whose file is genuinely gone on disk.
+
+    Called eagerly when the user asks for /recent or clicks any recent
+    entry. Operators sometimes clear the downloads/ folder out-of-band
+    (manual disk cleanup, server migration, retention sweep running on a
+    separate scheduler, etc.) and the bot's per-user index falls out of
+    sync. Without this eager purge the user sees ✅/🗑️ mixed entries in
+    /recent and downstream `show_delivery` blows up trying to send a
+    vanished file.
+
+    Uses `_path_on_disk` rather than `Path(...).exists()` so a transient
+    filesystem hiccup (NFS blip, mid-write EACCES, etc.) cannot
+    permanently delete the user's record from `user_videos.json`.
+
+    Preserves record order so the page-based keyboard indices in
+    show_recent stay aligned with the entries they're meant to deliver.
+
+    Returns the number of records removed. Calls `bot.save()` exactly
+    once if anything was actually removed. Safe on missing / empty per-
+    user lists — returns 0 and does NOT call bot.save() in that case.
+    """
+    records = bot.videos.get(uid)
+    if not records:
+        return 0
+    kept = [v for v in records if _path_on_disk(v.file_path)]
+    removed = len(records) - len(kept)
+    if removed:
+        bot.videos[uid] = kept
+        bot.save()
+    return removed
 
 def get_default_delivery(bot, uid):
     """Return user's default delivery method: 'ask', 'telegram', 'link'"""

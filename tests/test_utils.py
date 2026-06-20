@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from app.utils import (
-    esc, _format_comments, _format_description,
+    esc, _format_comments, _format_description, _info_thumbnail_url,
     VIDEO_QUALITY_OPTIONS, AUDIO_QUALITY_OPTIONS, SUBTITLE_MODE_OPTIONS,
     AUTO_FORMAT_OPTIONS, AUTO_FORMAT_LABELS, AUTO_FORMAT_SHORT,
     VIDEO_CONTAINER_OPTIONS, VIDEO_CONTAINER_LABELS, VIDEO_CONTAINER_SHORT,
@@ -1194,6 +1194,107 @@ class TestFormatDescription(unittest.TestCase):
                 # Markdown specials in any input still esc.
                 result = _format_meta("a_b", None, None)
                 self.assertIn(r"\_b", result)
+
+
+class TestInfoThumbnailUrl(unittest.TestCase):
+    """Drive _info_thumbnail_url -- helper that extracts the best thumbnail
+
+    URL from an yt-dlp info dict for the format-choice screen. Operations
+    applied in order: prefer str-shape info[\'thumbnail\'], fall back to the
+    LAST valid list entry of info[\'thumbnails\'] (typically highest-res),
+    return empty for None / non-dict / malformed input. Defensive guards
+    narrow the Bad Request surface so Telegram edit_media never sees a
+    data: URI / non-http scheme / non-str value.
+    """
+
+    def test_none_returns_empty_string(self):
+        self.assertEqual(_info_thumbnail_url(None), "")
+
+    def test_empty_dict_returns_empty_string(self):
+        self.assertEqual(_info_thumbnail_url({}), "")
+
+    def test_non_dict_returns_empty_string(self):
+        # Defensive against future yt-dlp shape changes.
+        self.assertEqual(_info_thumbnail_url([]), "")
+        self.assertEqual(_info_thumbnail_url("not a dict"), "")
+        self.assertEqual(_info_thumbnail_url(42), "")
+
+    def test_string_thumbnail_url_returned_verbatim(self):
+        url = "https://i.ytimg.com/vi/abc/maxresdefault.jpg"
+        self.assertEqual(
+            _info_thumbnail_url({'thumbnail': url}), url)
+
+    def test_string_thumbnail_empty_returns_empty(self):
+        # Mid-failure ``info[\'thumbnail\']=""`` must NOT pass through.
+        self.assertEqual(
+            _info_thumbnail_url({'thumbnail': ""}), "")
+
+    def test_string_thumbnail_non_http_returns_empty(self):
+        # Telegram bot API rejects data URIs / ftp / ws / local paths.
+        for bad in (
+            "data:image/jpeg;base64,Zm9v",
+            "ftp://example.com/thumb.jpg",
+            "ws://example.com/thumb.jpg",
+            "/local/path/to/thumb.jpg",
+        ):
+            with self.subTest(bad=bad):
+                self.assertEqual(
+                    _info_thumbnail_url({'thumbnail': bad}), "")
+
+    def test_string_thumbnail_non_str_returns_empty(self):
+        # yt-dlp has been observed shipping thumbnail as int 0 or None mid-failure.
+        self.assertEqual(
+            _info_thumbnail_url({'thumbnail': 0}), "")
+        self.assertEqual(
+            _info_thumbnail_url({'thumbnail': None}), "")
+
+    def test_thumbnails_list_returns_last_valid_entry(self):
+        # Canonical list ordering: LAST entry = HIGHEST resolution.
+        thumbs = [
+            {'url': 'https://i.ytimg.com/vi/abc/1.jpg',
+             'width': 120, 'height': 90},
+            {'url': 'https://i.ytimg.com/vi/abc/2.jpg',
+             'width': 320, 'height': 180},
+            {'url': 'https://i.ytimg.com/vi/abc/maxresdefault.jpg',
+             'width': 1280, 'height': 720},
+        ]
+        self.assertEqual(
+            _info_thumbnail_url({'thumbnails': thumbs}),
+            'https://i.ytimg.com/vi/abc/maxresdefault.jpg')
+
+    def test_thumbnails_list_with_malformed_entries_returns_first_valid(self):
+        # Future yt-dlp could ship [None, {no_url}, {url: ...}].
+        # Must skip bad entries and return the first valid URL.
+        thumbs = [
+            None,
+            {'width': 320, 'height': 180},
+            'not a dict',
+            {'url': 'data:image/jpeg;base64,AAA'},
+            {'url': 'https://i.ytimg.com/vi/abc/last.jpg'},
+        ]
+        self.assertEqual(
+            _info_thumbnail_url({'thumbnails': thumbs}),
+            'https://i.ytimg.com/vi/abc/last.jpg')
+
+    def test_str_thumbnail_preferred_over_list(self):
+        # When BOTH shapes are present, the single-string form wins.
+        chosen = "https://i.ytimg.com/vi/abc/chosen.jpg"
+        result = _info_thumbnail_url({
+            'thumbnail': chosen,
+            'thumbnails': [{
+                'url': 'https://i.ytimg.com/vi/abc/other.jpg',
+            }],
+        })
+        self.assertEqual(result, chosen)
+
+    def test_thumbnails_list_empty_returns_empty(self):
+        self.assertEqual(
+            _info_thumbnail_url({'thumbnails': []}), "")
+
+    def test_thumbnails_list_non_list_returns_empty(self):
+        # Future yt-dlp could ship a non-list value.
+        self.assertEqual(_info_thumbnail_url({"thumbnails": "oops"}), "")
+        self.assertEqual(_info_thumbnail_url({"thumbnails": {}}), "")
 
 
 class TestFormatComments(unittest.TestCase):

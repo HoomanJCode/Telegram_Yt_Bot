@@ -1364,6 +1364,61 @@ class TestCommentSliceDefensiveness(unittest.TestCase):
             ' is visually distinguishable from the comments block.'
         )
 
+        # Thumbnail display structural pins. 3 discursive anchors
+        # collectively ensure the photo-edit path stays wired
+        # end-to-end so users see a thumbnail above the format-picker
+        # kb on every video with a thumbnail. A future refactor that
+        # reverts to plain text-only fails all 3 of these pins loudly.
+        self.assertIn(
+            '_info_thumbnail_url(',
+            mod_src,
+            'show_format_choice must CALL _info_thumbnail_url(...)'
+            ' (not just rely on the str / list shape heuristic)'
+            ' so the thumbnail URL is testable in isolation and the'
+            ' photo-edit branch can re-render on every fetch.'
+        )
+        # Dual-pin discriminator. `_info_thumbnail_url,` (with
+        # trailing comma) matches ONLY the import-line form
+        # `_info_thumbnail_url,` and is NOT a substring of the
+        # call-site form `_info_thumbnail_url(`. The 2026-06-20
+        # production bug was: helper call added without import,
+        # causing NameError at runtime -- caught here against
+        # `mod_src` (module-level source) which contains BOTH the
+        # import line AND the call site. A function-body-only pin
+        # would miss the missing-import case; the dual-pin against
+        # module-level source catches both halves of the bug class.
+        self.assertIn(
+            '_info_thumbnail_url,',
+            mod_src,
+            'show_format_choice must IMPORT _info_thumbnail_url'
+            ' from app.utils the same way _format_meta was'
+            ' imported -- the 2026-06-20 production bug we'
+            ' fixed in 5942e73 was: present call, missing'
+            ' import. The trailing-comma discriminator matches'
+            ' the import-line form (NOT the call-site form'
+            ' `_info_thumbnail_url(`) so a future refactor that'
+            ' drops the import -- even if the call site is kept'
+            ' -- fails this pin loudly.'
+        )
+        self.assertIn(
+            'edit_media',
+            src,
+            "show_format_choice must invoke Telegram edit_media so"
+            " the placeholder status message is converted to a"
+            " real photo with caption + kb (instead of staying as"
+            " plain text). Without this pin, a future refactor that"
+            " falls through to edit_text silently regresses the"
+            " thumbnail feature on every video."
+        )
+        self.assertIn(
+            'InputMediaPhoto',
+            src,
+            "show_format_choice must use Telegram InputMediaPhoto"
+            " wrapper class so the photo URL is fed to edit_media"
+            " correctly. Guards against a refactor that drops the"
+            " class import and reverts to a custom media shape."
+        )
+
 
         # `_format_meta(` (with the open paren) is the discriminator
         # between the call site and the import statement. The half-rollout

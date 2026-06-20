@@ -3,8 +3,9 @@
 import asyncio
 from pathlib import Path
 from datetime import datetime
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.constants import ParseMode
+from telegram.error import BadRequest, TimedOut, NetworkError, RetryAfter
 from app.utils import (
     esc, find_existing, prune_missing,
     VIDEO_QUALITY_OPTIONS, AUDIO_QUALITY_OPTIONS, SUBTITLE_MODE_OPTIONS,
@@ -12,7 +13,7 @@ from app.utils import (
     VIDEO_QUALITY_OPTIONS, VIDEO_QUALITY_LABELS, AUDIO_QUALITY_LABELS, SUBTITLE_MODE_LABELS,
     VIDEO_CONTAINER_OPTIONS, VIDEO_CONTAINER_LABELS, VIDEO_CONTAINER_SHORT,
     classify_yt_error, friendly_error_msg, _format_comments, _format_description,
-    _format_meta,
+    _format_meta, _info_thumbnail_url,
 )
 from app.models import VideoRecord
 from app.downloader import fetch_info
@@ -181,6 +182,64 @@ async def show_format_choice(bot, uid, url, video_id, msg):
         text = f"{headline}{extras}\n\nChoose format:"
         if len(text) > SAFE_TEXT_MAX:
             text = f"{headline}\n\nChoose format:"
+        # Post-fetch-attachment: convert the "🔍 Fetching info..." status
+        # placeholder into a real Telegram photo with the format-choice
+        # caption + kb when yt-dlp's info dict carries a thumbnail URL AND
+        # the caption fits Telegram's 1024-char photo-caption cap. The
+        # `edit_media` call replaces (does NOT add to) the status
+        # message, so the user sees exactly one message at the end of
+        # the fetch -- the photo, caption, and format-picker kb all on
+        # the same line in their chat. Failing cases fall through to
+        # the `edit_text` path below:
+        #   * `thumb_url` falsy  -> no thumbnail in the info dict.
+        #   * `len(text) > 1024` -> comments-block + description overflows
+        #     the photo-caption cap; the text-only path keeps the whole
+        #     caption visible.
+        #   * `edit_media` raises -> Telegram-side Bad Request (invalid
+        #     URL, server-side download failure, caption parse error).
+        #     The outer try/except already handles it as 'unknown' so
+        #     we deliberately `pass` and let the text-only path
+        #     succeed; users get a slightly less rich layout but the
+        #     download flow still works end-to-end.
+        # Structural pin: the `_info_thumbnail_url(` discriminator is
+        # the unit-testable contract for "which URL would Telegram
+        # display"; the `edit_media` + `InputMediaPhoto` keywords are
+        # the deployment pins so the photo-edit branch can't silently
+        # regress to text-only (which would show no thumbnail to users
+        # on videos that have one).
+        thumb_url = _info_thumbnail_url(info)
+        if thumb_url and len(text) <= 1024:
+            try:
+                await s.edit_media(
+                    media=InputMediaPhoto(
+                        media=thumb_url,
+                        caption=text,
+                        parse_mode=ParseMode.MARKDOWN,
+                    ),
+                    reply_markup=format_choice_kb(bot, uid, video_id),
+                )
+                return
+            except (BadRequest, TimedOut, NetworkError, RetryAfter) as exc:
+                # Network / Bad Request from Telegram -- fall back to
+                # the text-only path so the user still gets the
+                # format-picker even on a bot-side URL fetch failure.
+                # NARROW except list -- a bare `except Exception: pass`
+                # would silently swallow programming bugs (a `NameError`
+                # from a future refactor that drops the `InputMediaPhoto`
+                # import, an `AttributeError` from a malformed call
+                # shape, an `asyncio.TimeoutError` from a hang on the
+                # underlying Bot API transport) and present the user with
+                # the text-only fallback as if Telegram itself rejected
+                # the photo. The 4 telegram.* exceptions here are the
+                # ONLY ones this branch should silently absorb -- every
+                # other exception is a real bug class that should
+                # surface via the outer try/except so the friendly_error
+                # classifier can attach a real message instead of
+                # pretending everything is fine.
+                logger.info(
+                    'show_format_choice: edit_media declined '
+                    '(%s); falling back to edit_text', exc)
+                pass
         await s.edit_text(
             text, parse_mode=ParseMode.MARKDOWN,
             reply_markup=format_choice_kb(bot, uid, video_id))

@@ -204,6 +204,59 @@ def _format_comments(comments):
         lines.append(f'\U0001F464 @{esc(author)}: {esc(text)}')
     return '\n'.join(lines)
 
+
+def _info_thumbnail_url(info):
+    """Return the best thumbnail URL string from an yt-dlp info dict, or '' when none.
+
+    yt-dlp surfaces thumbnails in two info-dict shapes:
+
+      1. ``info['thumbnail']`` -- a single URL string. yt-dlp's documented
+         contract is that this holds the chosen best thumbnail.
+      2. ``info['thumbnails']`` -- a list of {url, width, height, ...} dicts.
+         Empirically ordered with the LAST entry being the highest-resolution
+         maxresdefault-style (e.g. ``i.ytimg.com/vi/<id>/maxresdefault.jpg``).
+
+    We prefer the single-string form (one fewer hop, no error-handling
+    surface) and fall back to the last valid list entry when the str is
+    absent or non-HTTP. Returning '' for any non-dict / None / malformed
+    input lets callers branch with `if thumb_url:` cleanly without a
+    placeholder row above the format-picker kb.
+
+    Defensive against the partial-dict failure modes documented in
+    TestInfoThumbnailUrl -- yt-dlp can return thumbnail keys with
+    non-string values (int counts, None, etc.) during rate-limited
+    responses, and accepting any of those would propagate a TypeError
+    into Telegram's edit_media call chain.
+
+    Inputs accepted:
+      * ``{'thumbnail': 'http://...', 'thumbnails': [...]}`` -> the str.
+      * ``{'thumbnails': [{'url': 'http://...'}, ...]}``    -> last valid URL.
+      * ``{'thumbnail': 'data:...', ...}`` or non-http URL   -> '' (Telegram
+        bot API's edit_media does not accept data URIs nor non-http schemes).
+      * ``None`` / ``{}`` / list of int / boolean            -> ''.
+    """
+    if not info or not isinstance(info, dict):
+        return ''
+    # Str form first -- cheap and the documented yt-dlp contract.
+    thumb = info.get('thumbnail')
+    if isinstance(thumb, str) and thumb.startswith(('http://', 'https://')):
+        return thumb
+    # Fall back to the LAST entry of the thumbnails list (empirically
+    # highest-res). `reversed()` so we return as soon as the first valid
+    # URL is hit instead of walking the whole list upfront. Each `isinstance`
+    # guard is the unit-testable defense -- a future yt-dlp that surfaces
+    # `thumbnails: [None, {'url': '...'}]` returns the valid URL rather
+    # than crashing the format-choice screen via the outer try/except.
+    thumbs = info.get('thumbnails')
+    if isinstance(thumbs, list):
+        for entry in reversed(thumbs):
+            if isinstance(entry, dict):
+                url = entry.get('url')
+                if isinstance(url, str) and url.startswith(('http://', 'https://')):
+                    return url
+    return ''
+
+
 def load_data(bot):
     from app.models import VideoRecord
     try:

@@ -6,6 +6,42 @@ from aiohttp import web
 logger = logging.getLogger('yt_bot')
 DOWNLOADS_DIR = Path('downloads')
 
+
+class _AiohttpNoiseFilter(logging.Filter):
+    """Demote aiohttp's BadHttpMessage probe-spam from ERROR to DEBUG.
+
+    aiohttp's HTTP parser raises `BadHttpMessage` for every malformed probe
+    (missing Host header, junk bytes, unsupported HTTP version) and emits it
+    through the `aiohttp.server` logger with `exc_info=True`.  Because the
+    file server is exposed on a public port we get hit by background scanners
+    many times per minute, drowning out operator logs.
+
+    Mutating `record.levelno` to DEBUG makes our INFO+ StreamHandler skip the
+    record entirely; the traceback never prints.  Real protocol-level errors
+    that don't match these fragments keep their original level.
+    """
+    PATTERNS = (
+        'badhttpmessage',
+        "missing 'host' header",
+        "missing host header",
+        'invalid http method',
+        'invalid http version',
+        'too many headers',
+        'invalid header',
+        'bad request line',
+    )
+
+    def filter(self, record):
+        msg = record.getMessage().lower()
+        if record.levelno >= logging.ERROR and any(p in msg for p in self.PATTERNS):
+            record.levelno = logging.DEBUG
+            record.levelname = 'DEBUG'
+        return True
+
+
+# Install once at import time so it survives across all FileServer instances.
+logging.getLogger('aiohttp.server').addFilter(_AiohttpNoiseFilter())
+
 class FileServer:
     def __init__(self, port=8000):
         self.port = port

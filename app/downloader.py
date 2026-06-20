@@ -1,5 +1,5 @@
 """Synchronous yt-dlp download functions"""
-import logging, tempfile, os, re, subprocess
+import logging, tempfile, os, re, subprocess, shutil
 from pathlib import Path
 import yt_dlp
 from app.utils import (
@@ -12,6 +12,79 @@ logger = logging.getLogger('yt_bot')
 
 DOWNLOADS_DIR = Path('downloads')
 WARP_PROXY = 'http://127.0.0.1:40000'
+
+
+# Minimum free disk space required before starting a download, in bytes.
+# 5 GB comfortably absorbs yt-dlp's worst-case temp usage during HLS/DASH mux
+# (separate audio + video streams + fragments + final MKV all coexisting).
+MIN_DISK_FREE_BYTES = 5 * 1024 ** 3
+
+
+# Keys that turn on yt-dlp's subtitle fetch.  When a download fails with a
+# subtitle-throttle error we retry once with these stripped out so the user
+# still receives the video even when YouTube is 429-ing the subtitle endpoint.
+SUBTITLE_OPTS_KEYS = (
+    'writesubtitles', 'writeautomaticsub', 'subtitleslangs',
+    'subtitlesformat', 'keepautosubs',
+)
+
+
+class StorageFullError(Exception):
+    """Raised by `download()` when pre-flight disk check rejects the request."""
+
+
+def _has_disk_space(min_bytes=MIN_DISK_FREE_BYTES):
+    """Return True if `DOWNLOADS_DIR` has >= min_bytes free on its filesystem.
+
+    Resolved to an absolute path so `shutil.disk_usage` always consults the
+    correct mount, even if the bot is somehow started from a different cwd.
+    Returns True (don't block) when the OS can't report free space — we never
+    want a measurement error to make the bot stop accepting requests.
+    """
+    try:
+        return shutil.disk_usage(str(DOWNLOADS_DIR.resolve())).free >= min_bytes
+    except OSError:
+        return True
+
+
+def _is_subtitle_throttle(exc):
+    """True if `exc` looks like a yt-dlp subtitle fetch being rate-limited.
+
+    Used by `_extract_with_subtitle_fallback` to decide whether to retry once
+    without `--write-subtitles` so we still deliver the video to the user.
+
+    Tightened on purpose: a bare `HTTP Error 429` or `Too Many Requests`
+    elsewhere in the call chain (format-fetch, manifest, cover-art) is NOT
+    matched here.  Triggering the retry for those wastes time and — if the
+    retry also fails — causes the friendly-error classifier to surface a
+    misleading "video downloaded without subtitles" message even though no
+    video was delivered.  Better to fall through to `unknown` and let the user
+    see "❌ Failed to fetch video info. Try again in a moment."
+    """
+    msg = str(exc).lower()
+    if 'unable to download video subtitles' in msg:
+        return True
+    if 'subtitle' in msg and ('429' in msg or 'too many requests' in msg):
+        return True
+    return False
+
+
+def _extract_with_subtitle_fallback(opts, label, extract_fn):
+    """Call `extract_fn` via `_run_ydl`; on a subtitle-throttle error retry once
+    with `opts` rebuilt without subtitle-related keys.  All other exceptions
+    propagate unchanged so the Warp-proxy transient retry in `_run_ydl` still
+    runs.
+    """
+    try:
+        return _run_ydl(opts, label, extract_fn)
+    except Exception as e:
+        if not _is_subtitle_throttle(e):
+            raise
+        logger.warning(
+            '%s: subtitle throttle (%s); retrying without subs',
+            label, str(e)[:120])
+        no_sub_opts = {k: v for k, v in opts.items() if k not in SUBTITLE_OPTS_KEYS}
+        return _run_ydl(no_sub_opts, label + '_no_subs', extract_fn)
 
 
 # Transient connection-level errors that suggest the configured proxy
@@ -180,6 +253,13 @@ def download(bot, uid, url, media_type, video_quality=None, audio_quality=None, 
     subtitle_files is a list of paths populated when sub_mode='separate' or when the
     embed-merge step fails (fallback so user still receives the subs as files).
     """
+    # Storage-full short-circuit: refuse before touching yt-dlp so the user
+    # gets a clear `disk_error` message instead of an opaque yt-dlp OSError.
+    if not _has_disk_space():
+        raise StorageFullError(
+            'Less than 5 GB free on bot storage — refusing to start a download '
+            'that would crash mid-flight.')
+
     base_opts = {
         'cookiefile': _cookie_file(bot, uid),
         'quiet': True, 'no_warnings': True,
@@ -238,7 +318,7 @@ def download(bot, uid, url, media_type, video_quality=None, audio_quality=None, 
         extracted = ydl.extract_info(url, download=True)
         return extracted, ydl.prepare_filename(extracted)
 
-    info, fp = _run_ydl(opts, 'download', _extract)
+    info, fp = _extract_with_subtitle_fallback(opts, 'download', _extract)
 
     title = info.get('title', 'Unknown')
     vid = info.get('id', '')

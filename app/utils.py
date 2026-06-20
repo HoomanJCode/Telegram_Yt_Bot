@@ -163,6 +163,15 @@ _YT_ERROR_PATTERNS = (
                          'removed for copyright')),
     ('unavailable',     ('video unavailable',)),
     ('playability',     ('playability',)),
+    # Both new categories live at the end so they do not shadow the more
+    # specific yt-dlp error families above.  The `subtitle_throttled` line
+    # deliberately matches ONLY yt-dlp's canonical phrasing — bare
+    # `HTTP Error 429` / `Too Many Requests` (e.g., format-fetch rate-limits)
+    # fall through to `unknown` so the user gets an honest "try again"
+    # message instead of a misleading "video downloaded" claim.
+    ('subtitle_throttled', ('unable to download video subtitles',)),
+    ('disk_error', ('less than 5 gb free', 'no space left on device',
+                    'errno 28')),
 )
 
 
@@ -179,6 +188,8 @@ _YT_ERROR_MESSAGES = {
     'removed':          '⚠️ Removed by the uploader or for copyright.',
     'cookies_required': '🔑 Login required. Upload fresh cookies with /cookies.',
     'playability':      '🚫 YouTube refused playback. Try again or refresh cookies.',
+    'subtitle_throttled': '✅ Video downloaded without subtitles (YouTube rate-limited them). Try again in a minute if you need them.',
+    'disk_error':       '💾 Bot storage full. Free up some space or wait a few minutes and retry.',
     'unknown':          '❌ Failed to fetch video info. Try again in a moment.',
 }
 

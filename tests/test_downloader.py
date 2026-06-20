@@ -18,6 +18,12 @@ from app.downloader import (
     _merge_subs_into_mkv,
     _is_proxy_transient_error,
     _opts_with_proxy,
+    _has_disk_space,
+    _is_subtitle_throttle,
+    _extract_with_subtitle_fallback,
+    SUBTITLE_OPTS_KEYS,
+    MIN_DISK_FREE_BYTES,
+    StorageFullError,
     WARP_PROXY,
     VIDEO_QUALITY_FMT,
     AUDIO_QUALITY_FMT,
@@ -359,6 +365,189 @@ class TestOptsWithProxy(unittest.TestCase):
         # If base already had a proxy, the helper overwrites it.
         out = _opts_with_proxy({**self.base, 'proxy': 'http://old:9999'}, True)
         self.assertEqual(out['proxy'], WARP_PROXY)
+
+
+class TestHasDiskSpace(unittest.TestCase):
+    """Pre-flight check in download() that refuses when <5GB free."""
+
+    def test_passes_when_well_above_threshold(self):
+        with patch('app.downloader.shutil.disk_usage') as mock_usage:
+            mock_usage.return_value = MagicMock(free=20 * 1024 ** 3)
+            self.assertTrue(_has_disk_space())
+
+    def test_passes_at_exact_threshold(self):
+        # 5 GB exactly -> still allowed (>= comparison, not strict).
+        with patch('app.downloader.shutil.disk_usage') as mock_usage:
+            mock_usage.return_value = MagicMock(free=5 * 1024 ** 3)
+            self.assertTrue(_has_disk_space())
+
+    def test_fails_one_byte_below_threshold(self):
+        with patch('app.downloader.shutil.disk_usage') as mock_usage:
+            mock_usage.return_value = MagicMock(free=5 * 1024 ** 3 - 1)
+            self.assertFalse(_has_disk_space())
+
+    def test_fails_well_below_threshold(self):
+        with patch('app.downloader.shutil.disk_usage') as mock_usage:
+            mock_usage.return_value = MagicMock(free=500 * 1024 ** 2)  # 500 MB
+            self.assertFalse(_has_disk_space())
+
+    def test_os_error_returns_true_does_not_block(self):
+        # If the OS can't report free space, don't lock users out.
+        with patch('app.downloader.shutil.disk_usage',
+                   side_effect=OSError('not a real disk')):
+            self.assertTrue(_has_disk_space())
+
+    def test_default_threshold_is_5gb(self):
+        # Sanity: ensure constant matches the friendly-error wording.
+        self.assertEqual(MIN_DISK_FREE_BYTES, 5 * 1024 ** 3)
+
+    def test_custom_threshold_passes_argument_through(self):
+        with patch('app.downloader.shutil.disk_usage') as mock_usage:
+            mock_usage.return_value = MagicMock(free=2 * 1024 ** 3)
+            # 1 GB threshold -> passes
+            self.assertTrue(_has_disk_space(min_bytes=1 * 1024 ** 3))
+            # 4 GB threshold -> fails
+            self.assertFalse(_has_disk_space(min_bytes=4 * 1024 ** 3))
+
+
+class TestIsSubtitleThrottle(unittest.TestCase):
+    """_is_subtitle_throttle — the classifier that decides whether to retry.
+
+    Tightened: bare `HTTP Error 429` / `Too Many Requests` (e.g., format-fetch
+    rate-limits) is deliberately NOT matched here, otherwise a wasted retry
+    would surface a misleading "video downloaded successfully" friendly
+    message even when nothing was delivered.
+    """
+
+    def _exc(self, msg):
+        return RuntimeError(msg)
+
+    def test_canonical_yt_dlp_throttle_message(self):
+        e = self._exc("ERROR: Unable to download video subtitles for 'en': "
+                     "HTTP Error 429: Too Many Requests")
+        self.assertTrue(_is_subtitle_throttle(e))
+
+    def test_subtitle_with_429(self):
+        self.assertTrue(_is_subtitle_throttle(
+            self._exc('subtitle fetch failed: HTTP Error 429')))
+
+    def test_subtitle_with_too_many_requests(self):
+        self.assertTrue(_is_subtitle_throttle(
+            self._exc('Subtitle download was rate-limited, too many requests')))
+
+    def test_bare_429_is_not_subtitle_throttle(self):
+        # Tightened on purpose: bare `HTTP Error 429` (format-fetch,
+        # manifest, cover-art) must NOT trigger the subtitle-fallback retry.
+        self.assertFalse(_is_subtitle_throttle(
+            self._exc('HTTP Error 429 in format fetch')))
+
+    def test_bare_too_many_requests_is_not_subtitle_throttle(self):
+        self.assertFalse(_is_subtitle_throttle(self._exc('Too Many Requests')))
+
+    def test_video_unavailable_is_not_throttle(self):
+        # Unrelated error; dropping subtitle opts would not help.
+        self.assertFalse(_is_subtitle_throttle(self._exc('Video unavailable')))
+
+    def test_private_video_is_not_throttle(self):
+        self.assertFalse(_is_subtitle_throttle(self._exc('Private video')))
+
+    def test_connection_refused_is_not_subtitle_throttle(self):
+        # Proxy-transient; that's _run_ydl's job, not ours.
+        self.assertFalse(_is_subtitle_throttle(
+            self._exc('Connection refused')))
+
+    def test_empty_message_is_not_throttle(self):
+        self.assertFalse(_is_subtitle_throttle(self._exc('')))
+
+
+class TestExtractWithSubtitleFallback(unittest.TestCase):
+    """_extract_with_subtitle_fallback — retry once without subs on 429."""
+
+    def test_first_call_succeeds_no_retry(self):
+        with patch('app.downloader._run_ydl') as mock_run:
+            mock_run.return_value = ('info', '/tmp/video.mp4')
+            result = _extract_with_subtitle_fallback(
+                {'writesubtitles': True, 'format': 'best',
+                 'outtmpl': '/tmp/%(title)s.%(ext)s'},
+                'download_test',
+                lambda ydl: ydl.extract_info('url', download=True),
+            )
+            self.assertEqual(result, ('info', '/tmp/video.mp4'))
+            self.assertEqual(mock_run.call_count, 1)
+            # First call had the ORIGINAL opts (with subtitle keys).
+            opts = mock_run.call_args_list[0][0][0]
+            self.assertIn('writesubtitles', opts)
+            self.assertEqual(opts['format'], 'best')
+
+    def test_subtitle_throttle_triggers_retry_without_subtitle_opts(self):
+        with patch('app.downloader._run_ydl') as mock_run:
+            mock_run.side_effect = [
+                RuntimeError("ERROR: Unable to download video subtitles for "
+                             "'en': HTTP Error 429: Too Many Requests"),
+                ('info', '/tmp/video.mp4'),
+            ]
+            result = _extract_with_subtitle_fallback(
+                {**{'writesubtitles': True, 'writeautomaticsub': True,
+                    'subtitleslangs': ['en'],
+                    'subtitlesformat': 'srt/best/vtt',
+                    'keepautosubs': True},
+                 'format': 'best', 'outtmpl': '/tmp/%(title)s.%(ext)s'},
+                'download_test',
+                lambda ydl: ydl.extract_info('url', download=True),
+            )
+            self.assertEqual(result, ('info', '/tmp/video.mp4'))
+            self.assertEqual(mock_run.call_count, 2)
+            # Second call must NOT have any of the subtitle keys.
+            second_opts = mock_run.call_args_list[1][0][0]
+            for k in SUBTITLE_OPTS_KEYS:
+                self.assertNotIn(k, second_opts,
+                                 f'{k} should have been stripped on retry')
+            # Other keys preserved
+            self.assertEqual(second_opts['format'], 'best')
+            self.assertEqual(second_opts['outtmpl'], '/tmp/%(title)s.%(ext)s')
+            # Second label is suffixed for log attribution
+            self.assertEqual(
+                mock_run.call_args_list[1][0][1], 'download_test_no_subs')
+
+    def test_non_throttle_exception_propagates_without_retry(self):
+        with patch('app.downloader._run_ydl') as mock_run:
+            mock_run.side_effect = RuntimeError('Video unavailable')
+            with self.assertRaises(RuntimeError) as cm:
+                _extract_with_subtitle_fallback(
+                    {'writesubtitles': True, 'format': 'best'},
+                    'download_test',
+                    lambda ydl: ydl.extract_info('url', download=True),
+                )
+            self.assertIn('Video unavailable', str(cm.exception))
+            self.assertEqual(mock_run.call_count, 1)
+
+    def test_proxy_transient_propagates_without_subtitle_retry(self):
+        # _run_ydl handles proxy-transient internally; the subtitle fallback
+        # wrapper must not also retry it.
+        with patch('app.downloader._run_ydl') as mock_run:
+            mock_run.side_effect = ConnectionError('Connection refused')
+            with self.assertRaises(ConnectionError):
+                _extract_with_subtitle_fallback(
+                    {'writesubtitles': True, 'format': 'best'},
+                    'download_test',
+                    lambda ydl: ydl.extract_info('url', download=True),
+                )
+            self.assertEqual(mock_run.call_count, 1)
+
+
+class TestStorageFullError(unittest.TestCase):
+    def test_is_an_exception_subclass(self):
+        self.assertTrue(issubclass(StorageFullError, Exception))
+
+    def test_can_be_raised_and_caught(self):
+        with self.assertRaises(StorageFullError):
+            raise StorageFullError('Less than 5 GB free on bot storage')
+
+    def test_message_preserved(self):
+        try:
+            raise StorageFullError('disk is fully dry')
+        except StorageFullError as e:
+            self.assertEqual(str(e), 'disk is fully dry')
 
 
 if __name__ == '__main__':

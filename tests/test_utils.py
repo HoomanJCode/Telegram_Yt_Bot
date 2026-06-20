@@ -294,6 +294,52 @@ class TestClassifyYtError(unittest.TestCase):
             classify_yt_error('THIS LIVE EVENT WILL BEGIN in 5 minutes.'),
             'live_not_started')
 
+    def test_subtitle_throttle_canonical(self):
+        # The exact phrasing yt-dlp emits when subtitle fetch 429s.
+        msg = ("ERROR: Unable to download video subtitles for 'en': "
+               "HTTP Error 429: Too Many Requests")
+        self.assertEqual(classify_yt_error(msg), 'subtitle_throttled')
+
+    def test_subtitle_throttle_bare_429_is_not_subtitle(self):
+        # Regression guard: bare `HTTP Error 429` from a format-fetch or
+        # manifest rate-limit must NOT be classified as `subtitle_throttled`,
+        # otherwise the friendly message would falsely claim the video was
+        # delivered when nothing was. Falls through to `unknown`.
+        self.assertEqual(classify_yt_error('HTTP Error 429'), 'unknown')
+
+    def test_subtitle_throttle_bare_too_many_requests_is_not_subtitle(self):
+        self.assertEqual(classify_yt_error('Too Many Requests'), 'unknown')
+
+    def test_subtitle_throttle_429_with_subtitle_word_is_unknown(self):
+        # Helper-only match: the wrapper will retry, but classifier must not
+        # miscategorize this as subtitle-throttled since it lacks the
+        # canonical `unable to download video subtitles` phrasing.
+        msg = "ERROR: [youtube] abc: subtitle fetch failed: HTTP 429"
+        self.assertEqual(classify_yt_error(msg), 'unknown')
+
+    def test_subtitle_throttle_too_many_requests_with_subtitle_is_unknown(self):
+        msg = "Subtitle download was rate-limited, too many requests"
+        self.assertEqual(classify_yt_error(msg), 'unknown')
+
+    def test_subtitle_throttle_does_not_shadow_unavailable(self):
+        # "Video unavailable" must still hit `unavailable`, not `subtitle_throttled`.
+        self.assertEqual(classify_yt_error('Video unavailable'), 'unavailable')
+
+    def test_disk_error_from_pre_check_string(self):
+        msg = ('Less than 5 GB free on bot storage — refusing to start a '
+               'download that would crash mid-flight.')
+        self.assertEqual(classify_yt_error(msg), 'disk_error')
+
+    def test_disk_error_from_real_yt_dlp_oserror_28(self):
+        # The exact string from the user's incident log:
+        # "ERROR: unable to write data: [Errno 28] No space left on device"
+        msg = ('ERROR: unable to write data: [Errno 28] No space left on device')
+        self.assertEqual(classify_yt_error(msg), 'disk_error')
+
+    def test_disk_error_from_quickjs_oserror(self):
+        msg = ("OSError(28, 'No space left on device')")
+        self.assertEqual(classify_yt_error(msg), 'disk_error')
+
 
 class TestFriendlyErrorMsg(unittest.TestCase):
     """Each category should map to a user-friendly message."""
@@ -302,11 +348,20 @@ class TestFriendlyErrorMsg(unittest.TestCase):
         categories = (
             'live_not_started', 'live_ended', 'unavailable', 'private',
             'age_restricted', 'members_only', 'geo_blocked', 'removed',
-            'cookies_required', 'playability', 'unknown',
+            'cookies_required', 'playability', 'subtitle_throttled',
+            'disk_error', 'unknown',
         )
         for category in categories:
             msg = friendly_error_msg(category)
             self.assertTrue(msg, f'category {category!r} has empty msg')
+
+    def test_subtitle_throttled_message_mentions_subs(self):
+        msg = friendly_error_msg('subtitle_throttled').lower()
+        self.assertIn('subtitle', msg)
+
+    def test_disk_error_message_mentions_storage(self):
+        msg = friendly_error_msg('disk_error').lower()
+        self.assertTrue('storage' in msg or 'space' in msg or '💾' in msg)
 
     def test_unknown_category_returns_unknown_message(self):
         self.assertEqual(friendly_error_msg('garbage'), friendly_error_msg('unknown'))

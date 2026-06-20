@@ -53,6 +53,7 @@ jobs:
           STORAGE_DAYS: ${{ vars.STORAGE_DAYS || '2' }}
           COOKIE_TTL_HOURS: ${{ vars.COOKIE_TTL_HOURS || '0' }}
           MAX_TELEGRAM_SIZE_MB: ${{ vars.MAX_TELEGRAM_SIZE_MB || '50' }}
+          USE_WARP: ${{ secrets.USE_WARP || 'false' }}
         run: |
           cat > /tmp/deploy_script.sh << 'SCRIPTEOF'
           #!/bin/bash
@@ -60,7 +61,7 @@ jobs:
           
           PROJECT_DIR="PROJECT_DIR_PLACEHOLDER"
           SERVICE_NAME="SERVICE_NAME_PLACEHOLDER"
-          
+
           echo "========================================"
           echo "  TelegramYtBot Deployment"
           echo "========================================"
@@ -90,96 +91,100 @@ jobs:
           fi
           
           # Install Cloudflare Warp if missing
-          if ! command -v warp-cli &>/dev/null; then
-            echo "🔧 Installing Cloudflare Warp..."
-            curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-            echo "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/cloudflare-client.list
-            apt-get update -qq
-            apt-get install -y -qq cloudflare-warp
-          fi
-          
-          # Setup Warp only if proxy not working.
-          # Manage warp-svc via systemd with Restart=always so the daemon
-          # auto-recovers if it crashes (no more silent port-40000 outages).
-          # The drop-in overrides the distro unit's ExecStart so --accept-tos
-          # is preserved (don't lose the recent fix: cdbe3c7/687228c/cae94ff).
-          write_warp_override() {
-            mkdir -p /etc/systemd/system/warp-svc.service.d
-            printf '%s\n' \
-              '[Service]' \
-              'ExecStart=' \
-              'ExecStart=/usr/bin/warp-svc --accept-tos' \
-              'Restart=always' \
-              'RestartSec=5' \
-              'StartLimitIntervalSec=120' \
-              'StartLimitBurst=10' \
-              > /etc/systemd/system/warp-svc.service.d/override.conf
-          }
-
-          # Poll the Warp proxy until it answers or the deadline passes.
-          # Used after `systemctl restart warp-svc` because warp-svc does not
-          # bind 40000 the instant systemd says it's started.
-          wait_for_warp_proxy() {
-            local deadline=${1:-10} i
-            for i in $(seq 1 "$deadline"); do
-              if curl --proxy http://127.0.0.1:40000 --max-time 1 https://ifconfig.me 2>/dev/null | grep -q .; then
-                return 0
-              fi
-              sleep 1
-            done
-            return 1
-          }
-
-          if ! wait_for_warp_proxy 3; then
-            echo "🔧 Configuring Cloudflare Warp..."
-            systemctl stop warp-svc 2>/dev/null || true
-            pkill -9 warp-svc 2>/dev/null || true
-            pkill -9 warp-cli 2>/dev/null || true
-            sleep 2
-            rm -f /run/cloudflare-warp/warp_service
-
-            write_warp_override
-            systemctl daemon-reload
-            systemctl enable warp-svc >/dev/null 2>&1 || true
-
-            # Start under systemd (not nohup) so the Restart=always policy applies.
-            systemctl start warp-svc
-            sleep 5
-
-            echo "y" | warp-cli registration new 2>/dev/null || true
-            warp-cli mode proxy
-            warp-cli connect || true
-
-            if wait_for_warp_proxy 10; then
-              echo "  ✓ Warp ready"
-            else
-              echo "  ⚠ Warp proxy not responding yet; systemd (Restart=always) will keep restarting warp-svc"
+          if [ "$USE_WARP" = "true" ]; then
+            if ! command -v warp-cli &>/dev/null; then
+              echo "🔧 Installing Cloudflare Warp..."
+              curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+              echo "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/cloudflare-client.list
+              apt-get update -qq
+              apt-get install -y -qq cloudflare-warp
             fi
-          else
-            # Proxy already works — but make sure the override is in place so
-            # the daemon survives a future crash (and keeps --accept-tos).
-            # If we just wrote the override, restart so the running warp-svc
-            # picks up the new --accept-tos instead of waiting for a crash.
-            if [ ! -f /etc/systemd/system/warp-svc.service.d/override.conf ] \
-              || ! grep -q '^Restart=always' /etc/systemd/system/warp-svc.service.d/override.conf 2>/dev/null; then
+
+            # Setup Warp only if proxy not working.
+            # Manage warp-svc via systemd with Restart=always so the daemon
+            # auto-recovers if it crashes (no more silent port-40000 outages).
+            # The drop-in overrides the distro unit's ExecStart so --accept-tos
+            # is preserved (don't lose the recent fix: cdbe3c7/687228c/cae94ff).
+            write_warp_override() {
+              mkdir -p /etc/systemd/system/warp-svc.service.d
+              printf '%s\n' \
+                '[Service]' \
+                'ExecStart=' \
+                'ExecStart=/usr/bin/warp-svc --accept-tos' \
+                'Restart=always' \
+                'RestartSec=5' \
+                'StartLimitIntervalSec=120' \
+                'StartLimitBurst=10' \
+                > /etc/systemd/system/warp-svc.service.d/override.conf
+            }
+
+            # Poll the Warp proxy until it answers or the deadline passes.
+            # Used after `systemctl restart warp-svc` because warp-svc does not
+            # bind 40000 the instant systemd says it's started.
+            wait_for_warp_proxy() {
+              local deadline=${1:-10} i
+              for i in $(seq 1 "$deadline"); do
+                if curl --proxy http://127.0.0.1:40000 --max-time 1 https://ifconfig.me 2>/dev/null | grep -q .; then
+                  return 0
+                fi
+                sleep 1
+              done
+              return 1
+            }
+
+            if ! wait_for_warp_proxy 3; then
+              echo "🔧 Configuring Cloudflare Warp..."
+              systemctl stop warp-svc 2>/dev/null || true
+              pkill -9 warp-svc 2>/dev/null || true
+              pkill -9 warp-cli 2>/dev/null || true
+              sleep 2
+              rm -f /run/cloudflare-warp/warp_service
+
               write_warp_override
               systemctl daemon-reload
-              systemctl restart warp-svc \
-                || { echo "  ⚠ systemctl restart warp-svc failed (exit $?). systemd (Restart=always) will retry."; }
-              # Re-assert proxy mode + connection. timeout guards against hung
-              # warp-cli stalling the deploy.
-              timeout 10 warp-cli mode proxy >/dev/null 2>&1 || true
-              timeout 10 warp-cli connect >/dev/null 2>&1 || true
-              # Poll up to 10s for the proxy to actually answer (warp-svc can
-              # take 2-6s after restart before listening on 40000).
+              systemctl enable warp-svc >/dev/null 2>&1 || true
+
+              # Start under systemd (not nohup) so the Restart=always policy applies.
+              systemctl start warp-svc
+              sleep 5
+
+              echo "y" | warp-cli registration new 2>/dev/null || true
+              warp-cli mode proxy
+              warp-cli connect || true
+
               if wait_for_warp_proxy 10; then
-                echo "  ✓ Warp override applied, warp-svc restarted, proxy up (Restart=always + --accept-tos)"
+                echo "  ✓ Warp ready"
               else
-                echo "  ⚠ Warp restart did NOT bring the proxy back up; systemd (Restart=always) will keep retrying"
+                echo "  ⚠ Warp proxy not responding yet; systemd (Restart=always) will keep restarting warp-svc"
               fi
             else
-              echo "  ✓ Warp override already in place, proxy up"
+              # Proxy already works — but make sure the override is in place so
+              # the daemon survives a future crash (and keeps --accept-tos).
+              # If we just wrote the override, restart so the running warp-svc
+              # picks up the new --accept-tos instead of waiting for a crash.
+              if [ ! -f /etc/systemd/system/warp-svc.service.d/override.conf ] \
+                || ! grep -q '^Restart=always' /etc/systemd/system/warp-svc.service.d/override.conf 2>/dev/null; then
+                write_warp_override
+                systemctl daemon-reload
+                systemctl restart warp-svc \
+                  || { echo "  ⚠ systemctl restart warp-svc failed (exit $?). systemd (Restart=always) will retry."; }
+                # Re-assert proxy mode + connection. timeout guards against hung
+                # warp-cli stalling the deploy.
+                timeout 10 warp-cli mode proxy >/dev/null 2>&1 || true
+                timeout 10 warp-cli connect >/dev/null 2>&1 || true
+                # Poll up to 10s for the proxy to actually answer (warp-svc can
+                # take 2-6s after restart before listening on 40000).
+                if wait_for_warp_proxy 10; then
+                  echo "  ✓ Warp override applied, warp-svc restarted, proxy up (Restart=always + --accept-tos)"
+                else
+                  echo "  ⚠ Warp restart did NOT bring the proxy back up; systemd (Restart=always) will keep retrying"
+                fi
+              else
+                echo "  ✓ Warp override already in place, proxy up"
+              fi
             fi
+          else
+            echo "⏭️  Cloudflare Warp disabled (USE_WARP=false). Skipping install + setup."
           fi
           
           if [ -d "$PROJECT_DIR/.git" ]; then
@@ -203,6 +208,7 @@ jobs:
           STORAGE_DAYS=STORAGE_DAYS_PLACEHOLDER
           COOKIE_TTL_HOURS=COOKIE_TTL_HOURS_PLACEHOLDER
           MAX_TELEGRAM_FILE_SIZE=MAX_TELEGRAM_SIZE_PLACEHOLDER
+          USE_WARP=USE_WARP_PLACEHOLDER
           EOF
           chmod 600 "$PROJECT_DIR/.env"
           
@@ -230,6 +236,7 @@ jobs:
           print('Token:', 'SET' if c.BOT_TOKEN and 'YOUR_BOT_TOKEN' not in c.BOT_TOKEN else 'MISSING')
           print('Base URL:', c.BASE_DOWNLOAD_LINK)
           print('Storage:', c.STORAGE_DAYS, 'days')
+          print('Use Warp:', c.USE_WARP)
           "
           
           echo "🔧 Creating service..."
@@ -283,6 +290,18 @@ jobs:
           sed -i "s|STORAGE_DAYS_PLACEHOLDER|${STORAGE_DAYS}|g" /tmp/deploy_script.sh
           sed -i "s|COOKIE_TTL_HOURS_PLACEHOLDER|${COOKIE_TTL_HOURS}|g" /tmp/deploy_script.sh
           sed -i "s|MAX_TELEGRAM_SIZE_PLACEHOLDER|${MAX_TELEGRAM_SIZE_MB}|g" /tmp/deploy_script.sh
-          
+          sed -i "s|USE_WARP_PLACEHOLDER|${USE_WARP}|g" /tmp/deploy_script.sh
+
+          # Canonicalize USE_WARP to lowercase "true"/"false" here in the runner
+          # shell (NOT inside the heredoc — that one is `<< 'SCRIPTEOF'`, quoted,
+          # so $USE_WARP would not be expanded and the script would see an empty
+          # string). Mirrors Python's _env_bool accepted set: 1/true/yes/on.
+          RAW_USE_WARP=$(printf '%s' "${USE_WARP:-false}" | tr '[:upper:]' '[:lower:]')
+          case "$RAW_USE_WARP" in
+            1|true|yes|on) USE_WARP=true ;;
+            *)             USE_WARP=false ;;
+          esac
+          echo "  USE_WARP=$USE_WARP"
+
           scp /tmp/deploy_script.sh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/tmp/deploy_script.sh
-          ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} "bash /tmp/deploy_script.sh"
+          ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} "USE_WARP=$USE_WARP bash /tmp/deploy_script.sh"

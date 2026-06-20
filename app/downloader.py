@@ -6,6 +6,7 @@ from app.utils import (
     VIDEO_QUALITY_FMT, AUDIO_QUALITY_FMT,
     get_video_quality, get_audio_quality, get_subtitle_mode,
 )
+from config import Config
 
 logger = logging.getLogger('yt_bot')
 
@@ -47,6 +48,36 @@ def _opts_with_proxy(base, with_proxy):
     if with_proxy:
         out['proxy'] = WARP_PROXY
     return out
+
+
+def _run_ydl(opts, label, run):
+    """Run yt-dlp under the configured proxy strategy.
+
+    * When `Config.USE_WARP` is False (default), call `run(ydl)` once with no
+      proxy. No transient-error retry is needed because there is no proxy to
+      drop.
+    * When `Config.USE_WARP` is True, attempt the call with the Warp proxy;
+      on a transient connection error retry once without the proxy so the bot
+      stays usable if warp-svc is down. The first attempt that does not raise
+      a transient error wins; `run(ydl)` is the same callable across both.
+
+    `label` is used for the log line on transient retry so the failure can be
+    attributed to fetch_info / download / download_thumb.
+    """
+    if Config.USE_WARP:
+        try:
+            with yt_dlp.YoutubeDL(_opts_with_proxy(opts, True)) as ydl:
+                return run(ydl)
+        except Exception as e:
+            if not _is_proxy_transient_error(e):
+                raise
+            logger.info(
+                '%s: warp proxy failed (%s: %s); retrying without proxy',
+                label, type(e).__name__, str(e)[:80])
+            with yt_dlp.YoutubeDL(_opts_with_proxy(opts, False)) as ydl:
+                return run(ydl)
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        return run(ydl)
 
 
 def _sanitize_filename(title):
@@ -139,18 +170,8 @@ def fetch_info(bot, uid, url):
         'no_js_runtimes': True,
         'js_runtimes': {'quickjs': {'path': '/usr/local/bin/qjs'}},
     }
-    try:
-        with yt_dlp.YoutubeDL(_opts_with_proxy(base, True)) as ydl:
-            return ydl.extract_info(url, download=False)
-    except Exception as e:
-        if not _is_proxy_transient_error(e):
-            raise
-        # Warp proxy lookalive: retry once without the proxy opt.
-        logger.info(
-            'fetch_info: warp proxy failed (%s: %s); retrying without proxy',
-            type(e).__name__, str(e)[:80])
-        with yt_dlp.YoutubeDL(_opts_with_proxy(base, False)) as ydl:
-            return ydl.extract_info(url, download=False)
+    return _run_ydl(base, 'fetch_info',
+                    lambda ydl: ydl.extract_info(url, download=False))
 
 def download(bot, uid, url, media_type, video_quality=None, audio_quality=None, sub_mode=None):
     """Download with optional quality/sub_mode overrides.
@@ -208,23 +229,16 @@ def download(bot, uid, url, media_type, video_quality=None, audio_quality=None, 
 
     sub_files_out = []
 
-    # Run yt-dlp; on transient connection failure (Warp down) retry once
-    # without the proxy opt. `info` and `fp` come from whichever attempt
-    # wins, so post-processing (subtitle merge, rename) only runs once.
-    info, fp = None, None
-    try:
-        with yt_dlp.YoutubeDL(_opts_with_proxy(opts, True)) as ydl:
-            info = ydl.extract_info(url, download=True)
-            fp = ydl.prepare_filename(info)
-    except Exception as e:
-        if not _is_proxy_transient_error(e):
-            raise
-        logger.info(
-            'download: warp proxy failed (%s: %s); retrying without proxy',
-            type(e).__name__, str(e)[:80])
-        with yt_dlp.YoutubeDL(_opts_with_proxy(opts, False)) as ydl:
-            info = ydl.extract_info(url, download=True)
-            fp = ydl.prepare_filename(info)
+    # Run yt-dlp with the configured proxy strategy. `_run_ydl` retries once
+    # without the Warp proxy on transient connection errors when USE_WARP=True;
+    # when USE_WARP=False it's a single direct call with no retry.
+    # `info` and `fp` come from whichever attempt wins, so post-processing
+    # (subtitle merge, rename) only runs once.
+    def _extract(ydl):
+        extracted = ydl.extract_info(url, download=True)
+        return extracted, ydl.prepare_filename(extracted)
+
+    info, fp = _run_ydl(opts, 'download', _extract)
 
     title = info.get('title', 'Unknown')
     vid = info.get('id', '')
@@ -333,24 +347,15 @@ def download_thumb(bot, uid, url):
         'no_js_runtimes': True,
         'js_runtimes': {'quickjs': {'path': '/usr/local/bin/qjs'}},
     }
-    info, title, vid = None, None, None
-    try:
-        with yt_dlp.YoutubeDL(_opts_with_proxy(base, True)) as ydl:
-            info = ydl.extract_info(url, download=False)
-            title = info.get('title', 'Unknown')
-            vid = info.get('id', '')
-            ydl.download([url])
-    except Exception as e:
-        if not _is_proxy_transient_error(e):
-            raise
-        logger.info(
-            'download_thumb: warp proxy failed (%s: %s); retrying without proxy',
-            type(e).__name__, str(e)[:80])
-        with yt_dlp.YoutubeDL(_opts_with_proxy(base, False)) as ydl:
-            info = ydl.extract_info(url, download=False)
-            title = info.get('title', 'Unknown')
-            vid = info.get('id', '')
-            ydl.download([url])
+
+    def _thumb(ydl):
+        extracted = ydl.extract_info(url, download=False)
+        t = extracted.get('title', 'Unknown')
+        v = extracted.get('id', '')
+        ydl.download([url])
+        return extracted, t, v
+
+    info, title, vid = _run_ydl(base, 'download_thumb', _thumb)
 
     safe_title = _sanitize_filename(title)
     for ext in ('.jpg', '.webp', '.png'):

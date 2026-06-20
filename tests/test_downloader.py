@@ -21,6 +21,7 @@ from app.downloader import (
     _has_disk_space,
     _is_subtitle_throttle,
     _extract_with_subtitle_fallback,
+    _effective_sub_mode_for_container,
     SUBTITLE_OPTS_KEYS,
     MIN_DISK_FREE_BYTES,
     StorageFullError,
@@ -635,6 +636,130 @@ class TestEnvIntHelper(unittest.TestCase):
     def test_unsigned_int_boundary(self):
         os.environ[self._TEST_KEY] = '9223372036854775807'  # sys.maxsize
         self.assertEqual(_env_int(self._TEST_KEY, 99), 9223372036854775807)
+
+
+class TestMp4ContainerCascade(unittest.TestCase):
+    """Locks in the MP4↔embed cascade contract that the menu's
+    `📝 Subs: SRT` cascade label + the `/settings` warning are based on.
+
+    Two layers:
+
+    1. The pure helper `_effective_sub_mode_for_container(container, sub_mode)`
+       returns the cascade table:
+         auto+embed → embed, mp4+embed → separate, mp4+separate → separate, etc.
+       This is the canonical test surface — easy to read, no mocking.
+
+    2. End-to-end `download()` opts construction: the merge_output_format
+       hint is added iff container='mp4'. We capture opts by
+       monkey-patching `_extract_with_subtitle_fallback` to record the
+       opts dict and raise a sentinel exception that download() will
+       let propagate. Tests assert on the recorded dict.
+    """
+
+    # ---- pure helper: the cascade table ---------------------------
+
+    def test_helper_auto_embed_returns_embed_unchanged(self):
+        # 'auto' container preserves user's embed preference.
+        self.assertEqual(_effective_sub_mode_for_container('auto', 'embed'), 'embed')
+
+    def test_helper_auto_separate_returns_separate(self):
+        self.assertEqual(_effective_sub_mode_for_container('auto', 'separate'), 'separate')
+
+    def test_helper_auto_off_returns_off(self):
+        self.assertEqual(_effective_sub_mode_for_container('auto', 'off'), 'off')
+
+    def test_helper_mp4_embed_cascades_to_separate(self):
+        # The cascade itself — MP4 cannot mux soft subs.
+        self.assertEqual(_effective_sub_mode_for_container('mp4', 'embed'), 'separate')
+
+    def test_helper_mp4_separate_returns_separate(self):
+        # Already 'separate' is fine; no cascade needed.
+        self.assertEqual(_effective_sub_mode_for_container('mp4', 'separate'), 'separate')
+
+    def test_helper_mp4_off_returns_off(self):
+        # Off is off; cascade doesn't add a subtitle file.
+        self.assertEqual(_effective_sub_mode_for_container('mp4', 'off'), 'off')
+
+    # ---- end-to-end: download() opts construction -----------------
+
+    class _OptsCaptured(Exception):
+        """Sentinel: _extract_with_subtitle_fallback raises after recording opts."""
+
+    def _run_download_capture_opts(self, media_type, container, sub_mode):
+        """Invoke download() and capture the opts yt-dlp would receive.
+
+        Strategy: monkey-patch everything that runs before yt-dlp starts,
+        plus `_extract_with_subtitle_fallback` to record opts and raise
+        a sentinel. The sentinel propagates out of download() so the
+        post-download pipeline (rename, sub-merge, etc.) never runs.
+        Returns the captured opts dict.
+        """
+        from app.downloader import download
+        captured = {}
+
+        def fake_extract(opts, label, extract_fn):
+            captured['opts'] = opts
+            raise self._OptsCaptured
+
+        bot = MagicMock()
+        bot._cookie_data = {1: b''}
+        bot._cookie_file_ids = {}
+        bot._cookie_tmpfiles = {1: '/tmp/fake-cookies.txt'}
+        bot.has_ffmpeg = True
+        bot._user_langs = {1: 'en'}
+        bot._user_settings = {1: {}}
+        with patch('app.downloader._has_disk_space', return_value=True), \
+             patch('app.downloader._cookie_file', return_value='/tmp/fake-cookies.txt'), \
+             patch('app.downloader._extract_with_subtitle_fallback',
+                   side_effect=fake_extract), \
+             patch('app.downloader.get_video_container', return_value='auto'), \
+             patch('app.downloader.get_subtitle_mode', return_value='embed'), \
+             patch('app.downloader.get_video_quality', return_value='best'), \
+             patch('app.downloader.get_audio_quality', return_value='best'):
+            try:
+                download(bot, 1, 'http://example.com/v', media_type,
+                         container=container, sub_mode=sub_mode)
+            except self._OptsCaptured:
+                pass
+        return captured.get('opts', {})
+
+    def test_mp4_container_adds_merge_output_format_opt(self):
+        # The whole reason for the merge_output_format hint: yt-dlp needs
+        # to know to remux into MP4 instead of letting the natural
+        # container leak through.
+        opts = self._run_download_capture_opts('video', container='mp4', sub_mode='embed')
+        self.assertEqual(opts.get('merge_output_format'), 'mp4')
+
+    def test_auto_container_does_not_add_merge_output_format_opt(self):
+        # 'auto' container preserves whatever yt-dlp picks natively so
+        # the manual MKV-embed-subtitle mux path (with ffmpeg srt codec)
+        # keeps working. NOT setting merge_output_format is intentional.
+        opts = self._run_download_capture_opts('video', container='auto', sub_mode='embed')
+        self.assertNotIn('merge_output_format', opts)
+
+    def test_mp4_with_separate_sub_mode_still_has_merge_output_format(self):
+        # No cascade needed but the MP4 hint must still be added — the
+        # user's stored separate preference is honored, just routed
+        # through an MP4 container.
+        opts = self._run_download_capture_opts('video', container='mp4', sub_mode='separate')
+        self.assertEqual(opts.get('merge_output_format'), 'mp4')
+
+    def test_writesubtitles_set_after_cascade_top_separate(self):
+        # The cascade changes actual_sub_mode to 'separate' which is !=
+        # 'off' so writesubtitles=True MUST still be set — yt-dlp needs
+        # to fetch the .srt file so the bot can send it as a separate
+        # attachment after download. The cascade is a local route
+        # adjustment, not a real "give up on subs" decision.
+        opts = self._run_download_capture_opts('video', container='mp4', sub_mode='embed')
+        self.assertTrue(opts.get('writesubtitles'))
+        self.assertTrue(opts.get('writeautomaticsub'))
+
+    def test_writesubtitles_omitted_when_container_mp4_and_sub_mode_off(self):
+        # 'off' stays 'off' through the cascade — no subs to download.
+        opts = self._run_download_capture_opts('video', container='mp4', sub_mode='off')
+        self.assertNotIn('writesubtitles', opts)
+        self.assertNotIn('writeautomaticsub', opts)
+        self.assertEqual(opts.get('merge_output_format'), 'mp4')
 
 
 if __name__ == '__main__':

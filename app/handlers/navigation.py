@@ -9,7 +9,8 @@ from app.utils import (
     esc, find_existing, prune_missing,
     VIDEO_QUALITY_OPTIONS, AUDIO_QUALITY_OPTIONS, SUBTITLE_MODE_OPTIONS,
     AUTO_FORMAT_OPTIONS, AUTO_FORMAT_LABELS, AUTO_FORMAT_SHORT,
-    VIDEO_QUALITY_LABELS, AUDIO_QUALITY_LABELS, SUBTITLE_MODE_LABELS,
+    VIDEO_QUALITY_OPTIONS, VIDEO_QUALITY_LABELS, AUDIO_QUALITY_LABELS, SUBTITLE_MODE_LABELS,
+    VIDEO_CONTAINER_OPTIONS, VIDEO_CONTAINER_LABELS, VIDEO_CONTAINER_SHORT,
     classify_yt_error, friendly_error_msg,
 )
 from app.models import VideoRecord
@@ -42,11 +43,19 @@ def menu(bot, uid):
     delivery_label = {'ask': 'Ask', 'telegram': 'Telegram', 'link': 'Link'}.get(delivery, 'Ask')
     vq = settings.get('video_quality', 'best')
     aq = settings.get('audio_quality', 'best')
-    sm = settings.get('subtitle_mode', 'embed')
+    sm_stored = settings.get('subtitle_mode', 'embed')
+    cn_stored = settings.get('video_container', 'auto')
     af = settings.get('auto_format', 'ask')
     vq_short = 'Best' if vq == 'best' else vq.upper() if vq != 'worst' else '~'
     aq_short = 'Best' if aq == 'best' else f"{aq}k" if aq != 'worst' else '~'
-    sm_short = {'embed': 'MKV', 'separate': 'SRT', 'off': 'Off'}.get(sm, 'MKV')
+    # Container-aware subtitle mode: when the user has both container='mp4'
+    # AND subtitle_mode='embed' set, the EFFECTIVE subtitle mode is
+    # 'separate' (the embed-vs-MKV link is broken). Reflect that on the
+    # button label so the user sees what they'll actually receive, not
+    # what their settings dict nominally contains.
+    sm_effective = 'separate' if (cn_stored == 'mp4' and sm_stored == 'embed') else sm_stored
+    sm_short = {'embed': 'MKV', 'separate': 'SRT', 'off': 'Off'}.get(sm_effective, 'MKV')
+    cn_short = VIDEO_CONTAINER_SHORT.get(cn_stored, 'MKV') if cn_stored in VIDEO_CONTAINER_OPTIONS else 'MKV'
     # Defensive: stored `af` may be legacy garbage; menu() reads raw
     # settings for the button label only — `get_auto_format` is the
     # authoritative validator (used in messages.py:on_msg).
@@ -60,7 +69,8 @@ def menu(bot, uid):
         [InlineKeyboardButton(f"🌐 Language: {lang.upper()}", callback_data='lang'),
          InlineKeyboardButton(f"📤 Delivery: {delivery_label}", callback_data='delivery'),
          InlineKeyboardButton(f"🍪 {'✅' if has else '❌'}", callback_data='cs')],
-        [InlineKeyboardButton(f"⚡ Auto: {af_short}", callback_data='af')],
+        [InlineKeyboardButton(f"⚡ Auto: {af_short}", callback_data='af'),
+         InlineKeyboardButton(f"🎞️ Container: {cn_short}", callback_data='cn')],
         [InlineKeyboardButton(f"📦 {vc} files", callback_data='vc')],
     ])
 
@@ -142,12 +152,14 @@ async def router(bot, u, c):
     elif d == 'aq': await _change_audio_quality(bot, u, c)
     elif d == 'sm': await _change_subtitle_mode(bot, u, c)
     elif d == 'af': await _change_auto_format(bot, u, c)
+    elif d == 'cn': await _change_video_container(bot, u, c)
     elif d.startswith('setlang_'): await _set_language(bot, u, c)
     elif d.startswith('setdelivery_'): await _set_delivery(bot, u, c)
     elif d.startswith('setvq_'): await _set_video_quality(bot, u, c)
     elif d.startswith('setaq_'): await _set_audio_quality(bot, u, c)
     elif d.startswith('setsm_'): await _set_subtitle_mode(bot, u, c)
     elif d.startswith('setaf_'): await _set_auto_format(bot, u, c)
+    elif d.startswith('setcn_'): await _set_video_container(bot, u, c)
     elif d == 'cs': await q.message.reply_text("✅ Cookies active" if uid in bot._cookie_data else "❌ Upload with /cookies")
     elif d == 'vc': await q.message.reply_text(f"📦 {len(bot.videos.get(uid,[]))} files")
     elif d == 'clear_all': await _clear_all(bot, u, c)
@@ -327,6 +339,52 @@ async def _set_auto_format(bot, u, c):
     bot.save()
     await q.message.reply_text(
         f"⚡ Auto-format set to {AUTO_FORMAT_LABELS.get(qkey, qkey)}",
+        reply_markup=menu(bot, uid))
+    await q.message.delete()
+
+
+async def _change_video_container(bot, u, c):
+    """Show the per-user video-container picker inline-keyboard."""
+    q = u.callback_query; uid = u.effective_user.id
+    stored = bot._user_settings.get(uid, {}).get('video_container', 'auto')
+    current = stored if stored in VIDEO_CONTAINER_OPTIONS else 'auto'
+    rows = []
+    for opt in VIDEO_CONTAINER_OPTIONS:
+        marker = '✅' if current == opt else '⬜'
+        if opt == 'auto':
+            desc = ' (best codec match, allows MKV sub embed)'
+        else:
+            desc = ' (universal compat; subs come as separate .srt)'
+        rows.append([InlineKeyboardButton(
+            f"{marker} {VIDEO_CONTAINER_LABELS.get(opt, opt)}{desc}",
+            callback_data=f'setcn_{opt}')])
+    rows.append([InlineKeyboardButton("🔙 Back", callback_data='b')])
+    await q.message.reply_text(
+        "🎞️ Default video output container:",
+        reply_markup=InlineKeyboardMarkup(rows))
+    await q.message.delete()
+
+
+async def _set_video_container(bot, u, c):
+    """Persist the user's video_container choice to disk."""
+    q = u.callback_query; await q.answer()
+    uid = u.effective_user.id
+    qkey = q.data[len('setcn_'):]
+    if qkey not in VIDEO_CONTAINER_OPTIONS:
+        return
+    if uid not in bot._user_settings or not isinstance(bot._user_settings.get(uid), dict):
+        bot._user_settings[uid] = {}
+    bot._user_settings[uid]['video_container'] = qkey
+    bot.save()
+    # Surface the cascade so the user understands why their `Subs:` button
+    # label will *visibly* flip to 'SRT' when they pick MP4 + had embed.
+    extra = ''
+    sm_stored = bot._user_settings[uid].get('subtitle_mode', 'embed')
+    if qkey == 'mp4' and sm_stored == 'embed':
+        extra = "\n⚠️ MP4 + embed → subs will come as a separate .srt file."
+    await q.message.reply_text(
+        f"🎞️ Container set to {VIDEO_CONTAINER_LABELS.get(qkey, qkey)}"
+        f"{extra}",
         reply_markup=menu(bot, uid))
     await q.message.delete()
 

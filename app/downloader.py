@@ -5,6 +5,7 @@ import yt_dlp
 from app.utils import (
     VIDEO_QUALITY_FMT, AUDIO_QUALITY_FMT,
     get_video_quality, get_audio_quality, get_subtitle_mode,
+    get_video_container,
 )
 from config import Config
 
@@ -179,6 +180,36 @@ def _vtt_to_srt(vtt_path):
     return None
 
 
+def _effective_sub_mode_for_container(container, sub_mode):
+    """Apply the MP4↔embed cascade locally.
+
+    MP4 cannot natively mux soft subtitles. When the user has picked MP4
+    AND their effective sub_mode would have been 'embed', cascade to
+    'separate' so the download post-processing emits an .srt file alongside
+    the MP4 instead of silently losing subs. The user's STORED sub_mode
+    preference in user_settings.json is NOT mutated — only the effective
+    value used during this download changes, so flipping back to
+    container='auto' restores embed.
+
+    Extracted as a pure helper so TestMp4ContainerCascade can lock in the
+    3-line cascade table without mocking yt_dlp / the whole download
+    pipeline. download() composes it with get_video_container() +
+    get_subtitle_mode() to produce actual_sub_mode.
+
+    | container | sub_mode | effective sub_mode |
+    | --------- | -------- | ------------------ |
+    | 'auto'    | 'embed'    | 'embed'         |
+    | 'auto'    | 'separate' | 'separate'      |
+    | 'auto'    | 'off'      | 'off'           |
+    | 'mp4'     | 'embed'    | 'separate' (cascade) |
+    | 'mp4'     | 'separate' | 'separate'      |
+    | 'mp4'     | 'off'      | 'off'           |
+    """
+    if container == 'mp4' and sub_mode == 'embed':
+        return 'separate'
+    return sub_mode
+
+
 def _merge_subs_into_mkv(video_file, subtitle_files):
     """Merge video + subtitle files into MKV. Returns MKV path on success, None on failure.
 
@@ -249,12 +280,22 @@ def fetch_info(bot, uid, url):
     return _run_ydl(base, 'fetch_info',
                     lambda ydl: ydl.extract_info(url, download=False))
 
-def download(bot, uid, url, media_type, video_quality=None, audio_quality=None, sub_mode=None):
-    """Download with optional quality/sub_mode overrides.
+def download(bot, uid, url, media_type, video_quality=None, audio_quality=None, sub_mode=None, container=None):
+    """Download with optional quality/sub_mode/container overrides.
 
     Returns (file_path, title, video_id, subtitle_files).
     subtitle_files is a list of paths populated when sub_mode='separate' or when the
     embed-merge step fails (fallback so user still receives the subs as files).
+
+    `container`:
+      * None → use the user's `video_container` setting ('auto' default).
+      * 'auto' → yt-dlp picks the natural codec-compatible container, so
+        the manual ffmpeg MKV-embed-subtitles mux path below keeps working.
+      * 'mp4' → yt-dlp's `merge_output_format=mp4` is set so the natural
+        container is remuxed to MP4. This CASCADES `sub_mode='embed'` to
+        `'separate'` for the duration of this download (MP4 cannot natively
+        mux soft subtitles). The user's stored sub_mode preference in
+        user_settings.json is NOT mutated — the cascade is local.
     """
     # Storage-full short-circuit: refuse before touching yt-dlp so the user
     # gets a clear `disk_error` message instead of an opaque yt-dlp OSError.
@@ -272,7 +313,24 @@ def download(bot, uid, url, media_type, video_quality=None, audio_quality=None, 
         'no_js_runtimes': True,
         'js_runtimes': {'quickjs': {'path': '/usr/local/bin/qjs'}},
     }
+    actual_container = container if container is not None else (
+        get_video_container(bot, uid) if media_type == 'video' else 'auto')
     actual_sub_mode = sub_mode or (get_subtitle_mode(bot, uid) if media_type == 'video' else 'off')
+
+    # MP4↔embed cascade: MP4 cannot natively mux soft subtitles, so the
+    # generous 'embed' default would silently lose the subs. The pure
+    # helper `_effective_sub_mode_for_container` holds the cascade
+    # table and is unit-tested in TestMp4ContainerCascade. We re-run
+    # it here (already done above by the operator-level composition)
+    # so the logger fires once per download and the `actual_sub_mode`
+    # variable is the cascaded value used downstream.
+    cascaded = _effective_sub_mode_for_container(actual_container, actual_sub_mode)
+    if cascaded != actual_sub_mode:
+        logger.info(
+            'user %d: container=%s cascades sub_mode=%s → %s '
+            '(MP4 cannot mux soft subs)',
+            uid, actual_container, actual_sub_mode, cascaded)
+        actual_sub_mode = cascaded
 
     if media_type == 'video':
         vq = video_quality or get_video_quality(bot, uid)
@@ -285,10 +343,14 @@ def download(bot, uid, url, media_type, video_quality=None, audio_quality=None, 
             **base_opts,
             'format': VIDEO_QUALITY_FMT.get(vq, VIDEO_QUALITY_FMT['best']),
             'outtmpl': str(DOWNLOADS_DIR / '%(title)s_v.%(ext)s'),
-            # No merge_output_format hint: we always run a manual ffmpeg MKV
-            # mux after download (with embedded subs), so yt-dlp can pick
-            # the natural codec-compatible container for the streams.
+            # merge_output_format is added separately below ONLY on the
+            # 'mp4' container path. For 'auto' we deliberately leave it
+            # unset so yt-dlp picks the natural codec-compatible
+            # container and our manual MKV-embed-subtitle mux path
+            # (with ffmpeg's srt codec) keeps working.
         }
+        if actual_container == 'mp4':
+            opts['merge_output_format'] = 'mp4'
         if actual_sub_mode != 'off':
             opts.update({
                 'writesubtitles': True,

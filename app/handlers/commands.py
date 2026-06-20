@@ -167,7 +167,7 @@ async def settings_cmd(bot, u, c):
     from app.utils import ok
     from app.utils import (
         VIDEO_QUALITY_LABELS, AUDIO_QUALITY_LABELS, SUBTITLE_MODE_LABELS,
-        AUTO_FORMAT_LABELS,
+        AUTO_FORMAT_LABELS, VIDEO_CONTAINER_LABELS,
     )
     from app.handlers.navigation import menu
     uid = u.effective_user.id
@@ -178,19 +178,30 @@ async def settings_cmd(bot, u, c):
     settings = bot._user_settings.get(uid, {})
     vq = settings.get('video_quality', 'best')
     aq = settings.get('audio_quality', 'best')
-    sm = settings.get('subtitle_mode', 'embed')
+    sm_stored = settings.get('subtitle_mode', 'embed')
     delivery = settings.get('default_delivery', 'ask')
     af = settings.get('auto_format', 'ask')
+    container = settings.get('video_container', 'auto')
+    # Container-aware sub_mode: when the user picked MP4 + embed, the
+    # EFFECTIVE sub mode cascades to 'separate' (MP4 cannot mux soft
+    # subs). Show the user what they'll actually get, not the raw stored
+    # value that gets cascaded silently inside the downloader.
+    sm_effective = 'separate' if (container == 'mp4' and sm_stored == 'embed') else sm_stored
     delivery_labels = {
         'ask': 'Ask each time', 'telegram': 'Telegram', 'link': 'Link',
     }
+    extra = ''
+    if container == 'mp4' and sm_stored == 'embed':
+        extra = "\n\n⚠️ MP4 + embed → subs will come as a separate .srt file."
     intro = (
         "⚙️ *Your settings* (tap a button below to change):\n\n"
         f"🎬 Video: {VIDEO_QUALITY_LABELS.get(vq, vq)}\n"
         f"🎵 Audio: {AUDIO_QUALITY_LABELS.get(aq, aq)}\n"
-        f"📝 Subs: {SUBTITLE_MODE_LABELS.get(sm, sm)}\n"
+        f"📝 Subs: {SUBTITLE_MODE_LABELS.get(sm_effective, sm_effective)}\n"
+        f"🎞️ Container: {VIDEO_CONTAINER_LABELS.get(container, container)}\n"
         f"📤 Delivery: {delivery_labels.get(delivery, delivery)}\n"
         f"⚡ Auto-format: {AUTO_FORMAT_LABELS.get(af, af)}"
+        f"{extra}"
     )
     await u.message.reply_text(
         intro, parse_mode='Markdown', reply_markup=menu(bot, uid))

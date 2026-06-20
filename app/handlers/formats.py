@@ -4,19 +4,36 @@ from pathlib import Path
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode, ChatType
 from app.handlers.navigation import nav_push, NAV_FORMAT
-from app.utils import esc, get_default_delivery
+from app.utils import esc, find_existing, get_default_delivery, _path_on_disk
 
 def format_choice_kb(bot, uid, video_id):
-    existing = {v.media_type for v in bot.videos.get(uid, []) if v.video_id == video_id and Path(v.file_path).exists()}
+    # Existing-detection uses the soft-fail-safe _path_on_disk so a transient
+    # filesystem blip on the previously-downloaded file doesn't trigger a
+    # confusing re-download prompt for the user.
+    existing_media_types = {
+        v.media_type for v in bot.videos.get(uid, [])
+        if v.video_id == video_id and _path_on_disk(v.file_path)
+    }
     kb = []
-    v_label = "🎬 Video (MKV)"
-    if 'video' in existing: v_label = "✅ 🎬 Video - Downloaded"
-    kb.append([InlineKeyboardButton(v_label, callback_data='fmt_video')])
+    # The video row is split into two buttons so the user explicitly picks
+    # MP4 vs the natural container (MKV). Both buttons always do a fresh
+    # download with the chosen container — there is no ✅ "Already
+    # Downloaded" marker on the video variants because doing so would
+    # falsely imply that clicking the OTHER variant was a no-op. Users
+    # can have multiple variants of the same video in their history.
+    # Trade-off reminders in the labels make the format ↔ subtitle
+    # relationship explicit (MP4 lacks soft-sub embed).
+    kb.append([InlineKeyboardButton(
+        "🎬 Video (MKV) — best quality + auto-subs", callback_data='fmt_video_mkv')])
+    kb.append([InlineKeyboardButton(
+        "🎬 Video (MP4) — universal compat, subs separate", callback_data='fmt_video_mp4')])
     a_label = f"🎵 Audio ({'MP3' if bot.has_ffmpeg else 'M4A'})"
-    if 'audio' in existing: a_label = "✅ 🎵 Audio - Downloaded"
+    if 'audio' in existing_media_types:
+        a_label = "✅ 🎵 Audio - Downloaded"
     kb.append([InlineKeyboardButton(a_label, callback_data='fmt_audio')])
     t_label = "🖼️ Thumbnails"
-    if 'thumb' in existing: t_label = "✅ 🖼️ Thumbnails - Downloaded"
+    if 'thumb' in existing_media_types:
+        t_label = "✅ 🖼️ Thumbnails - Downloaded"
     kb.append([InlineKeyboardButton(t_label, callback_data='fmt_thumb')])
     kb.append([InlineKeyboardButton("🔙 Back", callback_data='b')])
     return InlineKeyboardMarkup(kb)
@@ -25,17 +42,35 @@ async def choose_format(bot, u, c):
     q = u.callback_query; await q.answer(); uid, fmt = u.effective_user.id, q.data
     if uid not in bot._pending_urls: return
     url, video_id, _ = bot._pending_urls[uid]
-    from app.utils import find_existing
+    # Map (callback_data) -> (media_type, container_override). The container
+    # override lets the format-picker buttons explicitly request a specific
+    # variant per-click, regardless of the user's stored video_container
+    # default (which only kicks in for the auto_format path or when the user
+    # clicks Video under the old single-button keyboard).
+    mt_map = {
+        'fmt_video_mkv': ('video', 'auto'),
+        'fmt_video_mp4': ('video', 'mp4'),
+        'fmt_audio':     ('audio', 'auto'),
+        'fmt_thumb':     ('thumb', 'auto'),
+    }
+    if fmt not in mt_map:
+        return
+    mt, container_override = mt_map[fmt]
+    # Audio and thumb have only one variant in their picker, so dedup by
+    # find_existing is still meaningful: a second click is genuinely
+    # redundant work the user didn't intend. Video skips dedup because
+    # the two variants (MKV / MP4) are independent download artifacts
+    # even for the same video_id.
+    if mt in ('audio', 'thumb'):
+        existing = find_existing(bot, uid, video_id, mt)
+        if existing:
+            await q.answer("Already downloaded!")
+            await show_delivery(bot, q.message, existing, bot.videos[uid].index(existing))
+            return
     from app.handlers.messages import download_task
-    for mt, fk in [('video', 'fmt_video'), ('audio', 'fmt_audio'), ('thumb', 'fmt_thumb')]:
-        if fmt == fk:
-            existing = find_existing(bot, uid, video_id, mt)
-            if existing:
-                await q.answer("Already downloaded!")
-                await show_delivery(bot, q.message, existing, bot.videos[uid].index(existing))
-                return
-            async with bot._download_semaphore:
-                await download_task(bot, uid, url, q.message, mt)
+    async with bot._download_semaphore:
+        await download_task(bot, uid, url, q.message, mt,
+                            container_override=container_override)
 
 async def show_delivery(bot, msg, record, idx):
     uid = msg.chat.id

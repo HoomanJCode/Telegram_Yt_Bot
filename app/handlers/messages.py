@@ -8,7 +8,7 @@ from app.models import VideoRecord
 from app.downloader import download, fetch_info
 from app.utils import (
     extract_url, extract_video_id, find_existing, esc, ok,
-    get_default_delivery, get_auto_format,
+    get_default_delivery, get_auto_format, get_video_container,
     classify_yt_error, friendly_error_msg,
 )
 from app.utils import AUTO_FORMAT_OPTIONS
@@ -45,7 +45,8 @@ async def on_msg(bot, u, c):
             await show_delivery(bot, msg, existing, bot.videos[uid].index(existing))
             return
         async with bot._download_semaphore:
-            await download_task(bot, uid, url, msg, auto)
+            await download_task(bot, uid, url, msg, auto,
+                                container_override=get_video_container(bot, uid))
         return
     await show_format_choice(bot, uid, url, video_id, msg)
 
@@ -101,14 +102,21 @@ async def _group_download(bot, uid, url, msg, media_type, video_id):
         logger.error("Group download error [%s]: %s", category, str(e)[:200])
         await msg.reply_text(friendly_error_msg(category), reply_to_message_id=msg.message_id)
 
-async def download_task(bot, uid, url, msg, media_type):
+async def download_task(bot, uid, url, msg, media_type, container_override=None):
     from app.downloader import download_thumb
     s = await msg.reply_text(f"⏳ Downloading {media_type}...")
     try:
         if media_type == 'thumb':
             fp, title, vid, sub_files = await asyncio.get_event_loop().run_in_executor(None, download_thumb, bot, uid, url)
         else:
-            fp, title, vid, sub_files = await asyncio.get_event_loop().run_in_executor(None, download, bot, uid, url, media_type)
+            # Pass through the per-call container choice so callers
+            # (format_choice_kb's MKV/MP4 buttons, auto_format=='video'
+            # branch) get to override the user's stored container
+            # setting exactly for this download without mutating it.
+            fp, title, vid, sub_files = await asyncio.get_event_loop().run_in_executor(
+                None, download, bot, uid, url, media_type,
+                video_quality=None, audio_quality=None,
+                sub_mode=None, container=container_override)
         sz = Path(fp).stat().st_size
         record = VideoRecord(title, url, vid, fp, sz, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), media_type=media_type)
         bot.videos.setdefault(uid, []).insert(0, record)

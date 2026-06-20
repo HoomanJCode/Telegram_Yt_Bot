@@ -354,6 +354,180 @@ def _effective_sub_mode_for_container(container, sub_mode):
     return sub_mode
 
 
+# Single-core-VPS smart-skip (2026-06-21 response to user feedback
+# "ffmpeg processing is high for my single-core VPS"): an ffprobe
+# probe after yt-dlp's natural merge tells us whether the post-merge
+# audio stream a:0 is already in a universal-codec set (currently
+# just `aac`). If so, the AAC re-encode would be pure wasted CPU --
+# skip the helper call entirely. Net savings on a single-core VPS:
+# ~30-90s of CPU per AAC-source download becomes ~1-2s of probe
+# cost. Negligible for Opus-source downloads (the actual TV-fix
+# case) where the probe and the transcode still both run.
+#
+# Probe failure semantic (deliberate): ffprobe missing, file corrupt,
+# timeout, no audio stream -> returns '' -> falls through to the
+# active transcode. Operators who explicitly set AAC_TRANSCODE=true
+# really DO want the TV fix; a probe blip silently disabling that
+# would surprise them. CPU-conservative operators should set
+# AAC_TRANSCODE=false in .env to skip the whole gate conjunct chain,
+# not rely on probe failure to skip.
+_AAC_SKIP_CODECS = frozenset({'aac'})
+
+
+def _probe_audio_codec(video_file):
+    """ffprobe the first audio stream's codec_name. Returns '' on probe failure.
+
+    Pin to the FIRST audio stream (`a:0`) as the primary-track
+    marker. The transcode helper's `-c:a aac -map 0` re-encodes
+    ALL audio streams (not just `a:0`), so pinning the probe to
+    `a:0` is a primary-track marker rather than a comprehensive
+    multi-track scan. Multi-track videos where a:0 is AAC but
+    secondary tracks are Opus will pass the probe (skip the
+    transcode) even though the helper would have re-encoded all
+    tracks anyway -- this is the documented contract. If multi-
+    track audio semantics become operationally important, broaden
+    the probe to enumerate all audio streams.
+
+    Output format pin (`-of csv=p=0` OR positional on the
+    `_AAC_SKIP_CODECS` check, NOT a substring match): `-of csv=p=0`
+    makes ffprobe emit ONLY the codec_name string on stdout, no
+    verbose header/footer. Any other `-of` value would require the
+    caller to parse ffprobe's verbose text output, which would be
+    fragile across ffprobe versions.
+
+    Cost: ~1-2s on multi-GB files (reads metadata header only, NOT
+    the full audio stream). Returns the lowercased codec name
+    ('aac', 'opus', 'mp3', 'flac', ...) on success, or '' on any
+    failure mode the caller should treat as "unknown -- fall
+    through to the active transcode".
+    """
+    if not video_file or not Path(video_file).exists():
+        return ''
+    cmd = [
+        'ffprobe', '-v', 'error',
+        '-select_streams', 'a:0',
+        '-show_entries', 'stream=codec_name',
+        '-of', 'csv=p=0',
+        video_file,
+    ]
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=10)
+        if result.returncode == 0 and result.stdout:
+            return result.stdout.strip().lower()
+    except Exception:
+        pass
+    return ''
+
+
+def _is_already_universal_codec(video_file):
+    """True if post-merge audio stream a:0 is already in `_AAC_SKIP_CODECS`.
+
+    Single source of truth for whether the smart-skip in `download()`'s
+    AAC transcode gate fires. Wraps `_probe_audio_codec` so callers
+    can pin the boolean contract without knowing the ffprobe
+    invocation shape.
+
+    Probe failure -> False (treat as unknown -> fall through to
+    ffmpeg re-encode). See module-level comment above for rationale.
+    """
+    try:
+        return _probe_audio_codec(video_file) in _AAC_SKIP_CODECS
+    except Exception:
+        return False
+
+
+def _transcode_audio_to_aac(video_file, title=None):
+    """Re-encode a video file's audio stream to AAC (192kbps), leaving the
+    video stream alone.
+
+    Triggered when `Config.AAC_TRANSCODE` is True -- we explicitly
+    hand-fan Opus audio through ffmpeg because (a) `merge_output_format=mp4`
+    auto-transcodes Opus->AAC during yt-dlp's merge, so the `container='mp4'`
+    path is intentionally excluded at the caller, and (b) for any other
+    container (MKV / WEBM / natural) yt-dlp's merge simply stream-copies
+    the Opus track verbatim. Some smart TVs without an Opus hardware
+    decoder then expose the audio as 'audio codec: none' even though AVC
+    video plays. Re-encoding to AAC at 192kbps is mathematically near-
+    lossless for typical YouTube 128-160kbps Opus source so quality hits
+    a universal-codec payoff floor.
+
+    Mechanics mirror `_merge_subs_into_mkv`:
+      1. Write ffmpeg output to a unique `<file>.transcode.tmp.<ext>` so the
+         input / output paths never collide (an input MKV that gets
+         remuxed to itself would corrupt the file under any read+write
+         collision).
+      2. `-c:v copy` so the AVC stream goes through with zero decode/re-
+         encode CPU cost. The 30-90s total transcode cost is dominated by
+         the AAC re-encode.
+      3. `-c:a aac -b:a 192k` with the native ffmpeg `aac` encoder. We
+         deliberately do NOT pin to `libfdk_aac` -- the native encoder is
+         ubiquitous on every Linux VPS ffmpeg build, while libfdk lives
+         behind a license flag and isn't installed everywhere. 192kbps is
+         the sweet spot for stereo near-transparency; below 128kbps the
+         codec artifacts become audible against a typical YouTube Opus
+         128k source.
+      4. `-map 0` selects every input stream, so a video with no audio
+         at all produces an output with no audio stream (no crash, no
+         fake-silent-track). The native `aac` encoder is a safe no-op on
+         an empty audio muxer.
+      5. `-metadata title=...` mirrors `_merge_subs_into_mkv`'s title
+         passthrough so the resulting file keeps the YouTube title in
+         VLC / mpv / Plex. Control characters / newlines are stripped to
+         keep a malicious title from smuggling an ffmpeg flag into the
+         argv list.
+      6. Output extension matches the input's extension so the downstream
+         filename-sanitize step in download() doesn't need to know we
+         touched the file.
+      7. Atomic os.replace on success; temp file unlinked on failure.
+         Mid-flight ffmpeg crash leaves the original video intact
+         (caller falls through to delivering the untranscoded file -- a
+         degraded-but-functional outcome, not a 500 to the user).
+
+    Returns the new file path on success, None on any ffmpeg error so the
+    caller can fall through to the untranscoded original. The user's
+    delivery UX is preserved in both branches -- only the audio track
+    is swapped silently.
+    """
+    if not video_file or not Path(video_file).exists():
+        return None
+    src_ext = Path(video_file).suffix.lower() or '.mkv'
+    out_path = video_file
+    tmp_file = f"{video_file}.transcode.tmp{src_ext}"
+
+    cmd = [
+        'ffmpeg', '-y', '-loglevel', 'error',
+        '-i', video_file,
+        '-map', '0',
+        '-c:v', 'copy',
+        '-c:a', 'aac', '-b:a', '192k',
+    ]
+    if title:
+        # Same control-stripping rationale as _merge_subs_into_mkv --
+        # prevent a weird YouTube title from injecting ffmpeg flags.
+        safe_title = re.sub(r'[\x00-\x1f\x7f]', '', str(title)).strip()
+        if safe_title:
+            cmd.extend(['-metadata', f'title={safe_title}'])
+    cmd.append(tmp_file)
+
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=300)
+        if (result.returncode == 0
+                and Path(tmp_file).exists()
+                and Path(tmp_file).stat().st_size > 0):
+            os.replace(tmp_file, out_path)
+            return out_path
+    except Exception:
+        pass
+    # Cleanup temp on any failure so the downloads dir doesn't accumulate
+    # half-written transcode attempts.
+    if Path(tmp_file).exists():
+        try: os.unlink(tmp_file)
+        except: pass
+    return None
+
+
 def _merge_subs_into_mkv(video_file, subtitle_files, title=None, sub_languages=None):
     """Merge video + subtitle files into MKV. Returns MKV path on success, None on failure.
 
@@ -699,6 +873,69 @@ def download(bot, uid, url, media_type, video_quality=None, audio_quality=None, 
             for sub in watched_subs:
                 try: os.unlink(sub)
                 except: pass
+
+    # 2026-06-21 always-on audio transcode (TV fix): ensure the file's
+    # audio track decodes universally on legacy smart TVs that lack an
+    # Opus hardware decoder. Skipped on `container='mp4'` because
+    # yt-dlp's merge pipeline already auto-transcodes Opus->AAC for
+    # MP4 output (see comment on `opts['merge_output_format']='mp4'`
+    # above); running ffmpeg again would burn 30-90s of CPU for no
+    # audio change. Skipped on `media_type != 'video'` (audio/thumb
+    # don't have a video stream to keep in sync).
+    #
+    # 6th conjunct (2026-06-21, single-core-VPS response): a ffprobe
+    # call checks whether the post-merge audio is already universal
+    # (currently just `aac`); if so, the 30-90s ffmpeg re-encode
+    # is pure wasted CPU -- short-circuit to delivery instead. Probe
+    # cost ~1-2s (reads metadata, NOT the audio stream) vs saved
+    # 30-90s on AAC-source videos.
+    #
+    # NOTE: the probe runs on EVERY download where the gate fires,
+    # regardless of source codec. Opus-source downloads pay +1-2s
+    # probe cost in addition to the 30-90s transcode (so net cost on
+    # Opus path is 31-91s instead of 30-90s -- marginal). Substantial
+    # savings only on AAC-source videos (1-2s probe + 0s transcode
+    # instead of 30-90s transcode). Operators tuning for total
+    # CPU should weight this trade-off; if a real-world workload is
+    # Opus-heavy, the operator may consider disabling AAC_TRANSCODE
+    # entirely (set to false in .env) which skips BOTH the probe and
+    # the transcode (and gives up the TV-fix for the few AAVC-Owner
+    # smart-TV users in their tenancy).
+    #
+    # Probe failure falls through to the active transcode so an
+    # operator with AAC_TRANSCODE=true who has TV compat issues
+    # isn't silently disabled by a probe blip (CPU-conservative
+    # operators should set AAC_TRANSCODE=false instead).
+    #
+    # The conjunct order matters: `Path(fp).exists()` runs BEFORE
+    # `_is_already_universal_codec(fp)` so a missing file
+    # short-circuits before the ffprobe call.
+    #
+    # Failures are silent -- on any ffmpeg error we leave the
+    # untranscoded file intact so the user still gets a download
+    # (degraded audio compat, but the video plays on every device
+    # that handled AVC). The pre-existing OPCode DAG for this
+    # segment is small enough to keep the conditional explicit; a
+    # future maintainer can lift it into a helper if a third codec
+    # (e.g. AC-3) joins.
+    if (media_type == 'video'
+            and Config.AAC_TRANSCODE
+            and actual_container != 'mp4'
+            and bot.has_ffmpeg
+            and Path(fp).exists()
+            and not _is_already_universal_codec(fp)):
+        transcoded = _transcode_audio_to_aac(fp, title=title)
+        if transcoded:
+            # Helper returns the same `fp` it was given (in-place
+            # overwrite via os.replace), so this rebind is a no-op
+            # today. KEPT as a defensive contract pin: if a future
+            # refactor of the helper returns a DIFFERENT path
+            # (e.g., `<fp>.aac.mkv`), this rebind is what makes the
+            # post-transcode sanitize-rename step use the new file.
+            # test_gate_assigns_transcoded_back_to_fp pins this
+            # contract so a future refactor that drops the rebind
+            # fails loudly.
+            fp = transcoded
 
     # Sanitize the final video filename
     ext = Path(fp).suffix

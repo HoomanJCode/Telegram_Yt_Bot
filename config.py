@@ -86,6 +86,25 @@ class Config:
     # instead of crashing bot startup.
     MIN_DISK_FREE_MB = max(0, _env_int('MIN_DISK_FREE_MB', 1024))
 
+    # 2026-06-21 always-on audio transcode (TV fix): after the AAC
+    # preference-tier pin (.utils.VIDEO_QUALITY_FMT chain) we observed
+    # some smart TVs lacking an Opus hardware decoder -- the chain still
+    # falls through to AVC+Opus when YouTube doesn't serve AAC (1080p+/4K),
+    # and the user's TV showed 'audio codec: none' even with AVC video
+    # rendering correctly. Always-on AAC transcode guarantees universal
+    # TV audio playback by ffmpeg-re-encoding Opus->AAC (192kbps) after the
+    # yt-dlp merge. Cost: +30-90s per download on a single-core VPS.
+    # Operators on modern smart TVs (Opus-aware) can flip to False via
+    # AAC_TRANSCODE=false in .env once their user base is happy.
+    #
+    # Operator trap: `_env_bool` returns False (NOT the default) for
+    # set-but-empty / whitespace / garbage values. An operator who writes
+    # `AAC_TRANSCODE=` (empty) or `AAC_TRANSCODE=tru` (typo) into .env
+    # silently DISABLES the TV fix -- NOT invokes the on-by-default
+    # fallback. Use the explicit truthy values (`1` / `true` / `yes` /
+    # `on`) when you want to override `false`; do not leave the var
+    # set-but-empty if you want the default-on behavior.
+    AAC_TRANSCODE = _env_bool('AAC_TRANSCODE', 'true')
     # Operator-tunable number of recent YouTube comments to fetch + surface
     # in the format-choice screen after a download. Default 0 (off) so an
     # upgrade is non-disruptive; operators on permitted deployments opt in

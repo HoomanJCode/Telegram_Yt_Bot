@@ -618,20 +618,26 @@ class TestAacTranscodeIntegration(unittest.TestCase):
             'download. A refactor that drops the call silently '
             'defeats the 2026-06-21 TV fix.')
 
-    def test_mp4_container_skip_present(self):
-        # The `actual_container != 'mp4'` check is critical:
-        # yt-dlp's `merge_output_format=mp4` path ALREADY
-        # auto-transcodes Opus->AAC. Running ffmpeg again on
-        # the resulting MP4 would burn 30-90s of CPU for no
-        # audio change.
-        self.assertIn(
+    def test_mp4_container_is_now_gated_by_probe(self):
+        # 2026-06-23: the `actual_container != 'mp4'` guard was
+        # REMOVED because yt-dlp's merge_output_format=mp4 does NOT
+        # reliably auto-transcode Opus->AAC (the user reported
+        # 'audio codec: none' again on PC). The gate now fires for
+        # MP4 too, with `_is_already_universal_codec` as the sole
+        # double-transcode guard — the ffprobe detects AAC from
+        # yt-dlp's merge (when it works) and skips, or detects Opus
+        # (when merge didn't transcode) and fires. Pin that the
+        # mp4-exclusion code is ABSENT so a future maintainer who
+        # re-adds it knows it was a deliberate removal.
+        self.assertNotIn(
             "actual_container != 'mp4'",
             self._src,
-            "mp4 path is already auto-transcoded by yt-dlp's "
-            "merge_output_format=mp4 pipeline; the explicit "
-            "skip saves 30-90s of CPU per MP4 download. A "
-            "refactor that drops this check regresses MP4 "
-            "download latency without any functional improvement.")
+            "The mp4-container skip was DELIBERATELY REMOVED on "
+            "2026-06-23 because yt-dlp's MP4 merge does NOT "
+            "reliably auto-transcode Opus->AAC. The "
+            "_is_already_universal_codec probe is the sole guard "
+            "against double-transcoding now -- it detects AAC "
+            "(skip) or Opus (fire) regardless of container.")
 
     def test_config_aac_transcode_flag_respected(self):
         # The gate MUST read `Config.AAC_TRANSCODE` (NOT a

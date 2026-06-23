@@ -442,15 +442,15 @@ def _transcode_audio_to_aac(video_file, title=None):
     video stream alone.
 
     Triggered when `Config.AAC_TRANSCODE` is True -- we explicitly
-    hand-fan Opus audio through ffmpeg because (a) `merge_output_format=mp4`
-    auto-transcodes Opus->AAC during yt-dlp's merge, so the `container='mp4'`
-    path is intentionally excluded at the caller, and (b) for any other
-    container (MKV / WEBM / natural) yt-dlp's merge simply stream-copies
-    the Opus track verbatim. Some smart TVs without an Opus hardware
-    decoder then expose the audio as 'audio codec: none' even though AVC
-    video plays. Re-encoding to AAC at 192kbps is mathematically near-
-    lossless for typical YouTube 128-160kbps Opus source so quality hits
-    a universal-codec payoff floor.
+    hand-fan Opus audio through ffmpeg because yt-dlp's merge
+    stream-copies Opus verbatim into the natural container (MKV /
+    WEBM), and its `merge_output_format=mp4` pipeline does NOT
+    reliably auto-transcode Opus->AAC. Some smart TVs and PC
+    players without Opus decode then label the audio as 'audio
+    codec: none' even though AVC video plays. Re-encoding to AAC
+    at 192kbps is mathematically near-lossless for typical YouTube
+    128-160kbps Opus source so quality hits a universal-codec
+    payoff floor.
 
     Mechanics mirror `_merge_subs_into_mkv`:
       1. Write ffmpeg output to a unique `<file>.transcode.tmp.<ext>` so the
@@ -875,13 +875,14 @@ def download(bot, uid, url, media_type, video_quality=None, audio_quality=None, 
                 except: pass
 
     # 2026-06-21 always-on audio transcode (TV fix): ensure the file's
-    # audio track decodes universally on legacy smart TVs that lack an
-    # Opus hardware decoder. Skipped on `container='mp4'` because
-    # yt-dlp's merge pipeline already auto-transcodes Opus->AAC for
-    # MP4 output (see comment on `opts['merge_output_format']='mp4'`
-    # above); running ffmpeg again would burn 30-90s of CPU for no
-    # audio change. Skipped on `media_type != 'video'` (audio/thumb
-    # don't have a video stream to keep in sync).
+    # audio track decodes universally on legacy smart TVs and PC players
+    # that lack an Opus hardware decoder or label Opus tracks as
+    # 'audio codec: none'. The `_is_already_universal_codec` ffprobe
+    # guard safely skips the re-encode when the audio is already AAC
+    # (whether from the format-chain AAC-preference tier or from
+    # yt-dlp's own MP4 merge pipeline), so double-transcoding cannot
+    # happen even on the MP4 path. Skipped on `media_type != 'video'`
+    # (audio/thumb don't have a video stream to keep in sync).
     #
     # 6th conjunct (2026-06-21, single-core-VPS response): a ffprobe
     # call checks whether the post-merge audio is already universal
@@ -920,7 +921,6 @@ def download(bot, uid, url, media_type, video_quality=None, audio_quality=None, 
     # (e.g. AC-3) joins.
     if (media_type == 'video'
             and Config.AAC_TRANSCODE
-            and actual_container != 'mp4'
             and bot.has_ffmpeg
             and Path(fp).exists()
             and not _is_already_universal_codec(fp)):

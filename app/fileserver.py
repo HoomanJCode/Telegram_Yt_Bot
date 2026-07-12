@@ -54,8 +54,19 @@ class _AiohttpNoiseFilter(logging.Filter):
 logging.getLogger('aiohttp.server').addFilter(_AiohttpNoiseFilter())
 
 class FileServer:
-    def __init__(self, port=8000):
+    # `ssl_context=None` opts the server into HTTPS mode when an
+    # ssl.SSLContext built from a PEM cert+key is forwarded by
+    # YouTubeDownloaderBot.__init__ (path resolved from the SSL_CERT_FILE
+    # / SSL_KEY_FILE env vars). Default is None (plain HTTP) so an
+    # operator upgrading the binary without setting those vars sees
+    # exactly the previous behaviour — no surprise protocol flip. The
+    # regression pin lives in
+    # tests/test_fileserver.py::TestFileServerSSLContext so a future
+    # refactor that drops the kwarg or forgets to forward it to
+    # web.TCPSite surfaces immediately.
+    def __init__(self, port=8000, ssl_context=None):
         self.port = port
+        self.ssl_context = ssl_context
         self.app = web.Application()
         # GET serves the body. HEAD serves only headers -- Telegram
         # mobile clients probe HEAD before GET to learn Content-Length
@@ -195,8 +206,18 @@ class FileServer:
     async def start(self):
         self._runner = web.AppRunner(self.app)
         await self._runner.setup()
-        await web.TCPSite(self._runner, '0.0.0.0', self.port).start()
-        logger.info("File server on port %d", self.port)
+        # `ssl_context=self.ssl_context` (default None) is the aiohttp 3.x
+        # opt-in for native TLS termination. When non-None the listening
+        # socket accepts a TLS handshake instead of a plain-text HTTP
+        # request — operators pairing this with SSL_CERT_FILE /
+        # SSL_KEY_FILE in .env get HTTPS without a reverse proxy.
+        # NOTE: aiohttp's TCPSite raises ValueError if `ssl_context` is
+        # passed together with a unix-socket / non-TCP site; we always
+        # use TCP ('0.0.0.0', self.port) so that combination is safe.
+        await web.TCPSite(self._runner, '0.0.0.0', self.port,
+                          ssl_context=self.ssl_context).start()
+        scheme = 'HTTPS' if self.ssl_context else 'HTTP'
+        logger.info('File server on port %d (%s)', self.port, scheme)
 
 
 def _mime(ext):

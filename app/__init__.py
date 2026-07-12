@@ -1,6 +1,7 @@
 """YouTube Downloader Telegram Bot"""
 import asyncio
 import logging
+import sys
 from config import Config
 from telegram import Update
 from telegram.ext import (
@@ -9,7 +10,7 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 from app.fileserver import FileServer
-from app.bot import YouTubeDownloaderBot
+from app.bot import YouTubeDownloaderBot, SSLConfigError
 from app.handlers.commands import start_cmd, help_cmd, recent_cmd, status_cmd, cancel_cmd, settings_cmd
 from app.handlers.messages import on_msg
 from app.handlers.inline import inline_query
@@ -43,7 +44,28 @@ logger.propagate = False
 WAITING_FOR_COOKIES = 1
 
 def main():
-    bot = YouTubeDownloaderBot()
+    # Catch SSLConfigError BEFORE constructing the Application builder
+    # so a mis-configured .env exits cleanly with a single CRITICAL log
+    # line, not a Python traceback inside the long-running poller. Exit
+    # code 78 (EX_CONFIG from sysexits.h) signals "permanent config
+    # error" to systemd; the unit sets RestartPreventExitStatus=78 so
+    # this code does NOT trigger the `Restart=always + RestartSec=10`
+    # restart loop. Without this, every typo'd cert path would spam
+    # the operator's journalctl with one CRITICAL line per 10 seconds.
+    try:
+        bot = YouTubeDownloaderBot()
+    except SSLConfigError as e:
+        # The exception message already names the offending env var
+        # AND the likely-cause hint (fullchain.pem vs cert.pem;
+        # Windows backslashes; etc.) so the operator can fix without
+        # context-switching to the docs.
+        logger.critical('SSL configuration error — aborting startup: %s', e)
+        # Flush any buffered log records before sys.exit so an operator
+        # tail-ing -f bot_error.log sees the message they need to
+        # action on, not the next sys.exit shell trace.
+        logging.shutdown()
+        sys.exit(78)
+
     app = Application.builder().token(bot.config.BOT_TOKEN).build()
     bot._bot = app.bot
 

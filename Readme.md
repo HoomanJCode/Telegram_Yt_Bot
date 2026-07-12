@@ -163,6 +163,33 @@ youtube_downloader_bot/
 
 ---
 
+## 🔒 Native HTTPS (optional)
+
+The bot can terminate TLS itself — no reverse proxy required. Set **both** of these in `.env` (alongside your `BASE_DOWNLOAD_LINK=https://yourdomain.com:8000`):
+
+```env
+SSL_CERT_FILE=/etc/letsencrypt/live/yourdomain.com/fullchain.pem
+SSL_KEY_FILE=/etc/letsencrypt/live/yourdomain.com/privkey.pem
+```
+
+The aiohttp file server will then accept HTTPS on whatever port `BASE_DOWNLOAD_LINK` parses to. Behaviour matrix:
+
+- Both empty → plain HTTP (default, same as before).
+- Both set + cert/key readable → HTTPS.
+- Only one set, or either file missing/unreadable → bot refuses to start with a clear CRITICAL log line. **We never silently fall back to HTTP** — that would re-create the original "I set the HTTPS domain and downloads won't load" bug.
+
+**Pick a non-privileged port unless you can `setcap` the Python binary** — `BASE_DOWNLOAD_LINK=https://yourdomain.com:8000` keeps the bot listening on 8000 (no root required). Move to 443 only after `sudo setcap 'cap_net_bind_service=+ep' $(readlink -f $(which python))`.
+
+**Cert renewal does NOT hot-reload.** Let's Encrypt renews every ~60 days; you must restart the bot for the new PEMs to take effect. Recommended hook:
+
+```bash
+certbot renew --deploy-hook "systemctl restart telegramytbot"
+```
+
+For most operators, a reverse proxy (Caddy auto-cert example: `yourdomain.com { reverse_proxy 127.0.0.1:8000 }`) is simpler — but the native-SSL path above works in one process.
+
+---
+
 ## 🔧 Troubleshooting
 
 ### "No supported JavaScript runtime" warning

@@ -54,6 +54,16 @@ jobs:
           COOKIE_TTL_HOURS: ${{ vars.COOKIE_TTL_HOURS || '0' }}
           MAX_TELEGRAM_SIZE_MB: ${{ vars.MAX_TELEGRAM_SIZE_MB || '50' }}
           USE_WARP: ${{ secrets.USE_WARP || 'false' }}
+          # Base64-encoded SSL cert+key for native HTTPS termination.
+          # Generate from your Let's Encrypt fullchain.pem and privkey.pem:
+          #   base64 -w0 /etc/letsencrypt/live/yourdomain.com/fullchain.pem
+          #   base64 -w0 /etc/letsencrypt/live/yourdomain.com/privkey.pem
+          # Paste the one-line outputs as GitHub Repository Secrets
+          # `SSL_CERT_B64` and `SSL_KEY_B64`. When both are set, deploy.yml
+          # decodes them to $PROJECT_DIR/ssl/ and appends the cert paths
+          # to .env. Leave both empty (default) for plain HTTP only.
+          SSL_CERT_B64: ${{ secrets.SSL_CERT_B64 || '' }}
+          SSL_KEY_B64: ${{ secrets.SSL_KEY_B64 || '' }}
         run: |
           cat > /tmp/deploy_script.sh << 'SCRIPTEOF'
           #!/bin/bash
@@ -216,6 +226,38 @@ jobs:
             echo "❌ ERROR: BOT_TOKEN is empty!"
             exit 1
           fi
+
+          # Install SSL certificates from base64-encoded GitHub Secrets.
+          # If both SSL_CERT_B64 and SSL_KEY_B64 are set in the workflow
+          # environment, decode them under $PROJECT_DIR/ssl/ and append
+          # the resulting file paths to .env. If only ONE is set, fail
+          # with a clear error (partial config is always a typo). If
+          # neither is set, skip entirely — legacy plain-HTTP mode.
+          if [ -n "SSL_CERT_B64_PLACEHOLDER" ] && [ -n "SSL_KEY_B64_PLACEHOLDER" ]; then
+            echo "🔐 Installing SSL certificates..."
+            mkdir -p "$PROJECT_DIR/ssl"
+            echo 'SSL_CERT_B64_PLACEHOLDER' | base64 -d > "$PROJECT_DIR/ssl/fullchain.pem" || {
+              echo "❌ Failed to decode SSL_CERT_B64 — check your Repository Secret is valid base64"
+              echo "   Generate with: base64 -w0 /etc/letsencrypt/live/domain/fullchain.pem"
+              exit 1
+            }
+            echo 'SSL_KEY_B64_PLACEHOLDER' | base64 -d > "$PROJECT_DIR/ssl/privkey.pem" || {
+              echo "❌ Failed to decode SSL_KEY_B64 — check your Repository Secret is valid base64"
+              echo "   Generate with: base64 -w0 /etc/letsencrypt/live/domain/privkey.pem"
+              exit 1
+            }
+            chmod 600 "$PROJECT_DIR/ssl/privkey.pem"
+            {
+              echo ""
+              echo "# SSL certificates (decoded from GitHub Secrets on deploy)"
+              echo "SSL_CERT_FILE=$PROJECT_DIR/ssl/fullchain.pem"
+              echo "SSL_KEY_FILE=$PROJECT_DIR/ssl/privkey.pem"
+            } >> "$PROJECT_DIR/.env"
+            echo "  ✓ SSL certs installed"
+          elif [ -n "SSL_CERT_B64_PLACEHOLDER" ] || [ -n "SSL_KEY_B64_PLACEHOLDER" ]; then
+            echo "❌ ERROR: Both SSL_CERT_B64 and SSL_KEY_B64 GitHub Secrets must be set together, or neither set"
+            exit 1
+          fi
           
           echo "🐍 Setting up Python..."
           cd "$PROJECT_DIR"
@@ -253,6 +295,12 @@ jobs:
           ExecStart=$PROJECT_DIR/venv/bin/python $PROJECT_DIR/bot.py
           Restart=on-failure
           RestartSec=10
+          # Exit code 78 (EX_CONFIG from sysexits.h) is raised by
+          # app/__init__.py::main() when SSL_CERT_FILE / SSL_KEY_FILE
+          # are missing or misconfigured. Prevent systemd from auto-
+          # restarting into a permanent error loop; the operator must
+          # fix .env and run `systemctl start telegramytbot` manually.
+          RestartPreventExitStatus=78
           StandardOutput=append:/var/log/$SERVICE_NAME/bot.log
           StandardError=append:/var/log/$SERVICE_NAME/bot_error.log
           
@@ -291,6 +339,8 @@ jobs:
           sed -i "s|COOKIE_TTL_HOURS_PLACEHOLDER|${COOKIE_TTL_HOURS}|g" /tmp/deploy_script.sh
           sed -i "s|MAX_TELEGRAM_SIZE_PLACEHOLDER|${MAX_TELEGRAM_SIZE_MB}|g" /tmp/deploy_script.sh
           sed -i "s|USE_WARP_PLACEHOLDER|${USE_WARP}|g" /tmp/deploy_script.sh
+          sed -i "s|SSL_CERT_B64_PLACEHOLDER|${SSL_CERT_B64}|g" /tmp/deploy_script.sh
+          sed -i "s|SSL_KEY_B64_PLACEHOLDER|${SSL_KEY_B64}|g" /tmp/deploy_script.sh
 
           # Canonicalize USE_WARP to lowercase "true"/"false" here in the runner
           # shell (NOT inside the heredoc — that one is `<< 'SCRIPTEOF'`, quoted,

@@ -71,11 +71,14 @@ BOT_TOKEN=your_bot_token_here
 BASE_DOWNLOAD_LINK=http://${IP}:8000
 WHITELIST_USERS=
 STORAGE_DAYS=2
+# For HTTPS, uncomment and point to your cert+key files (Let's Encrypt etc.):
+# SSL_CERT_FILE=/etc/letsencrypt/live/yourdomain.com/fullchain.pem
+# SSL_KEY_FILE=/etc/letsencrypt/live/yourdomain.com/privkey.pem
 EOF
     echo "⚠️  .env created - edit it: nano $PROJECT_DIR/.env"
 fi
 
-mkdir -p data/cookies downloads /var/log/$SERVICE_NAME
+mkdir -p data/cookies downloads ssl /var/log/$SERVICE_NAME
 
 cat > /etc/systemd/system/$SERVICE_NAME.service << EOF
 [Unit]

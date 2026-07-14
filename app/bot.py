@@ -1,8 +1,9 @@
 # app/bot.py
 """Main bot class with shared state"""
 import asyncio, os, time, logging, ssl
+from collections import OrderedDict
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 from app.models import VideoRecord
 from app.fileserver import FileServer
 from app.utils import check_ffmpeg, load_data, save_data
@@ -145,8 +146,37 @@ class YouTubeDownloaderBot:
         self._bot = None
         self._bot_username = None
         self.videos: Dict[int, List[VideoRecord]] = {}
-        self._pending_urls: Dict[int, tuple] = {}
-        self._nav_stack: Dict[int, List[Tuple[str, any]]] = {}
+        # Per-message ephemeral state. Keying by (chat_id, message_id) means
+        # each Telegram message is self-identifying: inline-keyboard buttons
+        # attached to an OLD message do NOT silently leak to the LATEST
+        # URL/record when the user starts a second download before clicking
+        # the first.
+        #
+        # Bug fixed: previously `_pending_urls[uid] = (url, ...)` was a single
+        # per-user slot that a second `show_format_choice` overwrote, and
+        # `bot.videos[uid]` inserted at index 0 on each new download, so
+        # `tg_<idx>` callbacks on a stale delivery-screen message resolved
+        # to the wrong record. With per-message keys, every inline keyboard
+        # reads the state the bot wrote when IT rendered that message.
+        #
+        # `_delivery_screen` is bounded with a small OrderedDict LRU so
+        # abandoned deliveries don't leak memory; re-keying pushes older
+        # entries out. The cap matches a fully-active user flow by an order
+        # of magnitude.
+        # The OrderedDict-LRU cap is shared across all per-message ephemeral
+        # state. _delivery_screen has been bounded since the 2026-07-15
+        # fix landed; the parallel caps on _pending_urls and _nav_stack
+        # were added after a code-review feedback round flagged the
+        # bot could leak memory on a long-lived VPS that has processed
+        # N URLs (one entry per `show_format_choice` write) and M menu
+        # interactions (one entry per `nav_push`). The cap is large
+        # enough that an actively-using bot never evicts a still-active
+        # entry but small enough that a leaked parallel-downloader
+        # inviter-sender cannot exhaust RAM.
+        self._ephemeral_max = 1024
+        self._pending_urls: "OrderedDict[Tuple[int, int], Tuple[str, str, str]]" = OrderedDict()
+        self._nav_stack: "OrderedDict[Tuple[int, int], List[Tuple[str, Any]]]" = OrderedDict()
+        self._delivery_screen: "OrderedDict[Tuple[int, int], VideoRecord]" = OrderedDict()
         self._tokens: Dict[str, dict] = {}
         self._group_admins: Dict[int, set] = {}
         self._global_file_ids: Dict[str, str] = {}

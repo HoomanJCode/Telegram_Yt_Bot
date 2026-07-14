@@ -7,6 +7,7 @@ the actual contract rather than mocks of mocks.
 """
 import unittest
 import asyncio
+from collections import OrderedDict
 import inspect
 from pathlib import Path as _P
 from unittest.mock import MagicMock, AsyncMock
@@ -302,13 +303,18 @@ class TestChooseFormatDedup(unittest.TestCase):
         cq.data = fmt
         cq.answer = AsyncMock()
         cq.message = MagicMock()
+        # 2026-07-15 fix: choose_format reads _pending_urls keyed by
+        # the kb's (chat.id, message_id), NOT by uid. Wire the message
+        # mock so the kb key the handler builds is (uid, 100), and
+        # seed _pending_urls at the SAME key.
+        cq.message.chat.id = uid
+        cq.message.message_id = 100
         # `u` is the Update; the handler only touches effective_user + callback_query.
         u = MagicMock()
         u.callback_query = cq
         u.effective_user.id = uid
-        # `_pending_urls` keyed by uid is the only bot attr the handler reads
-        # before reaching the dedup branch.
-        bot._pending_urls = {uid: ('http://example.com/v?v1', 'v1', 'title')}
+        # Per-message keying (2026-07-15): the kb key, not the uid.
+        bot._pending_urls = {(uid, 100): ('http://example.com/v?v1', 'v1', 'title')}
         # _download_semaphore: AsyncMock so `async with bot._download_semaphore`
         # becomes an awaitable context manager. MagicMock would error on
         # `__aenter__` / `__aexit__`.
@@ -346,8 +352,8 @@ class TestChooseFormatDedup(unittest.TestCase):
         # delivery flow.
         import app.handlers.formats as f
         self._show_delivery_calls = []
-        async def fake_show_delivery(b, msg, record, idx):
-            self._show_delivery_calls.append((record, idx))
+        async def fake_show_delivery(b, msg, record):
+            self._show_delivery_calls.append((record,))
         original = f.show_delivery
         f.show_delivery = fake_show_delivery
         self._original_show_delivery = original
@@ -367,8 +373,8 @@ class TestChooseFormatDedup(unittest.TestCase):
             u, cq = await self._invoke_choose_format(bot, fmt, uid)
             await choose_format(bot, u, MagicMock())
             if self._show_delivery_calls:
-                record, idx = self._show_delivery_calls[-1]
-                return ('hit', record, idx)
+                (record,) = self._show_delivery_calls[-1]
+                return ('hit', record)
             return ('miss',)
         finally:
             await self._unstub_download_task()
@@ -380,7 +386,7 @@ class TestChooseFormatDedup(unittest.TestCase):
         bot = _make_bot_with_video_records(
             1, 'v1',
             [('cached', 'cached.mkv', 'video', True)])
-        outcome, record, idx = await self._drive(bot, 'fmt_video_mkv', 1)
+        outcome, record = await self._drive(bot, 'fmt_video_mkv', 1)
         self.assertEqual(outcome, 'hit',
             'cached .mkv + MKV click must short-circuit to delivery '
             '(2026-06-21 fix)')
@@ -392,7 +398,7 @@ class TestChooseFormatDedup(unittest.TestCase):
         bot = _make_bot_with_video_records(
             1, 'v1',
             [('cached', 'cached.mp4', 'video', True)])
-        outcome, record, _idx = await self._drive(bot, 'fmt_video_mp4', 1)
+        outcome, record = await self._drive(bot, 'fmt_video_mp4', 1)
         self.assertEqual(outcome, 'hit')
 
     async def test_mkv_button_with_only_mp4_cached_does_NOT_short_circuit(self):
@@ -452,7 +458,7 @@ class TestChooseFormatDedup(unittest.TestCase):
             1, 'v1',
             [('mkv_v', 'cache.mkv', 'video', True),
              ('mp4_v', 'cache.mp4', 'video', True)])
-        outcome, record, _idx = await self._drive(bot, 'fmt_video_mkv', 1)
+        outcome, record = await self._drive(bot, 'fmt_video_mkv', 1)
         self.assertEqual(outcome, 'hit')
         # record should be the MKV record, not the MP4.
         self.assertTrue(record.file_path.endswith('.mkv'))
@@ -514,5 +520,133 @@ for name in dir(TestChooseFormatDedup):
 # is `--async-test-support`: each `test_*` method is wrapped to drop
 # its `async` qualifier via `_make_async_test` above.
 
-if __name__ == '__main__':
-    unittest.main()
+
+class TestStaleButtonFix(unittest.TestCase):
+    """2026-07-15 stale-button regression test.
+
+    User-reported bug: after sending video 1 and then video 2, the
+    inline-keyboard buttons on video 1's delivery screen silently
+    routed to video 2 (the latest). Root cause: cb_data carried
+    `idx` baked in at render time, and bot.videos[uid] shifts on
+    every new download (insert at index 0).
+
+    Fix: cb_data is now index-free; the cb handler resolves the
+    record via bot._delivery_screen[(c.message.chat.id,
+    c.message.message_id)], which is bound to the kb-bearing
+    message at render time. Parallel flows cannot collide.
+
+    This test simulates the EXACT user scenario and asserts the
+    fix works end-to-end through the public send_link handler.
+    """
+
+    async def _invoke(self, bot, msg_id, uid, cb_data='lk_send'):
+        q = MagicMock()
+        q.data = cb_data
+        q.answer = AsyncMock()
+        q.message = MagicMock()
+        q.message.chat.id = uid
+        q.message.message_id = msg_id
+        q.message.delete = AsyncMock()
+        q.message.reply_text = AsyncMock()
+        u = MagicMock()
+        u.callback_query = q
+        u.effective_user.id = uid
+        return u, q
+
+    def _build_two_records(self):
+        import tempfile
+        from pathlib import Path as _P
+        tmp1 = tempfile.mkdtemp()
+        tmp2 = tempfile.mkdtemp()
+        p1 = str(_P(tmp1) / 'video1.mkv')
+        _P(p1).write_bytes(b'video1')
+        r1 = VideoRecord(
+            'Video 1', 'http://example.com/v?v1', 'v1',
+            p1, 6, '2024-01-01 00:00:00', media_type='video')
+        p2 = str(_P(tmp2) / 'video2.mp4')
+        _P(p2).write_bytes(b'video2')
+        r2 = VideoRecord(
+            'Video 2', 'http://example.com/v?v2', 'v2',
+            p2, 6, '2024-01-01 00:00:00', media_type='video')
+        return r1, r2, tmp1, tmp2
+
+    async def test_send_link_on_old_delivery_resolves_to_old_record(self):
+        from app.handlers.formats import send_link
+        r1, r2, tmp1, tmp2 = self._build_two_records()
+        bot = MagicMock()
+        bot._delivery_screen = OrderedDict()
+        bot._delivery_screen[(1, 100)] = r1
+        bot._delivery_screen[(1, 200)] = r2
+        bot.base_url = 'http://example.com:8000'
+        bot.config = MagicMock()
+        bot.config.STORAGE_DAYS = 2
+        u, q = await self._invoke(bot, 100, 1, 'lk_send')
+        await send_link(bot, u, q)
+        reply_text = q.message.reply_text.call_args[0][0]
+        self.assertIn('Video 1', reply_text,
+            f'old delivery (msg 100) must surface Video 1, '
+            f'not Video 2. Got: {reply_text!r}')
+        self.assertNotIn('Video 2', reply_text,
+            f'old delivery (msg 100) must NOT surface Video 2 '
+            f'(the parallel download). Got: {reply_text!r}')
+        import shutil
+        shutil.rmtree(tmp1, ignore_errors=True)
+        shutil.rmtree(tmp2, ignore_errors=True)
+
+    async def test_send_telegram_on_old_delivery_resolves_to_old_record(self):
+        from app.handlers.formats import send_telegram
+        r1, r2, tmp1, tmp2 = self._build_two_records()
+        bot = MagicMock()
+        bot._delivery_screen = OrderedDict()
+        bot._delivery_screen[(1, 100)] = r1
+        bot._delivery_screen[(1, 200)] = r2
+        import app.handlers.tokens as t
+        original = getattr(t, 'send_file', None)
+        self._send_file_calls = []
+        async def fake_send_file(b, m, rec):
+            self._send_file_calls.append(rec)
+        t.send_file = fake_send_file
+        try:
+            u, q = await self._invoke(bot, 100, 1, 'tg_send')
+            await send_telegram(bot, u, q)
+            self.assertEqual(len(self._send_file_calls), 1,
+                'send_telegram must call send_file exactly once')
+            self.assertIs(self._send_file_calls[0], r1,
+                f'old delivery (msg 100) must send r1 (Video 1), '
+                f'not r2 (Video 2). Got: '
+                f'{self._send_file_calls[0].title!r}')
+        finally:
+            if original is not None:
+                t.send_file = original
+        import shutil
+        shutil.rmtree(tmp1, ignore_errors=True)
+        shutil.rmtree(tmp2, ignore_errors=True)
+
+    async def test_dead_delivery_screen_entry_is_evicted(self):
+        from app.handlers.formats import send_link
+        r1, _, tmp1, _ = self._build_two_records()
+        import os
+        os.unlink(r1.file_path)
+        bot = MagicMock()
+        bot._delivery_screen = OrderedDict()
+        bot._delivery_screen[(1, 100)] = r1
+        bot.base_url = 'http://example.com:8000'
+        bot.config = MagicMock()
+        bot.config.STORAGE_DAYS = 2
+        u, q = await self._invoke(bot, 100, 1, 'lk_send')
+        await send_link(bot, u, q)
+        self.assertNotIn((1, 100), bot._delivery_screen,
+            '_resolve_delivery_record must pop the dead entry '
+            'so subsequent clicks do not re-run the stat')
+        reply_text = q.message.reply_text.call_args[0][0]
+        self.assertIn('no longer available', reply_text.lower())
+        import shutil
+        shutil.rmtree(tmp1, ignore_errors=True)
+
+
+for name in dir(TestStaleButtonFix):
+    if name.startswith('test_'):
+        attr = getattr(TestStaleButtonFix, name)
+        if inspect.iscoroutinefunction(attr):
+            setattr(TestStaleButtonFix, name, _make_async_test(attr))
+

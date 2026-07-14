@@ -61,10 +61,20 @@ def nav_push(bot, chat_id, message_id, action, data=None):
     identifies a Telegram message across the bot's whole
     per-message runtime, including group chats where chat_id is
     the group id (not a uid).
+
+    LRU discipline: enforces `bot._ephemeral_max` on `_nav_stack`
+    so a long-lived VPS that has processed N menu interactions
+    (one nav_push per Back-button-eligible render) doesn't leak.
+    Mirror of the same discipline on `_delivery_screen` (formats.py)
+    and `_pending_urls` (added 2026-07-15 after code-review
+    feedback flagged the asymmetry).
     """
     key = _nav_key(chat_id, message_id)
     if key not in bot._nav_stack:
+        if len(bot._nav_stack) >= bot._ephemeral_max:
+            bot._nav_stack.popitem(last=False)
         bot._nav_stack[key] = []
+    bot._nav_stack.move_to_end(key)
     bot._nav_stack[key].append((action, data))
 
 
@@ -191,6 +201,16 @@ async def show_format_choice(bot, uid, url, video_id, msg):
         # links can be ~80 chars), so embedding them in callback_data
         # would silently break the picker on long-URL videos.
         bot._pending_urls[(s.chat.id, s.message_id)] = (url, video_id, title)
+        # LRU discipline (2026-07-15): mirror the cap on _delivery_screen
+        # and _nav_stack so a long-lived VPS doesn't leak via
+        # _pending_urls. `move_to_end` keeps the just-touched
+        # picker entry at the front, and `popitem(last=False)`
+        # evicts the least-recent entry when we exceed
+        # `bot._ephemeral_max`. Without this, every show_format_choice
+        # call would grow the dict unbounded.
+        bot._pending_urls.move_to_end((s.chat.id, s.message_id))
+        while len(bot._pending_urls) > bot._ephemeral_max:
+            bot._pending_urls.popitem(last=False)
         mins, secs = divmod(duration, 60) if duration else (0, 0)
         # Operator-toggleable: surface the most-recent comments only when
         # Config.MAX_COMMENTS > 0 (which we set via fetch_info's
@@ -433,7 +453,7 @@ async def router(bot, u, c):
     elif d == 'vc': await q.message.reply_text(f"📦 {len(bot.videos.get(uid,[]))} files")
     elif d == 'clear_all': await _clear_all(bot, u, c)
     elif d.startswith('fmt_'): from app.handlers.formats import choose_format; await choose_format(bot, u, c)
-    elif d.startswith('backfmt_'): from app.handlers.formats import back_to_formats; await back_to_formats(bot, u, c)
+    elif d == 'backfmt': from app.handlers.formats import back_to_formats; await back_to_formats(bot, u, c)
     elif d.startswith('morefmt_'): from app.handlers.formats import also_get_other_format; await also_get_other_format(bot, u, c)
     elif d.startswith('tg_'): from app.handlers.formats import send_telegram; await send_telegram(bot, u, c)
     elif d.startswith('lk_'): from app.handlers.formats import send_link; await send_link(bot, u, c)
@@ -681,7 +701,7 @@ async def _select(bot, u, c):
         return
     nav_push(bot, q.message.chat.id, q.message.message_id, NAV_RECENT)
     from app.handlers.formats import show_delivery
-    await show_delivery(bot, q.message, videos[idx], idx)
+    await show_delivery(bot, q.message, videos[idx])
     await q.message.delete()
 
 async def _delete(bot, u, c):

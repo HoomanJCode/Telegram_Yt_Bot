@@ -47,7 +47,7 @@ async def on_msg(bot, u, c):
         existing = find_existing(bot, uid, video_id, auto)
         if existing:
             from app.handlers.formats import show_delivery
-            await show_delivery(bot, msg, existing, bot.videos[uid].index(existing))
+            await show_delivery(bot, msg, existing)
             return
         async with bot._download_semaphore:
             await download_task(bot, uid, url, msg, auto,
@@ -154,7 +154,7 @@ async def download_task(bot, uid, url, msg, media_type, container_override=None)
         if sub_files:
             record._pending_subs = sub_files  # attach to record for show_delivery to send
         from app.handlers.formats import show_delivery
-        await show_delivery(bot, msg, record, 0)
+        await show_delivery(bot, msg, record)
     except Exception as e:
         category = classify_yt_error(str(e))
         logger.error("Download task error [%s]: %s", category, str(e)[:200])
@@ -194,7 +194,16 @@ async def _check_group(bot, chat_id, bot_client):
     except: return False
 
 def _group_delivery_kb(bot, uid):
+    """Group-chat delivery kb.
+
+    After the 2026-07-15 fix the kb is bound to its record via
+    `bot._delivery_screen[(delivery_msg.chat.id, delivery_msg.message_id)]`
+    (see _group_download which calls `_delivery_screen_put`).
+    The cb_data here is therefore index-free -- the per-message
+    key in `_delivery_screen` is what resolves the record on
+    click.
+    """
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📤 Send via Telegram", callback_data='tg_new')],
-        [InlineKeyboardButton("📋 Get Download Link", callback_data='lk_new')],
+        [InlineKeyboardButton("📤 Send via Telegram", callback_data='tg_send')],
+        [InlineKeyboardButton("📋 Get Download Link", callback_data='lk_send')],
     ])

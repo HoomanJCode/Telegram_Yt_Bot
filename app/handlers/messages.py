@@ -13,7 +13,7 @@ from app.utils import (
     classify_yt_error, friendly_error_msg,
 )
 from app.utils import AUTO_FORMAT_OPTIONS
-from app.handlers.navigation import nav_clear, show_format_choice, menu
+from app.handlers.navigation import nav_clear_user, show_format_choice, menu
 
 logger = logging.getLogger('yt_bot')
 
@@ -36,7 +36,11 @@ async def on_msg(bot, u, c):
         return
 
     if not await _ensure(bot, uid): await msg.reply_text("❌ Upload cookies first! /cookies", reply_to_message_id=msg.message_id); return
-    nav_clear(bot, uid)
+    # No `nav_clear_user(bot, uid)` here intentionally: with per-message
+    # state, an OLD format-picker's nav_stack BELONGS to that picker --
+    # clearing it would invalidate still-active 'b' buttons on stale
+    # messages. The new flow's flow creates its own per-message key
+    # automatically, so the two flows coexist safely.
     # Auto-format: skip the keyboard, route to download_task directly.
     auto = get_auto_format(bot, uid)
     if auto != 'ask' and auto in AUTO_FORMAT_OPTIONS:
@@ -97,7 +101,14 @@ async def _group_download(bot, uid, url, msg, media_type, video_id):
 
         mb = Path(fp).stat().st_size / 1024 / 1024
         kb = _group_delivery_kb(bot, uid)
-        await msg.reply_text(f"✅ *{esc(title[:200])}*\n📦 {mb:.2f} MB\n\nChoose delivery:", parse_mode=ParseMode.MARKDOWN, reply_markup=kb, reply_to_message_id=msg.message_id)
+        delivery_msg = await msg.reply_text(f"✅ *{esc(title[:200])}*\n📦 {mb:.2f} MB\n\nChoose delivery:", parse_mode=ParseMode.MARKDOWN, reply_markup=kb, reply_to_message_id=msg.message_id)
+        # Per-message keying (2026-07-15 stale-button fix): bind this
+        # delivery message to the record so the kb's `tg_new` /
+        # `lk_new` callbacks find it through `_delivery_screen`
+        # instead of guessing via `bot.videos[uid][0]`. The LRU bound
+        # on `_delivery_screen` caps memory growth.
+        from app.handlers.formats import _delivery_screen_put
+        _delivery_screen_put(bot, delivery_msg.chat.id, delivery_msg.message_id, record)
     except Exception as e:
         category = classify_yt_error(str(e))
         logger.error("Group download error [%s]: %s", category, str(e)[:200])

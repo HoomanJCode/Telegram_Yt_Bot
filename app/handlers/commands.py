@@ -4,7 +4,7 @@ import shutil
 import socket
 import subprocess
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from app.handlers.navigation import nav_clear, show_recent
+from app.handlers.navigation import nav_clear_user, show_recent
 
 def _port_reachable(host, port, timeout=1.0):
     """True if a TCP connection to `host:port` succeeds within `timeout` seconds."""
@@ -140,7 +140,7 @@ async def start_cmd(bot, u, c):
         bot.save()
     from app.handlers.messages import _ensure
     await _ensure(bot, uid)
-    nav_clear(bot, uid)
+    nav_clear_user(bot, uid)
     from app.handlers.navigation import welcome_text, menu
     await u.message.reply_text(await welcome_text(bot), reply_markup=menu(bot, uid))
 
@@ -207,7 +207,7 @@ async def settings_cmd(bot, u, c):
         intro, parse_mode='Markdown', reply_markup=menu(bot, uid))
 
 async def recent_cmd(bot, u, c):
-    nav_clear(bot, u.effective_user.id); await show_recent(bot, u, c)
+    nav_clear_user(bot, u.effective_user.id); await show_recent(bot, u, c)
 
 async def status_cmd(bot, u, c):
     """Report bot runtime state incl. Warp proxy health. Async-safe; every probe is bounded."""
@@ -224,7 +224,7 @@ async def status_cmd(bot, u, c):
     await u.message.reply_text("\n".join(lines), reply_markup=menu(bot, uid))
 
 async def cancel_cmd(bot, u, c):
-    nav_clear(bot, u.effective_user.id)
+    nav_clear_user(bot, u.effective_user.id)
     from app.handlers.navigation import menu
     from telegram.ext import ConversationHandler
     await u.message.reply_text("❌ Cancelled.", reply_markup=menu(bot, u.effective_user.id))

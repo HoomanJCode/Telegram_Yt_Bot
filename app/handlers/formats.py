@@ -88,8 +88,15 @@ def _resolve_delivery_record(bot, c):
 
 
 async def _unavailable_message(bot, q):
-    """Friendly recovery prompt when the kb's record is gone."""
-    await q.answer()
+    """Friendly recovery prompt when the kb's record is gone.
+
+    NOTE: caller MUST already have called `await q.answer()` before
+    calling this helper. Every current caller does (send_telegram,
+    send_link, back_to_formats, also_get_other_format). We do NOT
+    call q.answer() here because q.answer() with no alert is a
+    no-op when called twice, but q.answer(text) with an alert
+    would overwrite the caller's answer text.
+    """
     await q.message.reply_text(
         "\u26a0\ufe0f That entry is no longer available. Try /recent for the current list.",
         reply_markup=InlineKeyboardMarkup([
@@ -321,6 +328,7 @@ async def show_delivery(bot, msg, record):
             pass
 
     # If user has a default set, skip the keyboard and deliver directly
+    default = get_default_delivery(bot, uid)
     if default == 'telegram':
         await send_telegram_direct(bot, msg, record)
         return

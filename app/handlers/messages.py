@@ -13,7 +13,7 @@ from app.utils import (
     classify_yt_error, friendly_error_msg,
 )
 from app.utils import AUTO_FORMAT_OPTIONS
-from app.handlers.navigation import nav_clear, show_format_choice, menu
+from app.handlers.navigation import nav_clear_user, show_format_choice, menu
 
 logger = logging.getLogger('yt_bot')
 
@@ -36,14 +36,18 @@ async def on_msg(bot, u, c):
         return
 
     if not await _ensure(bot, uid): await msg.reply_text("❌ Upload cookies first! /cookies", reply_to_message_id=msg.message_id); return
-    nav_clear(bot, uid)
+    # No `nav_clear_user(bot, uid)` here intentionally: with per-message
+    # state, an OLD format-picker's nav_stack BELONGS to that picker --
+    # clearing it would invalidate still-active 'b' buttons on stale
+    # messages. The new flow's flow creates its own per-message key
+    # automatically, so the two flows coexist safely.
     # Auto-format: skip the keyboard, route to download_task directly.
     auto = get_auto_format(bot, uid)
     if auto != 'ask' and auto in AUTO_FORMAT_OPTIONS:
         existing = find_existing(bot, uid, video_id, auto)
         if existing:
             from app.handlers.formats import show_delivery
-            await show_delivery(bot, msg, existing, bot.videos[uid].index(existing))
+            await show_delivery(bot, msg, existing)
             return
         async with bot._download_semaphore:
             await download_task(bot, uid, url, msg, auto,
@@ -97,7 +101,14 @@ async def _group_download(bot, uid, url, msg, media_type, video_id):
 
         mb = Path(fp).stat().st_size / 1024 / 1024
         kb = _group_delivery_kb(bot, uid)
-        await msg.reply_text(f"✅ *{esc(title[:200])}*\n📦 {mb:.2f} MB\n\nChoose delivery:", parse_mode=ParseMode.MARKDOWN, reply_markup=kb, reply_to_message_id=msg.message_id)
+        delivery_msg = await msg.reply_text(f"✅ *{esc(title[:200])}*\n📦 {mb:.2f} MB\n\nChoose delivery:", parse_mode=ParseMode.MARKDOWN, reply_markup=kb, reply_to_message_id=msg.message_id)
+        # Per-message keying (2026-07-15 stale-button fix): bind this
+        # delivery message to the record so the kb's `tg_new` /
+        # `lk_new` callbacks find it through `_delivery_screen`
+        # instead of guessing via `bot.videos[uid][0]`. The LRU bound
+        # on `_delivery_screen` caps memory growth.
+        from app.handlers.formats import _delivery_screen_put
+        _delivery_screen_put(bot, delivery_msg.chat.id, delivery_msg.message_id, record)
     except Exception as e:
         category = classify_yt_error(str(e))
         logger.error("Group download error [%s]: %s", category, str(e)[:200])
@@ -143,7 +154,7 @@ async def download_task(bot, uid, url, msg, media_type, container_override=None)
         if sub_files:
             record._pending_subs = sub_files  # attach to record for show_delivery to send
         from app.handlers.formats import show_delivery
-        await show_delivery(bot, msg, record, 0)
+        await show_delivery(bot, msg, record)
     except Exception as e:
         category = classify_yt_error(str(e))
         logger.error("Download task error [%s]: %s", category, str(e)[:200])
@@ -183,7 +194,16 @@ async def _check_group(bot, chat_id, bot_client):
     except: return False
 
 def _group_delivery_kb(bot, uid):
+    """Group-chat delivery kb.
+
+    After the 2026-07-15 fix the kb is bound to its record via
+    `bot._delivery_screen[(delivery_msg.chat.id, delivery_msg.message_id)]`
+    (see _group_download which calls `_delivery_screen_put`).
+    The cb_data here is therefore index-free -- the per-message
+    key in `_delivery_screen` is what resolves the record on
+    click.
+    """
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📤 Send via Telegram", callback_data='tg_new')],
-        [InlineKeyboardButton("📋 Get Download Link", callback_data='lk_new')],
+        [InlineKeyboardButton("📤 Send via Telegram", callback_data='tg_send')],
+        [InlineKeyboardButton("📋 Get Download Link", callback_data='lk_send')],
     ])

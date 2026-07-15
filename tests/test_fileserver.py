@@ -191,5 +191,67 @@ class TestHandlerInvariants(unittest.TestCase):
         )
 
 
+class TestFileServerSSLContext(unittest.TestCase):
+    """Pins the ssl_context round-trip from __init__ to web.TCPSite.
+
+    A future refactor that drops the kwarg from FileServer.__init__ or
+    forgets to forward it to aiohttp.web.TCPSite would silently regress
+    native HTTPS to plain HTTP — exactly the "I set the HTTPS domain
+    and it doesn't work" failure mode this machinery exists to fix.
+
+    Each test patches TCPSite at its import site (aiohttp.web.TCPSite)
+    and asserts the call signature verbatim, so an absent argument
+    surfaces as a "expected call not found" assertion failure rather
+    than a runtime AttributeError deep inside aiohttp.
+    """
+
+    def _setup_runner_and_tcpsite_mocks(self):
+        runner_cls = patch('aiohttp.web.AppRunner')
+        runner_cls_mock = runner_cls.start()
+        runner_instance = MagicMock()
+        runner_instance.setup = AsyncMock()
+        runner_cls_mock.return_value = runner_instance
+
+        tcpsite_mock = patch('aiohttp.web.TCPSite').start()
+        tcpsite_instance = MagicMock()
+        tcpsite_instance.start = AsyncMock()
+        tcpsite_mock.return_value = tcpsite_instance
+        return runner_cls, tcpsite_mock, tcpsite_instance, runner_instance
+
+    def _stop_patches(self, *patches):
+        for p in patches:
+            p.stop()
+
+    def test_default_is_http_with_ssl_context_none(self):
+        runner_patch, tcpsite_mock, _ti, runner_instance = (
+            self._setup_runner_and_tcpsite_mocks())
+        try:
+            fs = FileServer(port=8000)
+            asyncio.run(fs.start())
+            # `ssl_context=None` MUST be forwarded verbatim — callers
+            # that want to detect "default mode" downstream rely on
+            # `is None` rather than the argument being absent.
+            tcpsite_mock.assert_called_once_with(
+                runner_instance, '0.0.0.0', 8000, ssl_context=None)
+        finally:
+            self._stop_patches(runner_patch, tcpsite_mock)
+
+    def test_ssl_context_is_forwarded_unchanged(self):
+        runner_patch, tcpsite_mock, _ti, runner_instance = (
+            self._setup_runner_and_tcpsite_mocks())
+        try:
+            # Use `object()` as a sentinel — the FileServer pin is on
+            # *identity* (the exact same ssl_context object is handed
+            # to aiohttp), not on attribute equality, so a recreated
+            # or proxied context would defeat the contract.
+            sentinel = object()
+            fs = FileServer(port=8443, ssl_context=sentinel)
+            asyncio.run(fs.start())
+            tcpsite_mock.assert_called_once_with(
+                runner_instance, '0.0.0.0', 8443, ssl_context=sentinel)
+        finally:
+            self._stop_patches(runner_patch, tcpsite_mock)
+
+
 if __name__ == '__main__':
     unittest.main()

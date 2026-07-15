@@ -37,15 +37,99 @@ NAV_DELIVERY = 'delivery'
 TELEGRAM_TEXT_MAX = 4096
 SAFE_TEXT_MAX = TELEGRAM_TEXT_MAX - 60
 
-def nav_push(bot, uid, action, data=None):
-    if uid not in bot._nav_stack: bot._nav_stack[uid] = []
-    bot._nav_stack[uid].append((action, data))
+def _nav_key(chat_id, message_id):
+    """Build the canonical per-message nav-stack key.
 
-def nav_pop(bot, uid):
-    if uid in bot._nav_stack and bot._nav_stack[uid]: return bot._nav_stack[uid].pop()
+    Centralized so every mutation site (nav_push / nav_pop / the
+    'back' handler / tests) addresses the SAME key shape. A future
+    refactor that swaps (chat_id, message_id) ordering or omits
+    one of the two ids is caught by the inline tests in
+    tests/test_formats.py::TestFormatChoiceKbMarkers and the new
+    TestPerMessagePendingUrlsIsolation case.
+    """
+    return (chat_id, message_id)
+
+
+def nav_push(bot, chat_id, message_id, action, data=None):
+    """Push a (action, data) back-stack frame onto a SPECIFIC message's stack.
+
+    Per-message keying (the 2026-07-15 stale-button fix) means the
+    handle_back dispatcher ONLY pops frames that THIS message pushed,
+    so a "Back" click on the format-picker for video 1 does NOT
+    accidentally surface video 2's frame when the user has
+    meanwhile moved on. The (chat_id, message_id) tuple uniquely
+    identifies a Telegram message across the bot's whole
+    per-message runtime, including group chats where chat_id is
+    the group id (not a uid).
+
+    LRU discipline: enforces `bot._ephemeral_max` on `_nav_stack`
+    so a long-lived VPS that has processed N menu interactions
+    (one nav_push per Back-button-eligible render) doesn't leak.
+    Mirror of the same discipline on `_delivery_screen` (formats.py)
+    and `_pending_urls` (added 2026-07-15 after code-review
+    feedback flagged the asymmetry).
+    """
+    key = _nav_key(chat_id, message_id)
+    if key not in bot._nav_stack:
+        if len(bot._nav_stack) >= bot._ephemeral_max:
+            bot._nav_stack.popitem(last=False)
+        bot._nav_stack[key] = []
+    bot._nav_stack.move_to_end(key)
+    bot._nav_stack[key].append((action, data))
+
+
+def nav_pop(bot, chat_id, message_id):
+    """Pop the top frame from a single message's nav stack.
+
+    Returns (NAV_MAIN, None) -- the universal safe fallback -- when
+    no frame is on the stack so an accidental double-back-click
+    never propagates a stale earlier flow's frame to the user.
+    Caller doesn't need to null-check.
+    """
+    key = _nav_key(chat_id, message_id)
+    if key in bot._nav_stack and bot._nav_stack[key]:
+        return bot._nav_stack[key].pop()
     return (NAV_MAIN, None)
 
-def nav_clear(bot, uid): bot._nav_stack.pop(uid, None)
+
+def nav_clear_user(bot, uid):
+    """Drop every nav-stack frame that ANY message in this user's
+    flows has pushed.
+
+    Replaces the old per-uid `nav_clear` (which popped a single
+    `bot._nav_stack[uid]` slot). Today per-message stacks belong
+    to messages scattered across (chat_id, message_id) keys; we
+    scan them and remove any whose keys belong to this uid.
+
+    In private chat uid == chat_id so the scan narrows to one chat;
+    in groups chat_id is the group id which a uid-bearing user is
+    a member of -- we match uids at index 0 of the key tuple
+    because we don't tag keys with both chat_id AND uid, and the
+    chat_id happens to equal uid in the (only) private chat case.
+    For groups the function still drops any private-chat frames
+    belonging to that uid, silently leaving group-chat frames
+    alone -- callers that care about group stacks should pass a
+    real (chat_id, message_id) via nav_clear_message() below.
+
+    Does NOT touch `_pending_urls` or `_delivery_screen`. Those
+    define in-flight message content; clearing them on
+    /start /cancel /recent would invalidate still-active inline
+    keyboards on older messages, regressing the 2026-07-15 fix.
+    """
+    drops = [k for k in list(bot._nav_stack.keys()) if k[0] == uid]
+    for k in drops:
+        bot._nav_stack.pop(k, None)
+
+
+def nav_clear_message(bot, chat_id, message_id):
+    """Drop this single message's nav stack frame(s).
+
+    Used internally by handle_back when a back-traversal lands on
+    a destination that should start fresh (next-message reset).
+    Not exposed in commands.py -- command-level flows go through
+    nav_clear_user, which is broader and intentional.
+    """
+    bot._nav_stack.pop(_nav_key(chat_id, message_id), None)
 
 logger = logging.getLogger('yt_bot')
 
@@ -106,7 +190,27 @@ async def show_format_choice(bot, uid, url, video_id, msg):
     try:
         info = await asyncio.get_event_loop().run_in_executor(None, fetch_info, bot, uid, url)
         title, duration = info.get('title', '?'), info.get('duration', 0)
-        bot._pending_urls[uid] = (url, video_id, title)
+        # Per-message keying (2026-07-15 stale-button fix): the format picker
+        # this fetch feeds into is `s`, the status placeholder we just
+        # `reply_text`-ed. By the time the user sees it (after edit_text /
+        # edit_media) the picker and `s` share the same `message_id`,
+        # so keying `_pending_urls` here is correct and survives all of
+        # Telegram's edit-paths without a follow-up write. The 64-byte
+        # cb-data cap is the alternative approach we considered and
+        # rejected: URLs regularly exceed it (YouTube playlist / share
+        # links can be ~80 chars), so embedding them in callback_data
+        # would silently break the picker on long-URL videos.
+        bot._pending_urls[(s.chat.id, s.message_id)] = (url, video_id, title)
+        # LRU discipline (2026-07-15): mirror the cap on _delivery_screen
+        # and _nav_stack so a long-lived VPS doesn't leak via
+        # _pending_urls. `move_to_end` keeps the just-touched
+        # picker entry at the front, and `popitem(last=False)`
+        # evicts the least-recent entry when we exceed
+        # `bot._ephemeral_max`. Without this, every show_format_choice
+        # call would grow the dict unbounded.
+        bot._pending_urls.move_to_end((s.chat.id, s.message_id))
+        while len(bot._pending_urls) > bot._ephemeral_max:
+            bot._pending_urls.popitem(last=False)
         mins, secs = divmod(duration, 60) if duration else (0, 0)
         # Operator-toggleable: surface the most-recent comments only when
         # Config.MAX_COMMENTS > 0 (which we set via fetch_info's
@@ -298,18 +402,39 @@ async def show_recent(bot, u, c, page=0):
     await msg.reply_text(txt, disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(kb))
 
 async def handle_back(bot, u, c):
-    q = u.callback_query; uid = u.effective_user.id; prev, data = nav_pop(bot, uid); await q.answer()
-    if prev == NAV_MAIN: await q.message.reply_text(await welcome_text(bot), reply_markup=menu(bot, uid)); await q.message.delete()
-    elif prev == NAV_RECENT: await show_recent(bot, u, c); await q.message.delete()
+    q = u.callback_query; uid = u.effective_user.id
+    # Per-message keying: pop the nav-stack frame belonging to the
+    # message the user clicked `b` on. Earlier the key was uid-only
+    # so any button on any of the user's messages would pop the same
+    # shared per-uid stack -- the regression we just fixed surfaced
+    # when a /start or new URL scrolled up enough to overwrite the
+    # frame a stale `b` was about to pop.
+    prev, data = nav_pop(bot, q.message.chat.id, q.message.message_id); await q.answer()
+    if prev == NAV_MAIN:
+        await q.message.reply_text(await welcome_text(bot), reply_markup=menu(bot, uid)); await q.message.delete()
+    elif prev == NAV_RECENT:
+        await show_recent(bot, u, c); await q.message.delete()
     elif prev == NAV_FORMAT:
-        url, video_id = data; bot._pending_urls[uid] = (url, video_id, '')
+        url, video_id = data
+        # Re-rendering the format picker for the popped (url, video_id).
+        # show_format_choice writes `_pending_urls` keyed by the new
+        # picker message_id, so we don't re-write here (doing so would
+        # race against show_format_choice's own write inside the same
+        # event-loop tick).
         await show_format_choice(bot, uid, url, video_id, q.message); await q.message.delete()
-    else: await q.message.reply_text(await welcome_text(bot), reply_markup=menu(bot, uid)); await q.message.delete()
+    else:
+        await q.message.reply_text(await welcome_text(bot), reply_markup=menu(bot, uid)); await q.message.delete()
 
 async def router(bot, u, c):
     q = u.callback_query; await q.answer(); d, uid = q.data, u.effective_user.id
     if d == 'b': await handle_back(bot, u, c)
-    elif d == 'r': nav_push(bot, uid, NAV_MAIN); await show_recent(bot, u, c)
+    elif d == 'r':
+        # Per-message nav on the /recent trigger message so a back-click
+        # on the /recent rendering's own message goes to NAV_MAIN
+        # (defaults). The /recent-list entries themselves do not push a
+        # frame on this message -- they push NAV_RECENT on the delivery
+        # screen show_delivery renders, see formats.show_delivery.
+        nav_push(bot, q.message.chat.id, q.message.message_id, NAV_MAIN); await show_recent(bot, u, c)
     elif d == 'lang': await _change_language(bot, u, c)
     elif d == 'delivery': await _change_delivery(bot, u, c)
     elif d == 'vq': await _change_video_quality(bot, u, c)
@@ -328,7 +453,7 @@ async def router(bot, u, c):
     elif d == 'vc': await q.message.reply_text(f"📦 {len(bot.videos.get(uid,[]))} files")
     elif d == 'clear_all': await _clear_all(bot, u, c)
     elif d.startswith('fmt_'): from app.handlers.formats import choose_format; await choose_format(bot, u, c)
-    elif d.startswith('backfmt_'): from app.handlers.formats import back_to_formats; await back_to_formats(bot, u, c)
+    elif d == 'backfmt': from app.handlers.formats import back_to_formats; await back_to_formats(bot, u, c)
     elif d.startswith('morefmt_'): from app.handlers.formats import also_get_other_format; await also_get_other_format(bot, u, c)
     elif d.startswith('tg_'): from app.handlers.formats import send_telegram; await send_telegram(bot, u, c)
     elif d.startswith('lk_'): from app.handlers.formats import send_link; await send_link(bot, u, c)
@@ -574,9 +699,9 @@ async def _select(bot, u, c):
         await show_recent(bot, u, c)
         await q.message.delete()
         return
-    nav_push(bot, uid, NAV_RECENT)
+    nav_push(bot, q.message.chat.id, q.message.message_id, NAV_RECENT)
     from app.handlers.formats import show_delivery
-    await show_delivery(bot, q.message, videos[idx], idx)
+    await show_delivery(bot, q.message, videos[idx])
     await q.message.delete()
 
 async def _delete(bot, u, c):

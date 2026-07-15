@@ -71,11 +71,14 @@ BOT_TOKEN=your_bot_token_here
 BASE_DOWNLOAD_LINK=http://${IP}:8000
 WHITELIST_USERS=
 STORAGE_DAYS=2
+# For HTTPS, uncomment and point to your cert+key files (Let's Encrypt etc.):
+# SSL_CERT_FILE=/etc/letsencrypt/live/yourdomain.com/fullchain.pem
+# SSL_KEY_FILE=/etc/letsencrypt/live/yourdomain.com/privkey.pem
 EOF
     echo "⚠️  .env created - edit it: nano $PROJECT_DIR/.env"
 fi
 
-mkdir -p data/cookies downloads /var/log/$SERVICE_NAME
+mkdir -p data/cookies downloads ssl /var/log/$SERVICE_NAME
 
 cat > /etc/systemd/system/$SERVICE_NAME.service << EOF
 [Unit]
@@ -90,6 +93,13 @@ Environment=PATH=$PROJECT_DIR/venv/bin:/usr/local/bin:/usr/bin:/bin:/root/.deno/
 ExecStart=$PROJECT_DIR/venv/bin/python $PROJECT_DIR/bot.py
 Restart=always
 RestartSec=10
+# Exit code 78 (EX_CONFIG in sysexits.h) is raised by app/main() when
+# SSL_CERT_FILE / SSL_KEY_FILE are misconfigured. Do NOT auto-restart
+# on permanent config errors — the operator must fix .env and run
+# `systemctl start telegramytbot` manually. Without this, the bot
+# loops every 10s flooding journalctl with the same CRITICAL line
+# until the operator notices.
+RestartPreventExitStatus=78
 StandardOutput=append:/var/log/$SERVICE_NAME/bot.log
 StandardError=append:/var/log/$SERVICE_NAME/bot_error.log
 

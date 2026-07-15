@@ -988,53 +988,61 @@ class TestMoreFormatButtons(unittest.TestCase):
 
     def test_video_record_exposes_audio_and_thumb(self):
         from app.handlers.formats import _more_format_buttons
-        rows = _more_format_buttons(idx=0, current_media_type='video')
+        rows = _more_format_buttons(current_media_type='video')
         cbs = [btn.callback_data for row in rows for btn in row]
         # Both expected, current NEVER repeated.
-        self.assertIn('morefmt_audio_0', cbs)
-        self.assertIn('morefmt_thumb_0', cbs)
-        self.assertNotIn('morefmt_video_0', cbs)
+        # 2026-07-15 stale-button fix: cb_data is now index-free
+        # (`morefmt_<mt>`) because the source record is resolved on
+        # click via bot._delivery_screen, NOT bot.videos[uid][idx].
+        self.assertIn('morefmt_audio', cbs)
+        self.assertIn('morefmt_thumb', cbs)
+        self.assertNotIn('morefmt_video', cbs)
 
     def test_audio_record_exposes_video_and_thumb(self):
         from app.handlers.formats import _more_format_buttons
-        rows = _more_format_buttons(idx=0, current_media_type='audio')
+        rows = _more_format_buttons(current_media_type='audio')
         cbs = [btn.callback_data for row in rows for btn in row]
-        self.assertIn('morefmt_video_0', cbs)
-        self.assertIn('morefmt_thumb_0', cbs)
-        self.assertNotIn('morefmt_audio_0', cbs)
+        self.assertIn('morefmt_video', cbs)
+        self.assertIn('morefmt_thumb', cbs)
+        self.assertNotIn('morefmt_audio', cbs)
 
     def test_thumb_record_exposes_video_and_audio(self):
         from app.handlers.formats import _more_format_buttons
-        rows = _more_format_buttons(idx=0, current_media_type='thumb')
+        rows = _more_format_buttons(current_media_type='thumb')
         cbs = [btn.callback_data for row in rows for btn in row]
-        self.assertIn('morefmt_video_0', cbs)
-        self.assertIn('morefmt_audio_0', cbs)
-        self.assertNotIn('morefmt_thumb_0', cbs)
+        self.assertIn('morefmt_video', cbs)
+        self.assertIn('morefmt_audio', cbs)
+        self.assertNotIn('morefmt_thumb', cbs)
 
     # ---- callback_data 64-byte cap -----------------------------
 
-    def test_callback_data_under_64_bytes_for_realistic_idx(self):
+    def test_callback_data_under_64_bytes_for_all_media_types(self):
         # Telegram bot API rejects callback_data over 64 bytes. The
-        # longest realistic case is `morefmt_<longest_mt>_<3 digit idx>`
-        # — index values are bounded by the recent-videos cap so any
-        # surgery that pushes them past 999 videos doesn't break us.
+        # 2026-07-15 stale-button fix made cb_data index-free
+        # (`morefmt_<mt>`), so the worst case is bounded by the
+        # longest mt name (`thumb` = 5 chars) plus the literal
+        # prefix (`morefmt_` = 8 chars) = 13 chars — comfortably
+        # under the 64-byte cap for every Telegram-supported
+        # language. The OLD `for idx in ... 999` loop was a
+        # meaningful safety net when cb_data carried an idx suffix;
+        # trivial now, kept asserted so a refactor that re-bakes
+        # an idx back into cb_data is caught.
         from app.handlers.formats import _more_format_buttons
         for mt in ('video', 'audio', 'thumb'):
-            for idx in (0, 1, 9, 99, 999):
-                rows = _more_format_buttons(idx=idx, current_media_type=mt)
-                for row in rows:
-                    for btn in row:
-                        self.assertLessEqual(
-                            len(btn.callback_data.encode('utf-8')), 64,
-                            f'callback_data > 64 bytes: {btn.callback_data!r}')
+            rows = _more_format_buttons(current_media_type=mt)
+            for row in rows:
+                for btn in row:
+                    self.assertLessEqual(
+                        len(btn.callback_data.encode('utf-8')), 64,
+                        f'callback_data > 64 bytes: {btn.callback_data!r}')
 
     def test_only_one_row_returned(self):
         # Layout contract: exactly one row containing the 2 sibling
-        # buttons. Keeps the delivery kb legible on a 3.5"-phone screen
-        # — adding more rows would push the kb above Telegram's
-        # comfortable button height.
+        # buttons. Keeps the delivery kb legible on a 3.5"-phone
+        # screen — adding more rows would push the kb above
+        # Telegram's comfortable button height.
         from app.handlers.formats import _more_format_buttons
-        rows = _more_format_buttons(idx=0, current_media_type='video')
+        rows = _more_format_buttons(current_media_type='video')
         self.assertEqual(len(rows), 1)
         self.assertEqual(len(rows[0]), 2)
 
@@ -1103,46 +1111,68 @@ class TestShowRecentDeleteEntry(unittest.TestCase):
 
 
 class TestAlsoGetOtherFormatIdxShiftSafety(unittest.TestCase):
-    """Pins the timing invariant that protects also_get_other_format from
-    silently routing to the wrong record when bot.videos[uid] shifts
-    between when show_delivery rendered the morefmt_ callback and when
-    the user tapped it.
+    """Pins the per-message keying invariant that protects
+    also_get_other_format from routing to the wrong record when
+    bot.videos[uid] shifts between when show_delivery rendered the
+    morefmt_<mt> callback and when the user tapped it.
 
-    The fix is a 1-line `prune_missing(bot, uid)` call that has to come
-    BEFORE any `videos[idx]` access — otherwise a retention sweep or
-    parallel successful download could leave idx pointing at a record
-    different from the one the delivery screen was actually about.
+    2026-07-15 stale-button fix: the OLD defense used a 1-line
+    `prune_missing(bot, uid)` call BEFORE any `videos[idx]` access
+    (because cb_data carried idx baked in, a list shift on a parallel
+    download could rewire an AlsoGet click to a different record).
+    The NEW design resolves the source record through
+    `_resolve_delivery_record(bot, c)` keyed by the kb's own
+    `(chat_id, message_id)` — so a parallel insert at
+    bot.videos[uid][0] cannot rewire an AlsoGet click to a wrong
+    record. The dead-entry eviction inside `_resolve_delivery_record`
+    covers the file-deleted-between-render-and-click case the OLD
+    `prune_missing` was meant to catch.
 
-    Cheap source-level check, mirrors the prefix-contract pattern used
-    in TestRunInExecutorKwargsRegression + TestShowRecentDeleteEntry so
-    a future refactor that moves the call past the lookup gets caught
-    immediately rather than reported by a confused user.
+    Cheap source-level check (mirrors the prefix-contract pattern in
+    TestRunInExecutorKwargsRegression + TestShowRecentDeleteEntry) so
+    a future refactor that reintroduces a bot.videos[uid] cb-data
+    resolution in this handler — and re-introduces the stale-button
+    bug — gets caught immediately, not reported by a confused user.
+
+    End-to-end concurrent-flow coverage lives in
+    tests/test_formats.py::TestStaleButtonFix; this test is the
+    source-level guard that complements the runtime contract.
     """
 
-    def test_prune_missing_runs_before_idx_lookup(self):
+    def test_uses_per_message_resolution_for_idx_shift_safety(self):
         import inspect
         from app.handlers import formats
         src = inspect.getsource(formats.also_get_other_format)
-        # Both anchors MUST exist; a defensive assertIn on each makes
-        # the test's intent self-documenting if either is removed.
+        # Positive anchor: the per-message resolver is in the handler.
+        # Without it the AlsoGet button would index into
+        # bot.videos[uid] for cb-data resolution — exactly the
+        # original stale-button bug.
         self.assertIn(
-            'prune_missing(bot, uid)', src,
-            'also_get_other_format must call prune_missing so a list '
-            'shift between delivery-render and user-tap cannot route '
-            'the Also-get callback to a different record.')
-        self.assertIn(
-            'videos = bot.videos.get(uid, [])', src,
-            'also_get_other_format must look up by index from '
-            'bot.videos[uid].')
-        prune_pos = src.index('prune_missing(bot, uid)')
-        idx_pos = src.index('videos = bot.videos.get(uid, [])')
-        self.assertLess(
-            prune_pos, idx_pos,
-            'prune_missing(bot, uid) must run BEFORE the videos[idx] '
-            'lookup so the post-prune list bounds are observed; '
-            'otherwise a concurrent download or retention sweep shifts '
-            'the list and the user is offered audio of a video they '
-            'never delivered audio for.')
+            '_resolve_delivery_record(bot, c)', src,
+            'also_get_other_format must resolve the source record '
+            'via _resolve_delivery_record (per-message keying) so a '
+            'parallel insert at bot.videos[uid][0] cannot rewire an '
+            'AlsoGet click to a different record. Refactors that drop '
+            'the per-message resolver reintroduce the stale-button '
+            'bug the 2026-07-15 fix closed.')
+        # Negative anchors: the per-message keying REPLACES the
+        # legacy bot.videos[uid][idx] lookup. A future change that
+        # reintroduces either form makes the cb handler
+        # pressure-fitted to whichever idx is currently 0 — the
+        # EXACT original bug. The find_existing(bot, uid, ...) call
+        # later in the handler is for dedup-against-existing-mt
+        # ONLY and does not touch bot.videos[uid] in the source,
+        # so these substrings are clean negative anchors.
+        for forbidden in ('bot.videos[uid]', 'bot.videos.get(uid',
+                          'prune_missing(bot, uid)'):
+            self.assertNotIn(
+                forbidden, src,
+                f'also_get_other_format must NOT reference '
+                f'{forbidden!r} — the per-message _delivery_screen '
+                'key is self-identifying and the legacy '
+                'prune-missing-then-idx-lookup defense is what the '
+                '2026-07-15 stale-button fix removed. Reintroducing '
+                'it reopens the bug.')
 
 
 class TestInfoCache(unittest.TestCase):

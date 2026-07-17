@@ -1,4 +1,4 @@
-# .github/workflows/deploy.yml
+# .github/workflows/deploy.yml - Complete replacement
 name: Deploy TelegramYtBot to VPS
 
 on:
@@ -12,40 +12,54 @@ env:
   SERVICE_NAME: telegramytbot
 
 jobs:
-  deploy:
+  # Job 1: Test phase (fast feedback)
+  test:
     runs-on: ubuntu-latest
-    name: 🚀 Deploy to VPS
-    
+    name: 🧪 Test & Build
     steps:
-      - name: 📥 Checkout code
-        uses: actions/checkout@v4
-
-      - name: 🐍 Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
           cache-dependency-path: requirements.txt
+      - run: pip install --upgrade pip && pip install -r requirements.txt
+      - run: python -m unittest discover tests -v
 
-      - name: 📦 Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: 🧪 Run tests (must pass before deploy)
-        run: python -m unittest discover tests -v
-
-      - name: 🔑 Setup SSH
-        uses: webfactory/ssh-agent@v0.9.0
+  # Job 2: VPS setup (runs in parallel after tests)
+  setup-vps:
+    runs-on: ubuntu-latest
+    name: 🔧 Setup VPS Environment
+    needs: test
+    steps:
+      - uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+      - run: mkdir -p ~/.ssh && ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
       
-      - name: 🔗 Add host key
+      - name: 📦 Install system packages
         run: |
-          mkdir -p ~/.ssh
-          ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
+          ssh -o ConnectTimeout=10 ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
+            'apt-get update -qq && apt-get install -y -qq python3 python3-pip python3-venv ffmpeg curl git build-essential'
       
-      - name: 🚀 Deploy to VPS
+      - name: 🔧 Install QuickJS-NG
+        run: |
+          ssh -o ConnectTimeout=10 ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
+            'command -v qjs >/dev/null || (cd /tmp && git clone --depth 1 https://github.com/quickjs-ng/quickjs.git && cd quickjs && make -j$(nproc) && make install && rm -rf /tmp/quickjs)'
+
+  # Job 3: Deploy (waits for both test and setup)
+  deploy:
+    runs-on: ubuntu-latest
+    name: 🚀 Deploy to VPS
+    needs: [test, setup-vps]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+      - run: mkdir -p ~/.ssh && ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
+      
+      - name: 🚀 Deploy application
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           BASE_URL: ${{ secrets.BASE_URL }}
@@ -54,162 +68,45 @@ jobs:
           COOKIE_TTL_HOURS: ${{ vars.COOKIE_TTL_HOURS || '0' }}
           MAX_TELEGRAM_SIZE_MB: ${{ vars.MAX_TELEGRAM_SIZE_MB || '50' }}
           USE_WARP: ${{ secrets.USE_WARP || 'false' }}
-          # Base64-encoded SSL cert+key for native HTTPS termination.
-          # Generate from your Let's Encrypt fullchain.pem and privkey.pem:
-          #   base64 -w0 /etc/letsencrypt/live/yourdomain.com/fullchain.pem
-          #   base64 -w0 /etc/letsencrypt/live/yourdomain.com/privkey.pem
-          # Paste the one-line outputs as GitHub Repository Secrets
-          # `SSL_CERT_B64` and `SSL_KEY_B64`. When both are set, deploy.yml
-          # decodes them to $PROJECT_DIR/ssl/ and appends the cert paths
-          # to .env. Leave both empty (default) for plain HTTP only.
           SSL_CERT_B64: ${{ secrets.SSL_CERT_B64 || '' }}
           SSL_KEY_B64: ${{ secrets.SSL_KEY_B64 || '' }}
         run: |
+          # Create deploy script with improved error handling
           cat > /tmp/deploy_script.sh << 'SCRIPTEOF'
           #!/bin/bash
           set -e
           
           PROJECT_DIR="PROJECT_DIR_PLACEHOLDER"
           SERVICE_NAME="SERVICE_NAME_PLACEHOLDER"
-
+          
           echo "========================================"
           echo "  TelegramYtBot Deployment"
           echo "========================================"
           
-          if systemctl is-active --quiet $SERVICE_NAME; then
-            echo "⏹️  Stopping $SERVICE_NAME..."
-            systemctl stop $SERVICE_NAME
-            sleep 2
-          fi
-          
-          echo "📦 Installing dependencies..."
-          apt-get update -qq
-          apt-get install -y -qq python3 python3-pip python3-venv ffmpeg curl git lsb-release gpg build-essential make cmake
-          
-          # Install QuickJS-NG (faster JS runtime for yt-dlp)
-          if ! command -v qjs &>/dev/null; then
-            echo "🔧 Installing QuickJS-NG..."
-            cd /tmp
-            rm -rf quickjs
-            git clone --depth 1 https://github.com/quickjs-ng/quickjs.git quickjs
-            cd quickjs
-            make -j$(nproc)
-            make install
-            cd /opt/TelegramYtBot 2>/dev/null || cd /root
-            rm -rf /tmp/quickjs
-            echo "  ✓ QuickJS-NG installed"
-          fi
-          
-          # Install Cloudflare Warp if missing
-          if [ "$USE_WARP" = "true" ]; then
-            if ! command -v warp-cli &>/dev/null; then
-              echo "🔧 Installing Cloudflare Warp..."
-              curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-              echo "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/cloudflare-client.list
-              apt-get update -qq
-              apt-get install -y -qq cloudflare-warp
-            fi
-
-            # Setup Warp only if proxy not working.
-            # Manage warp-svc via systemd with Restart=always so the daemon
-            # auto-recovers if it crashes (no more silent port-40000 outages).
-            # The drop-in overrides the distro unit's ExecStart so --accept-tos
-            # is preserved (don't lose the recent fix: cdbe3c7/687228c/cae94ff).
-            write_warp_override() {
-              mkdir -p /etc/systemd/system/warp-svc.service.d
-              printf '%s\n' \
-                '[Service]' \
-                'ExecStart=' \
-                'ExecStart=/usr/bin/warp-svc --accept-tos' \
-                'Restart=always' \
-                'RestartSec=5' \
-                'StartLimitIntervalSec=120' \
-                'StartLimitBurst=10' \
-                > /etc/systemd/system/warp-svc.service.d/override.conf
+          run_with_timeout() {
+            local timeout=$1; shift
+            timeout "$timeout" "$@" || {
+              [ $? -eq 124 ] && echo "❌ Timed out: $*" && return 124
+              return $?
             }
-
-            # Poll the Warp proxy until it answers or the deadline passes.
-            # Used after `systemctl restart warp-svc` because warp-svc does not
-            # bind 40000 the instant systemd says it's started.
-            wait_for_warp_proxy() {
-              local deadline=${1:-10} i
-              for i in $(seq 1 "$deadline"); do
-                if curl --proxy http://127.0.0.1:40000 --max-time 1 https://ifconfig.me 2>/dev/null | grep -q .; then
-                  return 0
-                fi
-                sleep 1
-              done
-              return 1
-            }
-
-            if ! wait_for_warp_proxy 3; then
-              echo "🔧 Configuring Cloudflare Warp..."
-              systemctl stop warp-svc 2>/dev/null || true
-              pkill -9 warp-svc 2>/dev/null || true
-              pkill -9 warp-cli 2>/dev/null || true
-              sleep 2
-              rm -f /run/cloudflare-warp/warp_service
-
-              write_warp_override
-              systemctl daemon-reload
-              systemctl enable warp-svc >/dev/null 2>&1 || true
-
-              # Start under systemd (not nohup) so the Restart=always policy applies.
-              systemctl start warp-svc
-              sleep 5
-
-              echo "y" | warp-cli registration new 2>/dev/null || true
-              warp-cli mode proxy
-              warp-cli connect || true
-
-              if wait_for_warp_proxy 10; then
-                echo "  ✓ Warp ready"
-              else
-                echo "  ⚠ Warp proxy not responding yet; systemd (Restart=always) will keep restarting warp-svc"
-              fi
-            else
-              # Proxy already works — but make sure the override is in place so
-              # the daemon survives a future crash (and keeps --accept-tos).
-              # If we just wrote the override, restart so the running warp-svc
-              # picks up the new --accept-tos instead of waiting for a crash.
-              if [ ! -f /etc/systemd/system/warp-svc.service.d/override.conf ] \
-                || ! grep -q '^Restart=always' /etc/systemd/system/warp-svc.service.d/override.conf 2>/dev/null; then
-                write_warp_override
-                systemctl daemon-reload
-                systemctl restart warp-svc \
-                  || { echo "  ⚠ systemctl restart warp-svc failed (exit $?). systemd (Restart=always) will retry."; }
-                # Re-assert proxy mode + connection. timeout guards against hung
-                # warp-cli stalling the deploy.
-                timeout 10 warp-cli mode proxy >/dev/null 2>&1 || true
-                timeout 10 warp-cli connect >/dev/null 2>&1 || true
-                # Poll up to 10s for the proxy to actually answer (warp-svc can
-                # take 2-6s after restart before listening on 40000).
-                if wait_for_warp_proxy 10; then
-                  echo "  ✓ Warp override applied, warp-svc restarted, proxy up (Restart=always + --accept-tos)"
-                else
-                  echo "  ⚠ Warp restart did NOT bring the proxy back up; systemd (Restart=always) will keep retrying"
-                fi
-              else
-                echo "  ✓ Warp override already in place, proxy up"
-              fi
-            fi
-          else
-            echo "⏭️  Cloudflare Warp disabled (USE_WARP=false). Skipping install + setup."
-          fi
+          }
           
+          # Stop service if running
+          systemctl is-active --quiet $SERVICE_NAME && systemctl stop $SERVICE_NAME || true
+          
+          # Update code
           if [ -d "$PROJECT_DIR/.git" ]; then
             echo "📥 Pulling latest code..."
             cd "$PROJECT_DIR"
-            git fetch origin
-            git reset --hard origin/master
-            git clean -fd
+            run_with_timeout 300 git fetch origin || exit 1
+            run_with_timeout 300 git reset --hard origin/master || exit 1
           else
             echo "📥 Cloning repository..."
-            rm -rf "$PROJECT_DIR"
-            git clone --branch master https://github.com/HoomanJCode/Telegram_Yt_Bot.git "$PROJECT_DIR"
+            run_with_timeout 300 git clone --branch master https://github.com/HoomanJCode/Telegram_Yt_Bot.git "$PROJECT_DIR" || exit 1
             cd "$PROJECT_DIR"
           fi
           
+          # Create .env
           echo "⚙️  Creating .env..."
           cat > "$PROJECT_DIR/.env" << EOF
           BOT_TOKEN=BOT_TOKEN_PLACEHOLDER
@@ -222,66 +119,44 @@ jobs:
           EOF
           chmod 600 "$PROJECT_DIR/.env"
           
-          if grep -q "^BOT_TOKEN=$" "$PROJECT_DIR/.env" 2>/dev/null; then
-            echo "❌ ERROR: BOT_TOKEN is empty!"
-            exit 1
-          fi
-
-          # Install SSL certificates from base64-encoded GitHub Secrets.
-          # If both SSL_CERT_B64 and SSL_KEY_B64 are set in the workflow
-          # environment, decode them under $PROJECT_DIR/ssl/ and append
-          # the resulting file paths to .env. If only ONE is set, fail
-          # with a clear error (partial config is always a typo). If
-          # neither is set, skip entirely — legacy plain-HTTP mode.
+          [ -z "$(grep '^BOT_TOKEN=$' "$PROJECT_DIR/.env" 2>/dev/null)" ] || { echo "❌ BOT_TOKEN is empty!"; exit 1; }
+          
+          # Setup SSL (if provided)
           if [ -n "SSL_CERT_B64_PLACEHOLDER" ] && [ -n "SSL_KEY_B64_PLACEHOLDER" ]; then
             echo "🔐 Installing SSL certificates..."
             mkdir -p "$PROJECT_DIR/ssl"
-            echo 'SSL_CERT_B64_PLACEHOLDER' | base64 -d > "$PROJECT_DIR/ssl/fullchain.pem" || {
-              echo "❌ Failed to decode SSL_CERT_B64 — check your Repository Secret is valid base64"
-              echo "   Generate with: base64 -w0 /etc/letsencrypt/live/domain/fullchain.pem"
-              exit 1
-            }
-            echo 'SSL_KEY_B64_PLACEHOLDER' | base64 -d > "$PROJECT_DIR/ssl/privkey.pem" || {
-              echo "❌ Failed to decode SSL_KEY_B64 — check your Repository Secret is valid base64"
-              echo "   Generate with: base64 -w0 /etc/letsencrypt/live/domain/privkey.pem"
-              exit 1
-            }
+            echo 'SSL_CERT_B64_PLACEHOLDER' | base64 -d > "$PROJECT_DIR/ssl/fullchain.pem" || exit 1
+            echo 'SSL_KEY_B64_PLACEHOLDER' | base64 -d > "$PROJECT_DIR/ssl/privkey.pem" || exit 1
             chmod 600 "$PROJECT_DIR/ssl/privkey.pem"
-            {
-              echo ""
-              echo "# SSL certificates (decoded from GitHub Secrets on deploy)"
-              echo "SSL_CERT_FILE=$PROJECT_DIR/ssl/fullchain.pem"
-              echo "SSL_KEY_FILE=$PROJECT_DIR/ssl/privkey.pem"
-            } >> "$PROJECT_DIR/.env"
-            echo "  ✓ SSL certs installed"
-          elif [ -n "SSL_CERT_B64_PLACEHOLDER" ] || [ -n "SSL_KEY_B64_PLACEHOLDER" ]; then
-            echo "❌ ERROR: Both SSL_CERT_B64 and SSL_KEY_B64 GitHub Secrets must be set together, or neither set"
-            exit 1
+            { echo ""; echo "SSL_CERT_FILE=$PROJECT_DIR/ssl/fullchain.pem"; echo "SSL_KEY_FILE=$PROJECT_DIR/ssl/privkey.pem"; } >> "$PROJECT_DIR/.env"
           fi
           
+          # Setup Python venv (cached if exists)
           echo "🐍 Setting up Python..."
           cd "$PROJECT_DIR"
-          [ -d venv ] && rm -rf venv
-          python3 -m venv venv
-          $PROJECT_DIR/venv/bin/pip install --upgrade pip -q
-          $PROJECT_DIR/venv/bin/pip install -r requirements.txt -q
-          $PROJECT_DIR/venv/bin/pip install --upgrade yt-dlp yt-dlp-ejs aiohttp -q
+          if [ ! -f venv/bin/python ] || ! venv/bin/python -c "import pip" 2>/dev/null; then
+            [ -d venv ] && rm -rf venv
+            run_with_timeout 300 python3 -m venv venv || exit 1
+          fi
+          run_with_timeout 300 $PROJECT_DIR/venv/bin/pip install --upgrade pip -q || exit 1
+          run_with_timeout 300 $PROJECT_DIR/venv/bin/pip install -r requirements.txt -q || exit 1
+          run_with_timeout 300 $PROJECT_DIR/venv/bin/pip install --upgrade yt-dlp yt-dlp-ejs aiohttp -q || exit 1
           
-          mkdir -p "$PROJECT_DIR/data" "$PROJECT_DIR/downloads"
-          mkdir -p /var/log/$SERVICE_NAME
+          mkdir -p "$PROJECT_DIR/data" "$PROJECT_DIR/downloads" /var/log/$SERVICE_NAME
           
+          # Validate config
           echo "🧪 Testing configuration..."
           $PROJECT_DIR/venv/bin/python -c "
           import sys; sys.path.insert(0, '$PROJECT_DIR')
           from config import Config
           c = Config()
-          print('Token:', 'SET' if c.BOT_TOKEN and 'YOUR_BOT_TOKEN' not in c.BOT_TOKEN else 'MISSING')
-          print('Base URL:', c.BASE_DOWNLOAD_LINK)
-          print('Storage:', c.STORAGE_DAYS, 'days')
-          print('Use Warp:', c.USE_WARP)
-          "
+          print(f'Token: SET' if c.BOT_TOKEN and 'YOUR_BOT_TOKEN' not in c.BOT_TOKEN else 'MISSING')
+          print(f'Base URL: {c.BASE_DOWNLOAD_LINK}')
+          print(f'Storage: {c.STORAGE_DAYS} days')
+          " || exit 1
           
-          echo "🔧 Creating service..."
+          # Create systemd service
+          echo "🔧 Creating systemd service..."
           cat > /etc/systemd/system/$SERVICE_NAME.service << SERVICEEOF
           [Unit]
           Description=TelegramYtBot - YouTube Downloader
@@ -295,11 +170,6 @@ jobs:
           ExecStart=$PROJECT_DIR/venv/bin/python $PROJECT_DIR/bot.py
           Restart=on-failure
           RestartSec=10
-          # Exit code 78 (EX_CONFIG from sysexits.h) is raised by
-          # app/__init__.py::main() when SSL_CERT_FILE / SSL_KEY_FILE
-          # are missing or misconfigured. Prevent systemd from auto-
-          # restarting into a permanent error loop; the operator must
-          # fix .env and run `systemctl start telegramytbot` manually.
           RestartPreventExitStatus=78
           StandardOutput=append:/var/log/$SERVICE_NAME/bot.log
           StandardError=append:/var/log/$SERVICE_NAME/bot_error.log
@@ -308,9 +178,9 @@ jobs:
           WantedBy=multi-user.target
           SERVICEEOF
           
-          systemctl daemon-reload
-          systemctl enable $SERVICE_NAME
+          systemctl daemon-reload && systemctl enable $SERVICE_NAME
           
+          # Start service
           echo "▶️  Starting service..."
           systemctl start $SERVICE_NAME
           sleep 5
@@ -320,9 +190,7 @@ jobs:
             systemctl status $SERVICE_NAME --no-pager -l
           else
             echo "❌ Service failed!"
-            echo "=== Error Log ==="
             tail -20 /var/log/$SERVICE_NAME/bot_error.log 2>/dev/null || true
-            echo "=== Journal ==="
             journalctl -u $SERVICE_NAME -n 20 --no-pager || true
             exit 1
           fi
@@ -330,6 +198,7 @@ jobs:
           echo "✅ Deployment Complete!"
           SCRIPTEOF
           
+          # Substitute and execute
           sed -i "s|PROJECT_DIR_PLACEHOLDER|${{ env.PROJECT_DIR }}|g" /tmp/deploy_script.sh
           sed -i "s|SERVICE_NAME_PLACEHOLDER|${{ env.SERVICE_NAME }}|g" /tmp/deploy_script.sh
           sed -i "s|BOT_TOKEN_PLACEHOLDER|${BOT_TOKEN}|g" /tmp/deploy_script.sh
@@ -341,17 +210,13 @@ jobs:
           sed -i "s|USE_WARP_PLACEHOLDER|${USE_WARP}|g" /tmp/deploy_script.sh
           sed -i "s|SSL_CERT_B64_PLACEHOLDER|${SSL_CERT_B64}|g" /tmp/deploy_script.sh
           sed -i "s|SSL_KEY_B64_PLACEHOLDER|${SSL_KEY_B64}|g" /tmp/deploy_script.sh
-
-          # Canonicalize USE_WARP to lowercase "true"/"false" here in the runner
-          # shell (NOT inside the heredoc — that one is `<< 'SCRIPTEOF'`, quoted,
-          # so $USE_WARP would not be expanded and the script would see an empty
-          # string). Mirrors Python's _env_bool accepted set: 1/true/yes/on.
-          RAW_USE_WARP=$(printf '%s' "${USE_WARP:-false}" | tr '[:upper:]' '[:lower:]')
-          case "$RAW_USE_WARP" in
-            1|true|yes|on) USE_WARP=true ;;
-            *)             USE_WARP=false ;;
-          esac
-          echo "  USE_WARP=$USE_WARP"
-
+          
           scp /tmp/deploy_script.sh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/tmp/deploy_script.sh
-          ssh ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} "USE_WARP=$USE_WARP bash /tmp/deploy_script.sh"
+          
+          echo "📡 Executing deployment (timeout: 10 min)..."
+          timeout 600 ssh \
+            -o ConnectTimeout=10 \
+            -o ServerAliveInterval=30 \
+            -o StrictHostKeyChecking=no \
+            ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
+            "bash /tmp/deploy_script.sh" || exit 1

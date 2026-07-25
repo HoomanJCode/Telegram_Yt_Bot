@@ -22,6 +22,7 @@ reply_msg.message_id)] = record` so the cb handler's
 `_resolve_delivery_record(bot, c)` lookup is unambiguous.
 """
 import logging
+import traceback
 from pathlib import Path
 from urllib.parse import quote
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -525,19 +526,42 @@ async def _reply_link_text(bot, msg, rec):
 async def send_link(bot, u, c):
     """Handle `lk_send` cb. Resolves the record via _delivery_screen."""
     q = u.callback_query
+    if q is None:
+        return  # stale update or race — nothing to do
     try:
-        await q.answer()
-    except BadRequest:
-        pass
-    rec = _resolve_delivery_record(bot, q)
-    if rec is None:
-        await _unavailable_message(bot, q)
-        return
-    if not Path(rec.file_path).exists():
-        await _unavailable_message(bot, q)
-        return
-    await _reply_link_text(bot, q.message, rec)
-    await q.message.delete()
+        try:
+            await q.answer()
+        except BadRequest:
+            pass
+        rec = _resolve_delivery_record(bot, q)
+        if rec is None:
+            await _unavailable_message(bot, q)
+            return
+        if not Path(rec.file_path).exists():
+            await _unavailable_message(bot, q)
+            return
+        await _reply_link_text(bot, q.message, rec)
+        await q.message.delete()
+    except Exception as exc:
+        # Diagnostic catch-all: log the FULL traceback so we can
+        # finally see what's crashing. Also try to tell the user.
+        tb = traceback.format_exc()
+        logger.error(
+            'send_link CRASH: %s: %s\n%s',
+            type(exc).__name__, str(exc)[:300], tb)
+        # Try to send a visible error to the user
+        try:
+            await q.message.reply_text(
+                f"❌ Link failed: {type(exc).__name__}: {str(exc)[:200]}",
+                reply_to_message_id=q.message.message_id)
+        except Exception:
+            # Last resort: send to the chat directly (works even if
+            # the delivery-kb message has been deleted).
+            try:
+                await u.effective_chat.send_message(
+                    f"❌ Link failed: {type(exc).__name__}")
+            except Exception:
+                pass
 
 async def back_to_formats(bot, u, c):
     """Handle `backfmt` cb. Re-renders the format picker for the

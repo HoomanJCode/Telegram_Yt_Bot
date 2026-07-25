@@ -391,10 +391,14 @@ async def show_delivery(bot, msg, record):
     # "Also get" rows so the user can grab the OTHER formats (audio /
     # thumb for a video record, video + thumb for an audio record,
     # video + audio for a thumb record) without re-pasting the URL.
+    # Build as a mutable list first because PTB v20.x stores
+    # InlineKeyboardMarkup.inline_keyboard as an immutable tuple.
     kb = delivery_kb(bot)
     more_rows = _more_format_buttons(record.media_type)
     if more_rows:
-        kb.inline_keyboard.extend(more_rows)
+        rows = list(kb.inline_keyboard)
+        rows.extend(more_rows)
+        kb = InlineKeyboardMarkup(rows)
     delivery_text = f"{emoji} *{esc(record.title[:200])}*\n📦 {mb:.2f} MB | {record.media_type}\n🕒 {record.download_time}{sub_hint}\n\nChoose delivery:"
     delivery_msg = await _reply_delivery_kb(bot, msg, delivery_text, kb)
     _delivery_screen_put(bot, delivery_msg.chat.id,

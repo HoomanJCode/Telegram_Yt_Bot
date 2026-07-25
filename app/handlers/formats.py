@@ -26,6 +26,7 @@ from pathlib import Path
 from urllib.parse import quote
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatType, ParseMode
+from telegram.error import BadRequest
 from app.handlers.navigation import nav_push, NAV_RECENT
 from app.utils import esc, find_existing, get_default_delivery, _path_on_disk
 
@@ -435,7 +436,11 @@ async def send_link_direct(bot, msg, record):
 async def send_telegram(bot, u, c):
     """Handle `tg_send` cb. Resolves the record via
     _delivery_screen, never via bot.videos[uid][idx]."""
-    q = u.callback_query; await q.answer()
+    q = u.callback_query
+    try:
+        await q.answer()
+    except BadRequest:
+        pass
     rec = _resolve_delivery_record(bot, q)
     if rec is None:
         await _unavailable_message(bot, q)
@@ -478,7 +483,11 @@ async def _reply_link_text(bot, msg, rec):
 
 async def send_link(bot, u, c):
     """Handle `lk_send` cb. Resolves the record via _delivery_screen."""
-    q = u.callback_query; await q.answer()
+    q = u.callback_query
+    try:
+        await q.answer()
+    except BadRequest:
+        pass
     rec = _resolve_delivery_record(bot, q)
     if rec is None:
         await _unavailable_message(bot, q)
@@ -494,7 +503,11 @@ async def back_to_formats(bot, u, c):
     same video. `_pending_urls` is rewritten by show_format_choice
     at the new picker message_id (NOT re-written here -- doing so
     would race against show_format_choice's own write)."""
-    q = u.callback_query; await q.answer()
+    q = u.callback_query
+    try:
+        await q.answer()
+    except BadRequest:
+        pass
     rec = _resolve_delivery_record(bot, q)
     if rec is None:
         await _unavailable_message(bot, q)
@@ -520,7 +533,11 @@ async def also_get_other_format(bot, u, c):
     exists, surface the existing record's delivery screen rather
     than re-downloading.
     """
-    q = u.callback_query; await q.answer()
+    q = u.callback_query
+    try:
+        await q.answer()
+    except BadRequest:
+        pass
     try:
         _, mt = q.data.split('_', 1)
     except ValueError:

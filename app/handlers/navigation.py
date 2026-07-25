@@ -426,7 +426,15 @@ async def handle_back(bot, u, c):
         await q.message.reply_text(await welcome_text(bot), reply_markup=menu(bot, uid)); await q.message.delete()
 
 async def router(bot, u, c):
-    q = u.callback_query; await q.answer(); d, uid = q.data, u.effective_user.id
+    q = u.callback_query
+    try:
+        await q.answer()
+    except BadRequest:
+        # Query is too old or invalid — the callback data is still
+        # readable from the incoming update, so we can still dispatch
+        # to the handler. The handler's own q.answer() is also wrapped.
+        pass
+    d, uid = q.data, u.effective_user.id
     if d == 'b': await handle_back(bot, u, c)
     elif d == 'r':
         # Per-message nav on the /recent trigger message so a back-click

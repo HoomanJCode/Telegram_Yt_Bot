@@ -451,20 +451,33 @@ async def send_telegram(bot, u, c):
 
 
 async def _reply_link_text(bot, msg, rec):
-    """Send the download link with markdown; retry plain text on parse failure."""
-    url = f"{bot.base_url}/{quote(Path(rec.file_path).name)}"
-    mb = Path(rec.file_path).stat().st_size / 1024 / 1024
-    text = (
-        f"🎬 *{esc(rec.title[:200])}*\n\n"
-        f"📦 {mb:.2f} MB\n"
-        f"📥 {url}\n\n"
-        f"⚠️ File will be deleted after {bot.config.STORAGE_DAYS} days."
-    )
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📥 Download", url=url)],
-        [InlineKeyboardButton("🔙 Menu", callback_data='b')],
-    ])
+    """Send the download link with markdown; retry plain text on parse failure.
+
+    Builds the URL/text/kb inside the try block so an AttributeError
+    (missing bot.base_url) or TypeError (None title) doesn't escape.
+    Also ensures the URL has a scheme — Telegram rejects bare-domain
+    URLs in InlineKeyboardButton with BUTTON_URL_INVALID.
+    """
+    text = None  # set inside try; None signals 'could not build'
     try:
+        # Ensure the base URL has a scheme (Telegram requires it for
+        # InlineKeyboardButton.url). config.BASE_DOWNLOAD_LINK may be
+        # set as a bare domain like "host:8000" by the user.
+        raw_base = bot.base_url
+        if not raw_base.startswith('http'):
+            raw_base = f"https://{raw_base}"
+        dl_url = f"{raw_base}/{quote(Path(rec.file_path).name)}"
+        mb = Path(rec.file_path).stat().st_size / 1024 / 1024
+        text = (
+            f"🎬 *{esc(rec.title[:200])}*\n\n"
+            f"📦 {mb:.2f} MB\n"
+            f"📥 {dl_url}\n\n"
+            f"⚠️ File will be deleted after {bot.config.STORAGE_DAYS} days."
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📥 Download", url=dl_url)],
+            [InlineKeyboardButton("🔙 Menu", callback_data='b')],
+        ])
         return await msg.reply_text(
             text, parse_mode=ParseMode.MARKDOWN,
             disable_web_page_preview=False,
@@ -474,11 +487,39 @@ async def _reply_link_text(bot, msg, rec):
         logger.warning(
             'send_link: reply failed (%s: %s), '
             'falling back to plain text. title=%s',
-            type(exc).__name__, str(exc)[:80], text[:120])
+            type(exc).__name__, str(exc)[:80],
+            getattr(rec, 'title', '?')[:120])
+        # Retry with plain text AND a guaranteed-valid URL for the
+        # download button. The original dl_url may have been the
+        # source of the BadRequest, so rebuild it with the scheme
+        # fix applied unconditionally.
+        try:
+            raw_base = bot.base_url
+            if not raw_base.startswith('http'):
+                raw_base = f"https://{raw_base}"
+            dl_url = f"{raw_base}/{quote(Path(rec.file_path).name)}"
+        except Exception:
+            dl_url = None
+        # Rebuild plain text including the URL if possible
+        if text is not None:
+            plain = text.replace('*', '')
+        elif dl_url:
+            plain = f"📥 {dl_url}"
+        else:
+            plain = "❌ Unable to generate download link"
+        if dl_url:
+            fallback_kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📥 Download", url=dl_url)],
+                [InlineKeyboardButton("🔙 Menu", callback_data='b')],
+            ])
+        else:
+            fallback_kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Menu", callback_data='b')],
+            ])
         return await msg.reply_text(
-            text.replace('*', ''),
+            plain,
             disable_web_page_preview=False,
-            reply_markup=kb,
+            reply_markup=fallback_kb,
             reply_to_message_id=msg.message_id)
 
 async def send_link(bot, u, c):

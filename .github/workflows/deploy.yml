@@ -92,7 +92,7 @@ jobs:
       - name: 🚀 Deploy application
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          BASE_URL: ${{ secrets.BASE_URL }}
+          BASE_DOWNLOAD_LINK: ${{ secrets.BASE_DOWNLOAD_LINK }}
           WHITELIST_USERS: ${{ secrets.WHITELIST_USERS || '' }}
           STORAGE_DAYS: ${{ vars.STORAGE_DAYS || '2' }}
           COOKIE_TTL_HOURS: ${{ vars.COOKIE_TTL_HOURS || '0' }}
@@ -155,7 +155,7 @@ jobs:
           echo "⚙️  Checking .env..."
           NEW_ENV=$(cat << EOF
           BOT_TOKEN=BOT_TOKEN_PLACEHOLDER
-          BASE_DOWNLOAD_LINK=BASE_URL_PLACEHOLDER
+          BASE_DOWNLOAD_LINK=BASE_DOWNLOAD_LINK_PLACEHOLDER
           WHITELIST_USERS=WHITELIST_USERS_PLACEHOLDER
           STORAGE_DAYS=STORAGE_DAYS_PLACEHOLDER
           COOKIE_TTL_HOURS=COOKIE_TTL_HOURS_PLACEHOLDER
@@ -176,7 +176,7 @@ jobs:
             echo "⚙️  Writing .env..."
             echo "$NEW_ENV" > "$PROJECT_DIR/.env"
             chmod 600 "$PROJECT_DIR/.env"
-            echo "   BASE_DOWNLOAD_LINK length: $(echo -n "$BASE_URL_PLACEHOLDER" | wc -c) chars"
+            echo "   BASE_DOWNLOAD_LINK length: $(echo -n "$BASE_DOWNLOAD_LINK_PLACEHOLDER" | wc -c) chars"
           else
             echo "⚙️  .env unchanged, skipping..."
           fi
@@ -285,11 +285,11 @@ jobs:
           
           # Substitute placeholders with actual secret values
           echo "🔧 Substituting secrets..."
-          echo "   BASE_URL is $([ -z "${BASE_URL}" ] && echo 'EMPTY ⚠️' || echo "set (length: ${#BASE_URL})")"
+          echo "   BASE_DOWNLOAD_LINK is $([ -z "${BASE_DOWNLOAD_LINK}" ] && echo 'EMPTY ⚠️' || echo "set (length: ${#BASE_DOWNLOAD_LINK})")"
           sed -i "s|PROJECT_DIR_PLACEHOLDER|${{ env.PROJECT_DIR }}|g" /tmp/deploy_script.sh
           sed -i "s|SERVICE_NAME_PLACEHOLDER|${{ env.SERVICE_NAME }}|g" /tmp/deploy_script.sh
           sed -i "s|BOT_TOKEN_PLACEHOLDER|${BOT_TOKEN}|g" /tmp/deploy_script.sh
-          sed -i "s|BASE_URL_PLACEHOLDER|${BASE_URL}|g" /tmp/deploy_script.sh
+          sed -i "s|BASE_DOWNLOAD_LINK_PLACEHOLDER|${BASE_DOWNLOAD_LINK}|g" /tmp/deploy_script.sh
           sed -i "s|WHITELIST_USERS_PLACEHOLDER|${WHITELIST_USERS}|g" /tmp/deploy_script.sh
           sed -i "s|STORAGE_DAYS_PLACEHOLDER|${STORAGE_DAYS}|g" /tmp/deploy_script.sh
           sed -i "s|COOKIE_TTL_HOURS_PLACEHOLDER|${COOKIE_TTL_HOURS}|g" /tmp/deploy_script.sh

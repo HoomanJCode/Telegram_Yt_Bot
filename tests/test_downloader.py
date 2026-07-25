@@ -1121,7 +1121,7 @@ class TestAlsoGetOtherFormatIdxShiftSafety(unittest.TestCase):
     (because cb_data carried idx baked in, a list shift on a parallel
     download could rewire an AlsoGet click to a different record).
     The NEW design resolves the source record through
-    `_resolve_delivery_record(bot, c)` keyed by the kb's own
+    `_resolve_delivery_record(bot, q)` keyed by the kb's own
     `(chat_id, message_id)` — so a parallel insert at
     bot.videos[uid][0] cannot rewire an AlsoGet click to a wrong
     record. The dead-entry eviction inside `_resolve_delivery_record`
@@ -1148,7 +1148,7 @@ class TestAlsoGetOtherFormatIdxShiftSafety(unittest.TestCase):
         # bot.videos[uid] for cb-data resolution — exactly the
         # original stale-button bug.
         self.assertIn(
-            '_resolve_delivery_record(bot, c)', src,
+            '_resolve_delivery_record(bot, q)', src,
             'also_get_other_format must resolve the source record '
             'via _resolve_delivery_record (per-message keying) so a '
             'parallel insert at bot.videos[uid][0] cannot rewire an '

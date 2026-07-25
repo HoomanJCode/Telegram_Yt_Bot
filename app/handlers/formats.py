@@ -436,7 +436,7 @@ async def send_telegram(bot, u, c):
     """Handle `tg_send` cb. Resolves the record via
     _delivery_screen, never via bot.videos[uid][idx]."""
     q = u.callback_query; await q.answer()
-    rec = _resolve_delivery_record(bot, c)
+    rec = _resolve_delivery_record(bot, q)
     if rec is None:
         await _unavailable_message(bot, q)
         return
@@ -479,7 +479,7 @@ async def _reply_link_text(bot, msg, rec):
 async def send_link(bot, u, c):
     """Handle `lk_send` cb. Resolves the record via _delivery_screen."""
     q = u.callback_query; await q.answer()
-    rec = _resolve_delivery_record(bot, c)
+    rec = _resolve_delivery_record(bot, q)
     if rec is None:
         await _unavailable_message(bot, q)
         return
@@ -495,7 +495,7 @@ async def back_to_formats(bot, u, c):
     at the new picker message_id (NOT re-written here -- doing so
     would race against show_format_choice's own write)."""
     q = u.callback_query; await q.answer()
-    rec = _resolve_delivery_record(bot, c)
+    rec = _resolve_delivery_record(bot, q)
     if rec is None:
         await _unavailable_message(bot, q)
         return
@@ -527,7 +527,7 @@ async def also_get_other_format(bot, u, c):
         return
     if mt not in ('video', 'audio', 'thumb'):
         return
-    rec = _resolve_delivery_record(bot, c)
+    rec = _resolve_delivery_record(bot, q)
     if rec is None:
         await _unavailable_message(bot, q)
         return

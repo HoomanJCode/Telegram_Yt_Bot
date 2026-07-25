@@ -426,17 +426,7 @@ async def send_telegram_direct(bot, msg, record):
 async def send_link_direct(bot, msg, record):
     """Send download link without asking user"""
     if not Path(record.file_path).exists(): return
-    url = f"{bot.base_url}/{quote(Path(record.file_path).name)}"
-    mb = Path(record.file_path).stat().st_size / 1024 / 1024
-    await msg.reply_text(
-        f"🎬 *{esc(record.title[:200])}*\n\n"
-        f"📦 {mb:.2f} MB\n"
-        f"📥 {url}\n\n"
-        f"⚠️ File will be deleted after {bot.config.STORAGE_DAYS} days.",
-        parse_mode=ParseMode.MARKDOWN,
-        disable_web_page_preview=False,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📥 Download", url=url)], [InlineKeyboardButton("🔙 Menu", callback_data='b')]]),
-        reply_to_message_id=msg.message_id)
+    await _reply_link_text(bot, msg, record)
 
 # ============================================================================
 # Delivery-cb handlers: all resolve via _resolve_delivery_record
@@ -454,6 +444,38 @@ async def send_telegram(bot, u, c):
     await send_file(bot, q.message, rec)
     await q.message.delete()
 
+
+async def _reply_link_text(bot, msg, rec):
+    """Send the download link with markdown; retry plain text on parse failure."""
+    url = f"{bot.base_url}/{quote(Path(rec.file_path).name)}"
+    mb = Path(rec.file_path).stat().st_size / 1024 / 1024
+    text = (
+        f"🎬 *{esc(rec.title[:200])}*\n\n"
+        f"📦 {mb:.2f} MB\n"
+        f"📥 {url}\n\n"
+        f"⚠️ File will be deleted after {bot.config.STORAGE_DAYS} days."
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📥 Download", url=url)],
+        [InlineKeyboardButton("🔙 Menu", callback_data='b')],
+    ])
+    try:
+        return await msg.reply_text(
+            text, parse_mode=ParseMode.MARKDOWN,
+            disable_web_page_preview=False,
+            reply_markup=kb,
+            reply_to_message_id=msg.message_id)
+    except Exception as exc:
+        logger.warning(
+            'send_link: reply failed (%s: %s), '
+            'falling back to plain text. title=%s',
+            type(exc).__name__, str(exc)[:80], text[:120])
+        return await msg.reply_text(
+            text.replace('*', ''),
+            disable_web_page_preview=False,
+            reply_markup=kb,
+            reply_to_message_id=msg.message_id)
+
 async def send_link(bot, u, c):
     """Handle `lk_send` cb. Resolves the record via _delivery_screen."""
     q = u.callback_query; await q.answer()
@@ -464,17 +486,7 @@ async def send_link(bot, u, c):
     if not Path(rec.file_path).exists():
         await _unavailable_message(bot, q)
         return
-    url = f"{bot.base_url}/{quote(Path(rec.file_path).name)}"
-    mb = Path(rec.file_path).stat().st_size / 1024 / 1024
-    await q.message.reply_text(
-        f"🎬 *{esc(rec.title[:200])}*\n\n"
-        f"📦 {mb:.2f} MB\n"
-        f"📥 {url}\n\n"
-        f"⚠️ File will be deleted after {bot.config.STORAGE_DAYS} days.",
-        parse_mode=ParseMode.MARKDOWN,
-        disable_web_page_preview=False,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📥 Download", url=url)], [InlineKeyboardButton("🔙 Menu", callback_data='b')]]),
-        reply_to_message_id=q.message.message_id)
+    await _reply_link_text(bot, q.message, rec)
     await q.message.delete()
 
 async def back_to_formats(bot, u, c):

@@ -21,12 +21,15 @@ the kb-bearing reply it binds `_delivery_screen[(reply_msg.chat.id,
 reply_msg.message_id)] = record` so the cb handler's
 `_resolve_delivery_record(bot, c)` lookup is unambiguous.
 """
+import logging
 from pathlib import Path
 from urllib.parse import quote
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatType, ParseMode
 from app.handlers.navigation import nav_push, NAV_RECENT
 from app.utils import esc, find_existing, get_default_delivery, _path_on_disk
+
+logger = logging.getLogger('yt_bot')
 
 
 # ============================================================================
@@ -281,6 +284,35 @@ async def choose_format(bot, u, c):
         await download_task(bot, uid, url, q.message, mt,
                             container_override=container_override)
 
+async def _reply_delivery_kb(bot, msg, text, kb):
+    """Send the delivery keyboard message; retry without Markdown
+    if the title (even after esc()) contains characters that break
+    Telegram's parser (e.g. unmatched entities, control chars).
+
+    Returns the sent Telegram Message so the caller can bind
+    `_delivery_screen_put` with the real message_id.
+    """
+    try:
+        return await msg.reply_text(
+            text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=kb,
+            reply_to_message_id=msg.message_id)
+    except Exception as exc:
+        # Strip markdown formatting and retry as plain text so the
+        # delivery kb still appears. The user loses bold title
+        # rendering but keeps full download functionality.
+        plain = text.replace('*', '')
+        logger.warning(
+            'show_delivery: reply failed (%s: %s), '
+            'falling back to plain text. title=%s',
+            type(exc).__name__, str(exc)[:80], text[:120])
+        return await msg.reply_text(
+            plain,
+            reply_markup=kb,
+            reply_to_message_id=msg.message_id)
+
+
 async def show_delivery(bot, msg, record):
     """Render the 'Choose delivery' kb on a fresh reply to `msg`.
 
@@ -349,13 +381,9 @@ async def show_delivery(bot, msg, record):
         sub_hint = f"\n📝 {len(pending_subs)} subtitle file(s) attached"
     if msg.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
         from app.handlers.messages import _group_delivery_kb
-        delivery_msg = await msg.reply_text(
-            f"{emoji} *{esc(record.title[:200])}*\n📦 {mb:.2f} MB | {record.media_type}\n🕒 {record.download_time}{sub_hint}\n\nChoose delivery:",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=_group_delivery_kb(bot, uid),
-            reply_to_message_id=msg.message_id)
-        # Per-message bind: this delivery message becomes
-        # self-identifying for the user's next click.
+        delivery_text = f"{emoji} *{esc(record.title[:200])}*\n📦 {mb:.2f} MB | {record.media_type}\n🕒 {record.download_time}{sub_hint}\n\nChoose delivery:"
+        delivery_msg = await _reply_delivery_kb(
+            bot, msg, delivery_text, _group_delivery_kb(bot, uid))
         _delivery_screen_put(bot, delivery_msg.chat.id,
                              delivery_msg.message_id, record)
         return
@@ -366,19 +394,9 @@ async def show_delivery(bot, msg, record):
     kb = delivery_kb(bot)
     more_rows = _more_format_buttons(record.media_type)
     if more_rows:
-        # InlineKeyboardMarkup.inline_keyboard is a list of rows; we
-        # extend rather than rebuilding so the delivery_kb() layout
-        # stays the source of truth for the first 3 rows.
         kb.inline_keyboard.extend(more_rows)
-    delivery_msg = await msg.reply_text(
-        f"{emoji} *{esc(record.title[:200])}*\n📦 {mb:.2f} MB | {record.media_type}\n🕒 {record.download_time}{sub_hint}\n\nChoose delivery:",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=kb,
-        reply_to_message_id=msg.message_id)
-    # Per-message bind: bind the (chat, message_id) of the
-    # kb-bearing REPLY (not the user's original URL message) so
-    # _resolve_delivery_record finds the record on subsequent
-    # tg_send / lk_send / backfmt / morefmt_* clicks.
+    delivery_text = f"{emoji} *{esc(record.title[:200])}*\n📦 {mb:.2f} MB | {record.media_type}\n🕒 {record.download_time}{sub_hint}\n\nChoose delivery:"
+    delivery_msg = await _reply_delivery_kb(bot, msg, delivery_text, kb)
     _delivery_screen_put(bot, delivery_msg.chat.id,
                          delivery_msg.message_id, record)
 

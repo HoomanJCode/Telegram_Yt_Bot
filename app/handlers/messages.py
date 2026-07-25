@@ -1,5 +1,5 @@
 """Message handler for private chats and groups"""
-import asyncio, os, logging
+import asyncio, os, logging, traceback
 from datetime import datetime
 from functools import partial
 from pathlib import Path
@@ -166,7 +166,10 @@ async def download_task(bot, uid, url, msg, media_type, container_override=None)
         await s.delete()
     except Exception as e:
         category = classify_yt_error(str(e))
-        logger.error("Download task error [%s]: %s", category, str(e)[:200])
+        logger.error(
+            "Download task error [%s] uid=%d url=%s media=%s: %s\n%s",
+            category, uid, url[:120], media_type, str(e)[:200],
+            traceback.format_exc())
         # `s` may have been deleted by the successful path above;
         # try edit_text first (it's still alive on an early-raise)
         # and fall back to a fresh reply if the message is gone.

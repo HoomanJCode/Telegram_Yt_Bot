@@ -134,13 +134,37 @@ jobs:
           # Setup Python venv (cached if exists)
           echo "🐍 Setting up Python..."
           cd "$PROJECT_DIR"
+          
+          # Persistent pip cache — downloaded wheels survive deploys
+          export PIP_CACHE_DIR="$PROJECT_DIR/.pip-cache"
+          mkdir -p "$PIP_CACHE_DIR"
+          
+          # Recreate venv only if broken (fast: ~2s)
           if [ ! -f venv/bin/python ] || ! venv/bin/python -c "import pip" 2>/dev/null; then
             [ -d venv ] && rm -rf venv
             run_with_timeout 300 python3 -m venv venv || exit 1
+            REINSTALL=1
           fi
-          run_with_timeout 300 $PROJECT_DIR/venv/bin/pip install --upgrade pip -q || exit 1
-          run_with_timeout 300 $PROJECT_DIR/venv/bin/pip install -r requirements.txt -q || exit 1
-          run_with_timeout 300 $PROJECT_DIR/venv/bin/pip install --upgrade yt-dlp yt-dlp-ejs aiohttp -q || exit 1
+          
+          # Only reinstall packages if requirements.txt changed
+          # (saves 30-60s on routine deploys where deps haven't changed)
+          REQ_HASH=$(md5sum requirements.txt 2>/dev/null | awk '{print $1}')
+          CACHED_HASH=$(cat venv/.req_hash 2>/dev/null || true)
+          
+          if [ "$REQ_HASH" != "$CACHED_HASH" ] || [ "${REINSTALL:-0}" = "1" ]; then
+            echo "📦 Installing Python packages (requirements changed)..."
+            run_with_timeout 300 $PROJECT_DIR/venv/bin/pip install --upgrade pip -q || exit 1
+            # --upgrade-strategy only-if-needed avoids reinstalling
+            # packages already at the correct version
+            run_with_timeout 300 $PROJECT_DIR/venv/bin/pip install --upgrade --upgrade-strategy only-if-needed -r requirements.txt -q || exit 1
+            echo "$REQ_HASH" > venv/.req_hash
+          else
+            echo "📦 Python packages unchanged, skipping..."
+          fi
+          
+          # Check for yt-dlp updates (only downloads if newer version available)
+          echo "🔄 Checking for yt-dlp update..."
+          run_with_timeout 300 $PROJECT_DIR/venv/bin/pip install --upgrade --upgrade-strategy only-if-needed yt-dlp yt-dlp-ejs aiohttp -q || exit 1
           
           mkdir -p "$PROJECT_DIR/data" "$PROJECT_DIR/downloads" /var/log/$SERVICE_NAME
           

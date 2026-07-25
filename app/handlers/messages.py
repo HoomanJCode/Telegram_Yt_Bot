@@ -62,6 +62,11 @@ async def _group_download(bot, uid, url, msg, media_type, video_id):
         sub_files = []
         if existing:
             fp, title = existing.file_path, existing.title
+            record = existing  # cache hit: reuse the existing VideoRecord
+            # Clear any stale _pending_subs from a prior delivery so
+            # show_delivery doesn't waste I/O trying to send now-deleted
+            # subtitle files (silently swallowed by except Exception: pass).
+            record._pending_subs = None
         else:
             fp, title, vid, sub_files = await asyncio.get_event_loop().run_in_executor(None, download, bot, uid, url, media_type)
             sz = Path(fp).stat().st_size
@@ -150,15 +155,25 @@ async def download_task(bot, uid, url, msg, media_type, container_override=None)
         record = VideoRecord(title, url, vid, fp, sz, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), media_type=media_type)
         bot.videos.setdefault(uid, []).insert(0, record)
         while len(bot.videos.get(uid, [])) > 20: old = bot.videos[uid].pop(); Path(old.file_path).unlink(missing_ok=True)
-        bot.save(); await s.delete()
+        bot.save()
         if sub_files:
             record._pending_subs = sub_files  # attach to record for show_delivery to send
         from app.handlers.formats import show_delivery
         await show_delivery(bot, msg, record)
+        # Delete the "Downloading…" status message ONLY after
+        # show_delivery succeeds. If show_delivery raises, `s`
+        # is still alive and the except block can edit it safely.
+        await s.delete()
     except Exception as e:
         category = classify_yt_error(str(e))
         logger.error("Download task error [%s]: %s", category, str(e)[:200])
-        await s.edit_text(friendly_error_msg(category), reply_markup=menu(bot, uid))
+        # `s` may have been deleted by the successful path above;
+        # try edit_text first (it's still alive on an early-raise)
+        # and fall back to a fresh reply if the message is gone.
+        try:
+            await s.edit_text(friendly_error_msg(category), reply_markup=menu(bot, uid))
+        except Exception:
+            await msg.reply_text(friendly_error_msg(category), reply_markup=menu(bot, uid))
 
 async def _ensure(bot, uid):
     if uid in bot._cookie_data: return True

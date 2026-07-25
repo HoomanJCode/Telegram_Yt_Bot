@@ -148,7 +148,10 @@ jobs:
             SSL_ENV_LINES=$(printf "\nSSL_CERT_FILE=%s/ssl/fullchain.pem\nSSL_KEY_FILE=%s/ssl/privkey.pem" "$PROJECT_DIR" "$PROJECT_DIR")
           fi
           
-          # Create .env (only if content changed — includes SSL lines)
+          # Create .env — always writes on first deploy, then only
+          # when content actually changed. Extra safety: if the
+          # existing .env has an empty BASE_DOWNLOAD_LINK (common
+          # misconfiguration), force-rewrite regardless of hash.
           echo "⚙️  Checking .env..."
           NEW_ENV=$(cat << EOF
           BOT_TOKEN=BOT_TOKEN_PLACEHOLDER
@@ -163,10 +166,17 @@ jobs:
           NEW_ENV="${NEW_ENV}${SSL_ENV_LINES}"
           NEW_HASH=$(echo "$NEW_ENV" | md5sum | awk '{print $1}')
           OLD_HASH=$(md5sum "$PROJECT_DIR/.env" 2>/dev/null | awk '{print $1}' || true)
-          if [ "$NEW_HASH" != "$OLD_HASH" ]; then
-            echo "⚙️  .env changed, updating..."
+          # Also check if existing BASE_DOWNLOAD_LINK is empty — if so,
+          # force a rewrite even when hashes match (the old file may
+          # have been manually created with an empty value).
+          OLD_BASE_URL=$(grep '^BASE_DOWNLOAD_LINK=' "$PROJECT_DIR/.env" 2>/dev/null | cut -d= -f2- || true)
+          FORCE_REWRITE=0
+          [ -z "$OLD_BASE_URL" ] && [ -f "$PROJECT_DIR/.env" ] && { echo "⚠️  Existing BASE_DOWNLOAD_LINK is empty, forcing rewrite..."; FORCE_REWRITE=1; }
+          if [ "$NEW_HASH" != "$OLD_HASH" ] || [ "$FORCE_REWRITE" = "1" ]; then
+            echo "⚙️  Writing .env..."
             echo "$NEW_ENV" > "$PROJECT_DIR/.env"
             chmod 600 "$PROJECT_DIR/.env"
+            echo "   BASE_DOWNLOAD_LINK length: $(echo -n "$BASE_URL_PLACEHOLDER" | wc -c) chars"
           else
             echo "⚙️  .env unchanged, skipping..."
           fi
@@ -273,7 +283,9 @@ jobs:
           echo "✅ Deployment Complete!"
           SCRIPTEOF
           
-          # Substitute and execute
+          # Substitute placeholders with actual secret values
+          echo "🔧 Substituting secrets..."
+          echo "   BASE_URL is $([ -z "${BASE_URL}" ] && echo 'EMPTY ⚠️' || echo "set (length: ${#BASE_URL})")"
           sed -i "s|PROJECT_DIR_PLACEHOLDER|${{ env.PROJECT_DIR }}|g" /tmp/deploy_script.sh
           sed -i "s|SERVICE_NAME_PLACEHOLDER|${{ env.SERVICE_NAME }}|g" /tmp/deploy_script.sh
           sed -i "s|BOT_TOKEN_PLACEHOLDER|${BOT_TOKEN}|g" /tmp/deploy_script.sh

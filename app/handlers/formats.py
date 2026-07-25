@@ -461,10 +461,15 @@ async def _reply_link_text(bot, msg, rec):
     """
     text = None  # set inside try; None signals 'could not build'
     try:
+        # Guard against empty/missing base_url. If BASE_DOWNLOAD_LINK
+        # is unset in .env, bot.base_url is '' — we can't build a
+        # download button but can still show the file info.
+        raw_base = (bot.base_url or '').strip()
+        if not raw_base:
+            raise ValueError('bot.base_url is empty — set BASE_DOWNLOAD_LINK in .env')
         # Ensure the base URL has a scheme (Telegram requires it for
         # InlineKeyboardButton.url). config.BASE_DOWNLOAD_LINK may be
         # set as a bare domain like "host:8000" by the user.
-        raw_base = bot.base_url
         if not raw_base.startswith('http'):
             raw_base = f"https://{raw_base}"
         dl_url = f"{raw_base}/{quote(Path(rec.file_path).name)}"
@@ -493,9 +498,11 @@ async def _reply_link_text(bot, msg, rec):
         # Retry with plain text AND a guaranteed-valid URL for the
         # download button. The original dl_url may have been the
         # source of the BadRequest, so rebuild it with the scheme
-        # fix applied unconditionally.
+        # fix applied unconditionally. Same empty-url guard as above.
         try:
-            raw_base = bot.base_url
+            raw_base = (bot.base_url or '').strip()
+            if not raw_base:
+                raise ValueError('empty base_url')
             if not raw_base.startswith('http'):
                 raw_base = f"https://{raw_base}"
             dl_url = f"{raw_base}/{quote(Path(rec.file_path).name)}"

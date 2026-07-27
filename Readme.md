@@ -1,9 +1,17 @@
 # YouTube Downloader Telegram Bot
 
+> **Download YouTube videos, audio, and thumbnails directly from Telegram**
+
+[![Python](https://img.shields.io/badge/Python-3.8+-blue?logo=python)](https://python.org)
+[![License](https://img.shields.io/badge/License-Educational-red)](LICENSE)
+[![Telegram Bot API](https://img.shields.io/badge/Telegram-Bot%20API-2CA5E0?logo=telegram)](https://core.telegram.org/bots/api)
+
+---
+
 > **⚠️ DISCLAIMER: EDUCATIONAL PROJECT**
-> 
+>
 > This project is created for **educational purposes only**. It demonstrates Python programming concepts, Telegram Bot API integration, and web scraping techniques.
-> 
+>
 > - This bot is **NOT intended for production use** or actual video downloading
 > - Downloading YouTube videos may violate YouTube's Terms of Service
 > - Respect content creators' rights and intellectual property
@@ -13,29 +21,41 @@
 
 ---
 
-## 📚 About This Project
+## 📚 Documentation
 
-This Telegram bot downloads YouTube content in multiple formats (Video, Audio, Thumbnails) with built-in file serving. It demonstrates integration of Telegram Bot API, yt-dlp, async I/O, and HTTP file serving in a single Python application.
-
-**Development Methodology:** Created using **Vibe Coding** - AI-assisted development through natural language interaction with DeepSeek AI.
+| Document | Description |
+|----------|-------------|
+| **[📖 USAGE.md](./docs/USAGE.md)** | Commands, download flow, inline mode, settings, and FAQ |
+| **[🔧 CONFIGURATION.md](./docs/CONFIGURATION.md)** | All environment variables explained with examples |
+| **[📦 DEPLOYMENT.md](./docs/DEPLOYMENT.md)** | VPS setup, CI/CD via GitHub Actions, systemd service |
+| **[🏗️ ARCHITECTURE.md](./docs/ARCHITECTURE.md)** | Codebase structure, data flow, design decisions |
+| **[🔒 SSL_CLOUDFLARE.md](./docs/SSL_CLOUDFLARE.md)** | HTTPS setup with Cloudflare (3 approaches) |
+| **[👩‍💻 DEVELOPMENT.md](./docs/DEVELOPMENT.md)** | Local setup, testing, conventions, adding features |
 
 ---
 
 ## 🚀 Features
 
-- 🎬 **Video Download** - Full video with quality selection (Best, 4K, 1440p, 1080p, 720p, 480p, 360p, Worst)
-- 🎵 **Audio Download** - MP3 (with FFmpeg) or M4A, quality selection (Best, 320/256/192/128/96 kbps, Worst)
-- 🖼️ **Thumbnail Download** - Video thumbnails without full download
-- 📝 **Subtitle Handling** - Embed subs into MKV (default), send as separate `.srt` file, or off
-- 🔄 **Multi-Format** - Download all formats of the same video
-- 📤 **Two Delivery Methods** - Telegram upload or direct download link
-- 💾 **Duplicate Detection** - Prevents re-downloading same content
-- 🗑️ **Auto-Cleanup** - Files deleted after configurable days (default: 2)
-- 🍪 **Cookie Management** - Per-user cookie storage
-- 👥 **Whitelist System** - Restrict bot to specific users
-- 📱 **Interactive Menus** - Inline keyboard navigation
-- 🌐 **Built-in File Server** - No separate HTTP server needed
-- 🔒 **Privacy** - No sensitive data in logs
+- 🎬 **Video Download** — Full video with quality selection (Best, 4K, 1440p, 1080p, 720p, 480p, 360p, Worst)
+- 🎵 **Audio Download** — MP3 (with FFmpeg) or M4A, quality selection (Best, 320/256/192/128/96 kbps, Worst)
+- 🖼️ **Thumbnail Download** — Video thumbnails without full download
+- 📝 **Subtitle Handling** — Embed subs into MKV (default), send as separate `.srt` file, or off
+- 🔄 **Multi-Format** — Download all formats of the same video from one delivery screen
+- 📤 **Two Delivery Methods** — Telegram upload (cached) or direct download link
+- 💾 **Duplicate Detection** — Prevents re-downloading the same content (per-variant: MKV vs MP4)
+- 🗑️ **Auto-Cleanup** — Files deleted after configurable days (default: 2)
+- 🍪 **Cookie Management** — Per-user cookie storage in RAM only
+- 👥 **Whitelist System** — Restrict bot to specific users
+- 👑 **Admin Gating** — Lock `/cookies` to specific Telegram user IDs
+- 📱 **Interactive Menus** — Inline keyboard navigation with back-stack
+- 🌐 **Built-in File Server** — No separate HTTP server needed (aiohttp)
+- 🔒 **Native HTTPS** — TLS termination without reverse proxy (optional)
+- 🔄 **Cloudflare Warp Proxy** — Route downloads through Warp (optional)
+- 📺 **Smart TV Audio Fix** — Automatic Opus → AAC transcode for universal codec support
+- 📱 **Inline Mode** — Use `@YourBotName <link>` in any chat
+- 🔗 **Deep Link Tokens** — Share downloads via `t.me/YourBot?start=dl_<token>`
+- 🔐 **Privacy** — No sensitive data in logs, cookies in RAM only
+- 📦 **Self-Contained** — Single process runs bot + file server + downloads
 
 ---
 
@@ -44,8 +64,8 @@ This Telegram bot downloads YouTube content in multiple formats (Video, Audio, T
 ### System Requirements
 - Python 3.8+
 - Linux (recommended) / macOS / Windows
-- FFmpeg (optional, for MP3 audio conversion)
-- Deno JavaScript runtime (for yt-dlp YouTube extraction) 
+- FFmpeg (optional, for MP3 audio conversion & subtitle embedding)
+- Deno JavaScript runtime (required for yt-dlp YouTube extraction)
 - Telegram Bot Token from [@BotFather](https://t.me/BotFather)
 
 ### Install FFmpeg (recommended)
@@ -57,6 +77,7 @@ apt-get install -y ffmpeg
 brew install ffmpeg
 
 # Without FFmpeg, audio downloads as M4A instead of MP3
+# and subtitles cannot be embedded into MKV
 ```
 
 ### Install Deno (required for YouTube)
@@ -68,176 +89,180 @@ echo 'export PATH="$HOME/.deno/bin:$PATH"' >> ~/.bashrc
 
 ---
 
-## 📦 Installation
+## 📦 Quick Install
 
-### Step 1: Clone and Setup
 ```bash
-git clone <repository-url>
-cd youtube_downloader_bot
+# 1. Clone and enter the project
+git clone https://github.com/yourusername/Telegram_Yt_Bot.git
+cd Telegram_Yt_Bot
+
+# 2. Create virtual environment
 python3 -m venv venv
 source venv/bin/activate
-```
 
-### Step 2: Install Dependencies
-```bash
+# 3. Install dependencies
 pip install -r requirements.txt
 pip install yt-dlp-ejs
-```
 
-### Step 3: Configure Environment
-Edit `.env` file:
-```env
-BOT_TOKEN=your_bot_token_here
-BASE_DOWNLOAD_LINK=http://your-server-ip:8000
-WHITELIST_USERS=123456789,987654321
-```
+# 4. Configure environment
+cp env.example .env
+# Edit .env with your bot token and settings
 
-### Step 4: Create Required Directories
-```bash
-mkdir -p data/cookies downloads
-```
+# 5. Create required directories
+mkdir -p data downloads
 
-### Step 5: Run
-```bash
+# 6. Run
 python bot.py
 ```
 
-That's it! File server starts automatically on the port specified in `BASE_DOWNLOAD_LINK`.
+> **For production deployment** (systemd service, CI/CD, SSL), see the [Deployment Guide](./docs/DEPLOYMENT.md).
 
 ---
 
-## ⚙️ Configuration
+## ⚙️ Quick Configuration
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `BOT_TOKEN` | Telegram Bot API token | Required |
-| `BASE_DOWNLOAD_LINK` | Server URL with port for downloads | `http://localhost:8000` |
+| `BOT_TOKEN` | Telegram Bot API token | **Required** |
+| `BASE_DOWNLOAD_LINK` | Server URL for download links | `http://localhost:8000` |
 | `WHITELIST_USERS` | Comma-separated authorized user IDs | Empty (all allowed) |
-| `STORAGE_DAYS` | Days before files auto-delete | 2 |
-| `MAX_TELEGRAM_FILE_SIZE` | Max size for Telegram upload (bytes) | 50MB |
+| `ADMIN_USERS` | Comma-separated IDs allowed to upload cookies | Empty (all whitelisted) |
+| `STORAGE_DAYS` | Days before files auto-delete | `2` |
+
+[→ Full configuration reference](./docs/CONFIGURATION.md)
 
 ---
 
-## 📱 Usage
+## 📱 Quick Usage
 
 ### Basic Flow
-1. **Upload Cookies** - `/cookies` - Required first step
-2. **Send YouTube Link** - Just paste any YouTube URL
-3. **Choose Format** - Video (MP4) / Audio (MP3/M4A) / Thumbnails
-4. **Choose Delivery** - Telegram upload or download link
+1. **Upload Cookies** — `/cookies` — Send a cookies.txt file (required first step)
+2. **Send YouTube Link** — Paste any YouTube URL
+3. **Choose Format** — Video (MKV/MP4) / Audio (MP3/M4A) / Thumbnails
+4. **Choose Delivery** — Telegram upload or download link
 
 ### Commands
 
 | Command | Description |
 |---------|-------------|
 | `/start` | Welcome message and main menu |
+| `/help` | Help and usage information |
 | `/cookies` | Upload YouTube cookies file |
 | `/recent` | View recent downloads |
-| `/help` | Help and usage information |
+| `/settings` | Change quality, format, and delivery defaults |
+| `/status` | Check bot health and proxy status |
+| `/cancel` | Cancel current operation |
 
-### Format Options
-- **🎬 Video (MP4)** - Full video in MP4 format
-- **🎵 Audio (MP3/M4A)** - Audio only (MP3 with FFmpeg, M4A without)
-- **🖼️ Thumbnails** - Video thumbnails (no full download)
+[→ Full usage guide](./docs/USAGE.md)
 
-### Download All Formats
-After downloading one format, click "Back to formats" to download other formats of the same video. Already downloaded formats show ✅.
+---
+
+## 🔒 HTTPS Options
+
+Three ways to serve download links over HTTPS:
+
+| Method | Description | Guide |
+|--------|-------------|-------|
+| **Cloudflare Tunnel** | No open ports, fully managed TLS | [Guide](./docs/SSL_CLOUDFLARE.md#approach-1-cloudflare-tunnel-recommended) |
+| **Reverse Proxy** | Nginx/Caddy + Cloudflare proxied DNS | [Guide](./docs/SSL_CLOUDFLARE.md#approach-2-proxied-dns--reverse-proxy) |
+| **Native HTTPS** | Bot terminates TLS itself (Origin CA) | [Guide](./docs/SSL_CLOUDFLARE.md#approach-3-native-https-with-origin-ca) |
 
 ---
 
 ## 🗂️ Project Structure
 
 ```
-youtube_downloader_bot/
-├── bot.py                 # Main bot + file server
-├── config.py              # Configuration handler
+Telegram_Yt_Bot/
+├── bot.py                 # Entry point (calls app.main())
+├── config.py              # Configuration parser (env vars)
+├── serve_files.py         # Standalone HTTP server (alternative)
 ├── requirements.txt       # Python dependencies
-├── .env                   # Environment variables
-├── README.md             # Documentation
-├── data/                  # User data storage
-│   ├── cookies/          # Per-user cookie files
-│   ├── user_cookies.json # Cookie paths
-│   └── user_videos.json  # Download records
-└── downloads/            # Downloaded files directory
+├── env.example            # Environment variable template
+├── deploy.sh              # Automated deployment script
+├── README.md              # This file
+│
+├── app/                   # Main application package
+│   ├── __init__.py        # Bootstrap: logging, wiring, main()
+│   ├── bot.py             # YouTubeDownloaderBot (central state)
+│   ├── downloader.py      # yt-dlp download functions
+│   ├── fileserver.py      # aiohttp async file server
+│   ├── models.py          # VideoRecord data class
+│   └── utils.py           # Utilities, constants, error classification
+│
+├── app/handlers/          # Telegram update handlers
+│   ├── commands.py        # Slash commands (/start, /help, etc.)
+│   ├── cookies.py         # Cookie upload conversation
+│   ├── formats.py         # Format choice & delivery keyboards
+│   ├── inline.py          # Inline query mode (@botname)
+│   ├── messages.py        # Plain-text YouTube link processing
+│   ├── navigation.py      # Menu system & settings UI
+│   └── tokens.py          # Deep-link tokens & file delivery
+│
+├── docs/                  # Documentation
+│   ├── ARCHITECTURE.md    # Codebase architecture
+│   ├── CONFIGURATION.md   # Environment variables
+│   ├── DEPLOYMENT.md      # Deployment guide
+│   ├── DEVELOPMENT.md     # Developer setup & conventions
+│   ├── SSL_CLOUDFLARE.md  # HTTPS with Cloudflare
+│   └── USAGE.md           # User guide
+│
+├── tests/                 # Unit tests
+├── data/                  # Persistent state (JSON)
+└── downloads/             # Downloaded media files
 ```
 
 ---
 
-## 🔒 Native HTTPS (optional)
-
-The bot can terminate TLS itself — no reverse proxy required. Set **both** of these in `.env` (alongside your `BASE_DOWNLOAD_LINK=https://yourdomain.com:8000`):
-
-```env
-SSL_CERT_FILE=/etc/letsencrypt/live/yourdomain.com/fullchain.pem
-SSL_KEY_FILE=/etc/letsencrypt/live/yourdomain.com/privkey.pem
-```
-
-The aiohttp file server will then accept HTTPS on whatever port `BASE_DOWNLOAD_LINK` parses to. Behaviour matrix:
-
-- Both empty → plain HTTP (default, same as before).
-- Both set + cert/key readable → HTTPS.
-- Only one set, or either file missing/unreadable → bot refuses to start with a clear CRITICAL log line. **We never silently fall back to HTTP** — that would re-create the original "I set the HTTPS domain and downloads won't load" bug.
-
-**Pick a non-privileged port unless you can `setcap` the Python binary** — `BASE_DOWNLOAD_LINK=https://yourdomain.com:8000` keeps the bot listening on 8000 (no root required). Move to 443 only after `sudo setcap 'cap_net_bind_service=+ep' $(readlink -f $(which python))`.
-
-**Cert renewal does NOT hot-reload.** Let's Encrypt renews every ~60 days; you must restart the bot for the new PEMs to take effect. Recommended hook:
+## 🧪 Running Tests
 
 ```bash
-certbot renew --deploy-hook "systemctl restart telegramytbot"
+# Run all tests
+python -m pytest tests/ -v
+
+# Run with coverage
+python -m pytest tests/ --cov=app --cov-report=term-missing
 ```
-
-For most operators, a reverse proxy (Caddy auto-cert example: `yourdomain.com { reverse_proxy 127.0.0.1:8000 }`) is simpler — but the native-SSL path above works in one process.
-
----
-
-## 🔧 Troubleshooting
-
-### "No supported JavaScript runtime" warning
-```bash
-# Install Deno
-curl -fsSL https://deno.land/install.sh | sh
-export PATH="$HOME/.deno/bin:$PATH"
-```
-
-### Audio download fails with FFmpeg error
-```bash
-# Install FFmpeg
-apt-get install -y ffmpeg
-# Or audio will download as M4A automatically
-```
-
-### 403 Forbidden errors
-- Upload fresh cookies (log into YouTube, export again)
-- Update yt-dlp: `pip install --upgrade yt-dlp yt-dlp-ejs`
-
-### File server not accessible
-- File server runs inside bot (no separate process)
-- Check port in `BASE_DOWNLOAD_LINK` matches `.env`
-- Ensure firewall allows the port: `ufw allow 8000`
-
-### Single-core VPS optimization
-- Bot uses async I/O for Telegram API
-- File server runs on daemon thread
-- No separate processes needed
 
 ---
 
 ## 🛡️ Security Notes
 
-- Cookies stored locally per user in `data/cookies/`
-- No sensitive data in logs (tokens masked)
-- Whitelist system for access control
-- Files auto-deleted after configured days
-- **Never share your `.env` file or cookies**
+- 🍪 **Cookies in RAM**: Cookie bytes are kept in memory, never written to disk (except temporary yt-dlp files)
+- 🔐 **Admin gating**: `/cookies` can be locked to specific Telegram IDs via `ADMIN_USERS`
+- 👥 **Whitelist**: Restrict bot access to specific users via `WHITELIST_USERS`
+- 🗑️ **Auto-cleanup**: Files auto-delete after `STORAGE_DAYS` (default: 2)
+- 🔒 **SSL validation**: On misconfiguration, bot exits with code 78 — no silent HTTP fallback
+- 📝 **No sensitive logs**: API tokens and cookie contents are never logged
+- 🚫 **No user data collection**: No analytics, no tracking, no external calls (except yt-dlp to YouTube)
+
+---
+
+## 🤝 Contributing
+
+See [Development Guide](./docs/DEVELOPMENT.md) for:
+- Local setup instructions
+- Running tests
+- Code style and conventions
+- How to add a new feature
+- AI Rule for maintaining comments
 
 ---
 
 ## 📄 License
 
-Educational project. Code can be used for learning purposes. Not intended for production deployment. Respect all applicable laws and terms of service.
+**Educational project.** Code can be used for learning purposes. Not intended for production deployment. Respect all applicable laws and terms of service.
+
+---
+
+## 🙏 Acknowledgements
+
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp) — YouTube video extraction
+- [python-telegram-bot](https://github.com/python-telegram-bot/python-telegram-bot) — Telegram Bot API framework
+- [aiohttp](https://docs.aiohttp.org/) — Async HTTP server
+- [FFmpeg](https://ffmpeg.org/) — Media processing
+- [Deno](https://deno.land/) — JavaScript runtime for yt-dlp
 
 ---
 
 **Built with ❤️ using Vibe Coding & DeepSeek AI**  
 *For educational purposes only*
-```

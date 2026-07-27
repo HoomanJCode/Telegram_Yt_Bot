@@ -1,6 +1,11 @@
 # app/handlers/formats.py
 """Format choice and delivery handlers.
 
+This module handles the inline keyboards shown after a user pastes a YouTube
+link: choosing between video/audio/thumbnail, selecting delivery method, and
+resending the same URL in a different format. All state is keyed by the
+Telegram message id so parallel downloads do not collide.
+
 Per-message state (2026-07-15 stale-button fix): every inline-keyboard
 lookup on a delivery screen resolves through
 `bot._delivery_screen[(chat_id, message_id)]`, NOT through
@@ -20,6 +25,11 @@ show_delivery() drops the legacy `idx` parameter. After it renders
 the kb-bearing reply it binds `_delivery_screen[(reply_msg.chat.id,
 reply_msg.message_id)] = record` so the cb handler's
 `_resolve_delivery_record(bot, c)` lookup is unambiguous.
+
+AI RULE: If you modify this file, you must also update and fix the comments,
+docstrings, and descriptions to keep them accurate and current. Every function
+must have a descriptive docstring explaining its purpose, parameters, and
+return values. Inline comments should explain WHY, not WHAT.
 """
 import logging
 import traceback
@@ -38,6 +48,11 @@ logger = logging.getLogger('yt_bot')
 # Per-message state helpers (sync; called from cb handlers before any await)
 # ============================================================================
 
+# ============================================================================
+# Per-message state helpers
+# ============================================================================
+
+
 def _delivery_screen_put(bot, chat_id, message_id, record):
     """Bind a delivery-screen message to its record.
 
@@ -48,8 +63,8 @@ def _delivery_screen_put(bot, chat_id, message_id, record):
     the front, and `popitem(last=False)` evicts the least-recent
     entry when we exceed `bot._ephemeral_max` (1024).
 
-    Sync (no `await` inside) so callers can issue it RIGHT AFTER
-    `await msg.reply_text(...)` returns the kb-bearing Message;
+    Sync (no `await` inside) so callers can issue it right after
+    `await msg.reply_text(...)` returns the keyboard-bearing Message;
     no other coroutine can interleave because asyncio is
     single-thread.
     """
@@ -61,6 +76,7 @@ def _delivery_screen_put(bot, chat_id, message_id, record):
 
 
 def _resolve_delivery_record(bot, c):
+    """Look up the VideoRecord bound to the callback's message."""
     """Look up the VideoRecord associated with the cb's message.
 
     Pulls from `bot._delivery_screen[(c.message.chat.id,
@@ -72,7 +88,9 @@ def _resolve_delivery_record(bot, c):
     caller can show "no longer available" instead of trying to
     deliver a 404-style exception to the user.
 
-    Sync because OrderedDict ops and Path.stat are sync in this
+    Synchronous helper: OrderedDict ops and Path.stat are fast and do
+    not need async in this codebase. The handler's Telegram API call is
+    the first async work after this lookup.
     codebase; the only async work downstream is the Telegram API
     call which can be triggered without an intermediate await.
     """
@@ -93,6 +111,7 @@ def _resolve_delivery_record(bot, c):
 
 
 async def _unavailable_message(bot, q):
+    """Reply with a recovery prompt when the referenced record is gone."""
     """Friendly recovery prompt when the kb's record is gone.
 
     NOTE: caller MUST already have called `await q.answer()` before
@@ -113,6 +132,7 @@ async def _unavailable_message(bot, q):
 
 
 def _more_format_buttons(current_media_type):
+    """Build 'Also get' buttons for the OTHER media types."""
     """Build the 'Also get' rows for the OTHER media types in a delivery kb.
 
     No idx payload: the source record is resolved on click via
@@ -172,6 +192,11 @@ def _video_variant_extensions(fmt):
 
 
 def format_choice_kb(bot, uid, video_id):
+    """Build the inline keyboard for choosing a format.
+
+    Marks a format as already downloaded if a matching cached record exists
+    on disk for that user and video id.
+    """
     # Existing-detection uses the soft-fail-safe _path_on_disk so a transient
     # filesystem blip on the previously-downloaded file doesn't trigger a
     # confusing re-download prompt for the user.
@@ -222,6 +247,11 @@ def format_choice_kb(bot, uid, video_id):
     return InlineKeyboardMarkup(kb)
 
 async def choose_format(bot, u, c):
+    """Handle clicks on the format-choice keyboard.
+
+    Looks up the pending URL by message id, checks for an duplicate of the
+    requested media type, and either reuses it or starts a new download.
+    """
     """Format-picker callback dispatcher.
 
     Reads `_pending_urls` by (chat_id, message_id) of the kb's
@@ -287,6 +317,11 @@ async def choose_format(bot, u, c):
                             container_override=container_override)
 
 async def _reply_delivery_kb(bot, msg, text, kb):
+    """Send a delivery keyboard, falling back to plain text on parse errors.
+
+    Telegram's Markdown parser can reject titles with unmatched entities, so
+    we retry without Markdown if the first attempt fails.
+    """
     """Send the delivery keyboard message; retry without Markdown
     if the title (even after esc()) contains characters that break
     Telegram's parser (e.g. unmatched entities, control chars).
@@ -316,6 +351,7 @@ async def _reply_delivery_kb(bot, msg, text, kb):
 
 
 async def show_delivery(bot, msg, record):
+    """Render the 'Choose delivery' keyboard for a finished download."""
     """Render the 'Choose delivery' kb on a fresh reply to `msg`.
 
     Binds `_delivery_screen[(reply_msg.chat.id, reply_msg.message_id)]`
@@ -408,6 +444,7 @@ async def show_delivery(bot, msg, record):
 
 
 def delivery_kb(bot):
+    """Build the private-chat delivery keyboard."""
     """Build the private-chat delivery kb (no idx; the kb's message
     is self-identifying via _delivery_screen).
 
@@ -435,6 +472,7 @@ async def send_link_direct(bot, msg, record):
 # ============================================================================
 
 async def send_telegram(bot, u, c):
+    """Handle the 'Send via Telegram' callback button."""
     """Handle `tg_send` cb. Resolves the record via
     _delivery_screen, never via bot.videos[uid][idx]."""
     q = u.callback_query
@@ -452,6 +490,10 @@ async def send_telegram(bot, u, c):
 
 
 async def _reply_link_text(bot, msg, rec):
+    """Send a download link, retrying as plain text if Markdown fails.
+
+    Validates the base URL has an http(s) scheme before building the link.
+    """
     """Send the download link with markdown; retry plain text on parse failure.
 
     Builds the URL/text/kb inside the try block so an AttributeError
@@ -531,6 +573,7 @@ async def _reply_link_text(bot, msg, rec):
             reply_to_message_id=msg.message_id)
 
 async def send_link(bot, u, c):
+    """Handle the 'Get Download Link' callback button."""
     """Handle `lk_send` cb. Resolves the record via _delivery_screen."""
     q = u.callback_query
     if q is None:
@@ -571,6 +614,7 @@ async def send_link(bot, u, c):
                 pass
 
 async def back_to_formats(bot, u, c):
+    """Handle the 'Back to formats' callback button."""
     """Handle `backfmt` cb. Re-renders the format picker for the
     same video. `_pending_urls` is rewritten by show_format_choice
     at the new picker message_id (NOT re-written here -- doing so
@@ -596,6 +640,7 @@ async def back_to_formats(bot, u, c):
 
 
 async def also_get_other_format(bot, u, c):
+    """Handle 'Also get <media_type>' callback buttons on delivery keyboards."""
     """Handle `morefmt_<mt>` cb. The source record is resolved via
     _resolve_delivery_record (no idx in cb_data); the user just
     asked the bot to download the SAME video in a different

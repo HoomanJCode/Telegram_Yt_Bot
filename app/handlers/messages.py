@@ -1,4 +1,15 @@
-"""Message handler for private chats and groups"""
+"""Message handler for private chats and groups.
+
+This module processes incoming text messages that contain YouTube links. It
+coordinates URL extraction, format selection, download execution, and file
+delivery. Group chats always receive video downloads; private chats respect
+per-user settings like auto-format and default delivery.
+
+AI RULE: If you modify this file, you must also update and fix the comments,
+docstrings, and descriptions to keep them accurate and current. Every function
+must have a descriptive docstring explaining its purpose, parameters, and
+return values. Inline comments should explain WHY, not WHAT.
+"""
 import asyncio, os, logging, traceback
 from datetime import datetime
 from functools import partial
@@ -18,30 +29,45 @@ from app.handlers.navigation import nav_clear_user, show_format_choice, menu
 logger = logging.getLogger('yt_bot')
 
 async def on_msg(bot, u, c):
+    """Handle a plain text message that may contain a YouTube link."""
     uid = u.effective_user.id; msg = u.message
     is_private = msg.chat.type == ChatType.PRIVATE
     is_group = msg.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
     if is_private and not ok(bot, uid): return
+    # Extract the first YouTube-looking URL from the message text. Ignore
+    # everything else so casual chat does not trigger downloads.
     url = extract_url(msg.text)
-    if not url: return
+    if not url:
+        return
+    # Extract the YouTube video id. Without a valid id we cannot deduplicate
+    # or build cached keys, so reply with an friendly error in private chats.
     video_id = extract_video_id(url)
     if not video_id:
-        if is_private: await msg.reply_text("❌ Invalid URL.", reply_to_message_id=msg.message_id); return
+        if is_private:
+            await msg.reply_text("❌ Invalid URL.", reply_to_message_id=msg.message_id)
+            return
 
+    # In groups, only allow downloads if an admin of the group is whitelisted.
     if is_group:
-        if not await _check_group(bot, msg.chat_id, c.bot): return
+        if not await _check_group(bot, msg.chat_id, c.bot):
+            return
         if not await _ensure(bot, uid): return
         async with bot._download_semaphore:
             await _group_download(bot, uid, url, msg, 'video', video_id)
         return
 
-    if not await _ensure(bot, uid): await msg.reply_text("❌ Upload cookies first! /cookies", reply_to_message_id=msg.message_id); return
+    # Private chats require valid cookies. If cookies are missing/expired,
+    # prompt the user to upload them.
+    if not await _ensure(bot, uid):
+        await msg.reply_text("❌ Upload cookies first! /cookies", reply_to_message_id=msg.message_id)
+        return
     # No `nav_clear_user(bot, uid)` here intentionally: with per-message
     # state, an OLD format-picker's nav_stack BELONGS to that picker --
     # clearing it would invalidate still-active 'b' buttons on stale
     # messages. The new flow's flow creates its own per-message key
     # automatically, so the two flows coexist safely.
-    # Auto-format: skip the keyboard, route to download_task directly.
+    # Auto-format: if the user has chosen a default media type, skip the
+    # format picker and start that download immediately.
     auto = get_auto_format(bot, uid)
     if auto != 'ask' and auto in AUTO_FORMAT_OPTIONS:
         existing = find_existing(bot, uid, video_id, auto)
@@ -53,21 +79,26 @@ async def on_msg(bot, u, c):
             await download_task(bot, uid, url, msg, auto,
                                 container_override=get_video_container(bot, uid))
         return
+    # Default behaviour: show the format picker inline keyboard.
     await show_format_choice(bot, uid, url, video_id, msg)
 
 async def _group_download(bot, uid, url, msg, media_type, video_id):
+    """Download a video in a group chat context and send the delivery keyboard."""
     try:
         existing = find_existing(bot, uid, video_id, media_type)
         fp = title = vid = None
         sub_files = []
         if existing:
+            # Cache hit: reuse the existing on-disk file and VideoRecord.
             fp, title = existing.file_path, existing.title
-            record = existing  # cache hit: reuse the existing VideoRecord
-            # Clear any stale _pending_subs from a prior delivery so
+            record = existing
+            # Clear any stale subtitle attachment from a prior delivery so
             # show_delivery doesn't waste I/O trying to send now-deleted
             # subtitle files (silently swallowed by except Exception: pass).
             record._pending_subs = None
         else:
+            # No cached record: run the actual download in a thread pool so
+            # the event loop stays responsive.
             fp, title, vid, sub_files = await asyncio.get_event_loop().run_in_executor(None, download, bot, uid, url, media_type)
             sz = Path(fp).stat().st_size
             record = VideoRecord(title, url, vid, fp, sz, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), media_type=media_type)
@@ -75,7 +106,8 @@ async def _group_download(bot, uid, url, msg, media_type, video_id):
             while len(bot.videos.get(uid, [])) > 20: old = bot.videos[uid].pop(); Path(old.file_path).unlink(missing_ok=True)
             bot.save()
 
-        # If we got separate sub files (sub mode 'separate' or merge fallback), send them too
+        # If the download produced separate subtitle files, deliver them as
+        # Telegram documents alongside the main file.
         for sub in sub_files:
             if not Path(sub).exists(): continue
             sz = Path(sub).stat().st_size / 1024
@@ -86,6 +118,8 @@ async def _group_download(bot, uid, url, msg, media_type, video_id):
             except Exception:
                 pass
 
+        # Respect the user's default delivery setting. Groups only show the
+        # inline delivery keyboard if the default is 'ask'.
         default = get_default_delivery(bot, uid)
         if default == 'telegram':
             from app.handlers.tokens import send_file
@@ -120,13 +154,16 @@ async def _group_download(bot, uid, url, msg, media_type, video_id):
         await msg.reply_text(friendly_error_msg(category), reply_to_message_id=msg.message_id)
 
 async def download_task(bot, uid, url, msg, media_type, container_override=None):
+    """Download a single media type for a user and present delivery options."""
     from app.downloader import download_thumb
+    # Show a progress message that will later be edited or deleted.
     s = await msg.reply_text(f"⏳ Downloading {media_type}...", reply_to_message_id=msg.message_id)
     try:
+        # Thumbnails use a dedicated lightweight download path.
         if media_type == 'thumb':
             fp, title, vid, sub_files = await asyncio.get_event_loop().run_in_executor(None, download_thumb, bot, uid, url)
         else:
-            # Pass through the per-call container choice so callers
+            # Video/audio downloads accept the optional container override
             # (format_choice_kb's MKV/MP4 buttons, auto_format=='video'
             # branch) get to override the user's stored container
             # setting exactly for this download without mutating it.
@@ -151,16 +188,21 @@ async def download_task(bot, uid, url, msg, media_type, container_override=None)
                 partial(download, bot, uid, url, media_type,
                         video_quality=None, audio_quality=None,
                         sub_mode=None, container=container_override))
+        # Build a VideoRecord from the downloaded file and prepend it to
+        # the user's recent list (maximum 20 items).
         sz = Path(fp).stat().st_size
         record = VideoRecord(title, url, vid, fp, sz, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), media_type=media_type)
         bot.videos.setdefault(uid, []).insert(0, record)
         while len(bot.videos.get(uid, [])) > 20: old = bot.videos[uid].pop(); Path(old.file_path).unlink(missing_ok=True)
         bot.save()
+        # Attach any separate subtitle files to the record so that the
+        # delivery screen can send them along with the main file.
         if sub_files:
-            record._pending_subs = sub_files  # attach to record for show_delivery to send
+            record._pending_subs = sub_files
         from app.handlers.formats import show_delivery
         await show_delivery(bot, msg, record)
-        # Delete the "Downloading…" status message ONLY after
+        # Delete the progress message only after the delivery screen has
+        # been rendered successfully.
         # show_delivery succeeds. If show_delivery raises, `s`
         # is still alive and the except block can edit it safely.
         await s.delete()
@@ -179,6 +221,11 @@ async def download_task(bot, uid, url, msg, media_type, container_override=None)
             await msg.reply_text(friendly_error_msg(category), reply_markup=menu(bot, uid))
 
 async def _ensure(bot, uid):
+    """Ensure the user has valid cookies loaded.
+
+    Returns True if cookies are in memory or can be restored from a
+    previously saved file_id. Returns False otherwise.
+    """
     if uid in bot._cookie_data: return True
     if uid in bot._cookie_file_ids:
         result = await _load_cookies(bot, uid)
@@ -186,6 +233,7 @@ async def _ensure(bot, uid):
     return False
 
 async def _load_cookies(bot, uid):
+    """Restore cookie bytes from Telegram using the stored file_id."""
     logger.info("Restoring cookies for user %d from Telegram", uid)
     if not bot._bot:
         logger.warning("No bot reference for cookie restore")
@@ -204,6 +252,7 @@ async def _load_cookies(bot, uid):
         return False
 
 async def _check_group(bot, chat_id, bot_client):
+    """Return True if at least one admin of the group is whitelisted."""
     if chat_id in bot._group_admins and bot._group_admins[chat_id]: return True
     try:
         admins = await bot_client.get_chat_administrators(chat_id)
@@ -212,6 +261,7 @@ async def _check_group(bot, chat_id, bot_client):
     except: return False
 
 def _group_delivery_kb(bot, uid):
+    """Build the inline keyboard used for group-chat deliveries."""
     """Group-chat delivery kb.
 
     After the 2026-07-15 fix the kb is bound to its record via

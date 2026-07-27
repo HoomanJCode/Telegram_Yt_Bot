@@ -1,5 +1,16 @@
 # app/handlers/navigation.py
-"""Navigation stack, menus, back button"""
+"""Navigation stack, menus, and settings.
+
+This module implements the main inline keyboard (`menu()`), the per-message
+navigation stack used by the back button, the format-choice screen, and the
+various settings pickers (quality, audio, subtitles, delivery, language,
+auto-format, container).
+
+AI RULE: If you modify this file, you must also update and fix the comments,
+docstrings, and descriptions to keep them accurate and current. Every function
+must have a descriptive docstring explaining its purpose, parameters, and
+return values. Inline comments should explain WHY, not WHAT.
+"""
 import asyncio
 from pathlib import Path
 from datetime import datetime
@@ -20,6 +31,9 @@ from app.downloader import fetch_info
 from config import Config
 import logging
 
+# Navigation stack actions. Each frame pushed onto a message's stack stores
+# one of these constants plus optional data so the back handler knows where to
+# return.
 NAV_MAIN = 'main'
 NAV_RECENT = 'recent'
 NAV_FORMAT = 'format'
@@ -35,9 +49,12 @@ NAV_DELIVERY = 'delivery'
 # case. The constants are module-level so a future maintainer searching
 # for "4096" finds the rationale in one place.
 TELEGRAM_TEXT_MAX = 4096
+# Leave a small safety margin below Telegram's 4096 byte limit for minor
+# formatting overhead and future message template changes.
 SAFE_TEXT_MAX = TELEGRAM_TEXT_MAX - 60
 
 def _nav_key(chat_id, message_id):
+    """Build the canonical (chat_id, message_id) key for per-message state."""
     """Build the canonical per-message nav-stack key.
 
     Centralized so every mutation site (nav_push / nav_pop / the
@@ -51,6 +68,7 @@ def _nav_key(chat_id, message_id):
 
 
 def nav_push(bot, chat_id, message_id, action, data=None):
+    """Push a navigation frame onto a specific message's back stack."""
     """Push a (action, data) back-stack frame onto a SPECIFIC message's stack.
 
     Per-message keying (the 2026-07-15 stale-button fix) means the
@@ -79,6 +97,7 @@ def nav_push(bot, chat_id, message_id, action, data=None):
 
 
 def nav_pop(bot, chat_id, message_id):
+    """Pop the top frame from a specific message's back stack."""
     """Pop the top frame from a single message's nav stack.
 
     Returns (NAV_MAIN, None) -- the universal safe fallback -- when
@@ -93,6 +112,7 @@ def nav_pop(bot, chat_id, message_id):
 
 
 def nav_clear_user(bot, uid):
+    """Drop all nav-stack frames belonging to the given user."""
     """Drop every nav-stack frame that ANY message in this user's
     flows has pushed.
 
@@ -134,6 +154,7 @@ def nav_clear_message(bot, chat_id, message_id):
 logger = logging.getLogger('yt_bot')
 
 def menu(bot, uid):
+    """Build and return the main inline menu keyboard for a user."""
     has = uid in bot._cookie_data
     vc = len(bot.videos.get(uid, []))
     settings = bot._user_settings.get(uid, {})
@@ -174,6 +195,7 @@ def menu(bot, uid):
     ])
 
 async def welcome_text(bot):
+    """Return the welcome text shown on /start and after back-navigation."""
     username = await _username(bot)
     return f"👋 Welcome!\n\n🎥 YouTube Downloader Bot\n\n💡 Send YouTube link → Download!\n📱 Inline: @{username} <link>\n👥 Groups: Send link\n🗑️ Files: {bot.config.STORAGE_DAYS}d retention.\n\n🔒 Cookies: RAM only, auto-restore."
 
@@ -182,6 +204,7 @@ async def _username(bot):
     return bot._bot_username or "botname"
 
 async def show_format_choice(bot, uid, url, video_id, msg):
+    """Fetch video metadata and render the format picker."""
     from app.handlers.messages import _ensure
     if not await _ensure(bot, uid):
         await msg.reply_text("❌ Cookies expired. Upload with /cookies", reply_to_message_id=msg.message_id)
@@ -353,6 +376,7 @@ async def show_format_choice(bot, uid, url, video_id, msg):
         await s.edit_text(friendly_error_msg(category), reply_markup=menu(bot, uid))
 
 async def show_recent(bot, u, c, page=0):
+    """Render a paginated list of the user's recent downloads."""
     uid = u.effective_user.id; msg = u.callback_query.message if u.callback_query else u.message
     # Eagerly drop records whose files no longer exist (operator cleared
     # downloads/ from VPS, retention sweep, server migration, etc.) so this
@@ -402,6 +426,7 @@ async def show_recent(bot, u, c, page=0):
     await msg.reply_text(txt, disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(kb))
 
 async def handle_back(bot, u, c):
+    """Handle the generic 'back' callback by popping the per-message stack."""
     q = u.callback_query; uid = u.effective_user.id
     # Per-message keying: pop the nav-stack frame belonging to the
     # message the user clicked `b` on. Earlier the key was uid-only
@@ -426,6 +451,7 @@ async def handle_back(bot, u, c):
         await q.message.reply_text(await welcome_text(bot), reply_markup=menu(bot, uid)); await q.message.delete()
 
 async def router(bot, u, c):
+    """Dispatch incoming callback queries to the appropriate handler."""
     q = u.callback_query
     try:
         await q.answer()
@@ -470,6 +496,7 @@ async def router(bot, u, c):
     elif d.startswith('p_'): await show_recent(bot, u, c, int(d.split('_')[1]))
 
 async def _change_language(bot, u, c):
+    """Render the language picker keyboard."""
     q = u.callback_query; uid = u.effective_user.id
     current = bot._user_langs.get(uid, 'en')
     kb = InlineKeyboardMarkup([
@@ -484,6 +511,7 @@ async def _change_language(bot, u, c):
     await q.message.delete()
 
 async def _set_language(bot, u, c):
+    """Persist the chosen subtitle language and show the main menu."""
     q = u.callback_query; await q.answer()
     uid = u.effective_user.id
     lang = q.data.split('_')[1]
@@ -494,6 +522,7 @@ async def _set_language(bot, u, c):
     await q.message.delete()
 
 async def _change_delivery(bot, u, c):
+    """Render the default delivery method picker."""
     q = u.callback_query; uid = u.effective_user.id
     current = bot._user_settings.get(uid, {}).get('default_delivery', 'ask')
     kb = InlineKeyboardMarkup([
@@ -506,6 +535,7 @@ async def _change_delivery(bot, u, c):
     await q.message.delete()
 
 async def _set_delivery(bot, u, c):
+    """Persist the chosen default delivery method and show the main menu."""
     q = u.callback_query; await q.answer()
     uid = u.effective_user.id
     method = q.data.split('_')[1]
@@ -518,6 +548,7 @@ async def _set_delivery(bot, u, c):
     await q.message.delete()
 
 async def _change_video_quality(bot, u, c):
+    """Render the video quality picker."""
     q = u.callback_query; uid = u.effective_user.id
     current = bot._user_settings.get(uid, {}).get('video_quality', 'best')
     rows = []
@@ -529,6 +560,7 @@ async def _change_video_quality(bot, u, c):
     await q.message.delete()
 
 async def _set_video_quality(bot, u, c):
+    """Persist the chosen video quality and show the main menu."""
     q = u.callback_query; await q.answer()
     uid = u.effective_user.id
     qkey = q.data[len('setvq_'):]
@@ -542,6 +574,7 @@ async def _set_video_quality(bot, u, c):
     await q.message.delete()
 
 async def _change_audio_quality(bot, u, c):
+    """Render the audio quality picker."""
     q = u.callback_query; uid = u.effective_user.id
     current = bot._user_settings.get(uid, {}).get('audio_quality', 'best')
     rows = []
@@ -553,6 +586,7 @@ async def _change_audio_quality(bot, u, c):
     await q.message.delete()
 
 async def _set_audio_quality(bot, u, c):
+    """Persist the chosen audio quality and show the main menu."""
     q = u.callback_query; await q.answer()
     uid = u.effective_user.id
     qkey = q.data[len('setaq_'):]
@@ -566,6 +600,7 @@ async def _set_audio_quality(bot, u, c):
     await q.message.delete()
 
 async def _change_subtitle_mode(bot, u, c):
+    """Render the subtitle mode picker."""
     q = u.callback_query; uid = u.effective_user.id
     current = bot._user_settings.get(uid, {}).get('subtitle_mode', 'embed')
     rows = []
@@ -584,6 +619,7 @@ async def _change_subtitle_mode(bot, u, c):
     await q.message.delete()
 
 async def _set_subtitle_mode(bot, u, c):
+    """Persist the chosen subtitle mode and show the main menu."""
     q = u.callback_query; await q.answer()
     uid = u.effective_user.id
     qkey = q.data[len('setsm_'):]
@@ -600,6 +636,7 @@ async def _set_subtitle_mode(bot, u, c):
 
 
 async def _change_auto_format(bot, u, c):
+    """Render the auto-format default picker."""
     """Show the auto-format picker inline-keyboard."""
     q = u.callback_query; uid = u.effective_user.id
     stored = bot._user_settings.get(uid, {}).get('auto_format', 'ask')
@@ -626,6 +663,7 @@ async def _change_auto_format(bot, u, c):
 
 
 async def _set_auto_format(bot, u, c):
+    """Persist the chosen auto-format default and show the main menu."""
     q = u.callback_query; await q.answer()
     uid = u.effective_user.id
     qkey = q.data[len('setaf_'):]
@@ -642,6 +680,7 @@ async def _set_auto_format(bot, u, c):
 
 
 async def _change_video_container(bot, u, c):
+    """Render the video container default picker."""
     """Show the per-user video-container picker inline-keyboard."""
     q = u.callback_query; uid = u.effective_user.id
     stored = bot._user_settings.get(uid, {}).get('video_container', 'auto')
@@ -664,6 +703,7 @@ async def _change_video_container(bot, u, c):
 
 
 async def _set_video_container(bot, u, c):
+    """Persist the chosen video container and show the main menu."""
     """Persist the user's video_container choice to disk."""
     q = u.callback_query; await q.answer()
     uid = u.effective_user.id
@@ -687,6 +727,7 @@ async def _set_video_container(bot, u, c):
     await q.message.delete()
 
 async def _clear_all(bot, u, c):
+    """Delete all downloaded files and clear the user's recent list."""
     q = u.callback_query; uid = u.effective_user.id
     videos = bot.videos.get(uid, []); count = len(videos)
     for v in videos: Path(v.file_path).unlink(missing_ok=True)
@@ -694,6 +735,7 @@ async def _clear_all(bot, u, c):
     await q.message.reply_text(f"🗑️ {count} files cleared.", reply_markup=menu(bot, uid))
 
 async def _select(bot, u, c):
+    """Handle selection of a recent download entry."""
     q = u.callback_query; uid, idx = u.effective_user.id, int(q.data.split('_')[1])
     # Eagerly prune: a file deleted between when show_recent rendered this
     # menu and when the user tapped it would otherwise be delivered (or
@@ -713,6 +755,7 @@ async def _select(bot, u, c):
     await q.message.delete()
 
 async def _delete(bot, u, c):
+    """Handle deletion of a single recent download entry."""
     q = u.callback_query; uid, idx = u.effective_user.id, int(q.data.split('_')[1])
     videos = bot.videos.get(uid, [])
     if 0 <= idx < len(videos): Path(videos[idx].file_path).unlink(missing_ok=True); videos.pop(idx); bot.save()

@@ -1,5 +1,15 @@
 # app/bot.py
-"""Main bot class with shared state"""
+"""Main bot class with shared state.
+
+This module defines `YouTubeDownloaderBot`, the central object that holds all
+runtime state (user settings, cookies, recent downloads, ephemeral inline
+keyboards, etc.). It also handles startup cleanup and native HTTPS setup.
+
+AI RULE: If you modify this file, you must also update and fix the comments,
+docstrings, and descriptions to keep them accurate and current. Every function
+must have a descriptive docstring explaining its purpose, parameters, and
+return values. Inline comments should explain WHY, not WHAT.
+"""
 import asyncio, os, time, logging, ssl
 from collections import OrderedDict
 from pathlib import Path
@@ -15,7 +25,8 @@ DOWNLOADS_DIR = Path('downloads')
 
 # Output extensions yt-dlp writes when a download successfully completes.
 # Anything else found in DOWNLOADS_DIR is by definition an orphaned fragment
-# or partial and is safe to delete at startup.
+# or partial and is safe to delete at startup. Keeping the list explicit avoids
+# accidentally deleting user data or in-progress downloads.
 _KNOWN_OUTPUT_EXT = {
     '.mp4', '.mkv', '.webm',         # video containers
     '.mp3', '.m4a', '.opus',         # audio containers
@@ -31,54 +42,31 @@ _ORPHAN_EXT = {'.ytdl', '.part'}
 class SSLConfigError(RuntimeError):
     """Raised on a permanent SSL_CERT_FILE / SSL_KEY_FILE misconfiguration.
 
-    Caught at app/__init__.py::main() which exits with code 78 (EX_CONFIG
-    from sysexits.h). deploy.sh's systemd unit sets
-    RestartPreventExitStatus=78 so the bot does NOT auto-restart on a
-    config error — without this, `Restart=always + RestartSec=10` would
-    loop forever (~5 lines/sec into journalctl) until the operator
-    manually intervenes. The exception message is operator-actionable
-    (specific path/env name, plus "Fix .env and restart" hint), so
-    fixing the .env and running `systemctl start telegramytbot` is the
-    full recovery flow.
+    This typed exception lets `app/__init__.py::main()` distinguish a bad
+    certificate setup from a runtime error and exit with code 78 (EX_CONFIG),
+    telling systemd not to restart the bot in a tight loop. The exception
+    message is operator-actionable (specific path/env name, plus "Fix .env
+    and restart" hint) so the operator can recover without reading code.
     """
 
 
 def _build_ssl_context():
-    """Read SSL_CERT_FILE / SSL_KEY_FILE env vars, validate, return an
-    `ssl.SSLContext` ready to pass to aiohttp.web.TCPSite.
+    """Build an SSL context from env vars or return None for plain HTTP.
 
-    Behaviour matrix (defined here so the function is unit-testable
-    independently from YouTubeDownloaderBot.__init__'s filesystem /
-    FileServer plumbing):
-
-    * Both env vars empty (legacy default): return None. Caller passes
-      None to FileServer → plain HTTP. Backwards-compatible with
-      pre-SSL deployments.
-    * Only one of cert/key set: raise SSLConfigError. Reject on
-      principle rather than guess which side is correct; a partial
-      config is almost always a typo and silently picking a side
-      would obscure the mistake.
-    * Both set, files not regular files: raise SSLConfigError.
-    * Both set + loadable as a PEM cert+key chain: return an
-      `ssl.SSLContext` built with `Purpose.CLIENT_AUTH` (the correct
-      specifier for a TLS server authenticating connecting clients).
-    * Soft-warns (does NOT raise) if the private key is group/world
-      readable (POSIX mode & 0o077). On Windows the stat bits don't
-      reflect ACLs, so the warning is silently skipped there.
-
-    This function does NOT call sys.exit; raising a typed exception
-    keeps `__init__` exception-safe and lets main() own the exit
-    semantics. The cross-validation against `BASE_DOWNLOAD_LINK` (warn
-    on http:// + HTTPS-enabled) is intentionally NOT done here — that
-    belongs to YouTubeDownloaderBot.__init__ because it needs `self.base_url`.
+    Reads SSL_CERT_FILE and SSL_KEY_FILE, validates that both files exist,
+    and returns an `ssl.SSLContext` ready for aiohttp. Raises SSLConfigError
+    on a permanent misconfiguration so the operator can fix it.
     """
     ssl_cert_raw = os.getenv('SSL_CERT_FILE', '')
     ssl_key_raw = os.getenv('SSL_KEY_FILE', '')
     ssl_cert = ssl_cert_raw.strip()
     ssl_key = ssl_key_raw.strip()
+    # Neither env var is set: run in plain HTTP mode, preserving behaviour
+    # for deployments that existed before SSL support was added.
     if not (ssl_cert or ssl_key):
-        # Legacy HTTP mode — backwards-compatible default.
         return None
+    # Only one of cert/key is set: this is almost always an operator typo,
+    # so fail fast with a clear message rather than guessing.
     if not (ssl_cert and ssl_key):
         raise SSLConfigError(
             'SSL config error: SSL_CERT_FILE and SSL_KEY_FILE must both '
@@ -87,6 +75,9 @@ def _build_ssl_context():
             'and restart.')
     cert_path = Path(ssl_cert)
     key_path = Path(ssl_key)
+    # Both paths must point to actual files. The error messages mention common
+    # mistakes (Windows backslashes, wrong filenames) so the operator can fix
+    # the .env without reading the source code.
     if not cert_path.is_file():
         raise SSLConfigError(
             f'SSL_CERT_FILE does not exist or is not a regular file: '
@@ -100,6 +91,9 @@ def _build_ssl_context():
     # "leaky key" footgun. We don't refuse to start (containers without
     # POSIX stat bits would block legit restarts); we just surface the
     # smell in journalctl.
+    # Warn if the private key is readable by anyone other than the owner.
+    # On POSIX systems this is a security smell; on Windows the stat bits do
+    # not reflect ACLs, so the warning is silently skipped there.
     try:
         mode = key_path.stat().st_mode
         if mode & 0o077:
@@ -110,12 +104,10 @@ def _build_ssl_context():
     except OSError:
         # stat() failure already caught above; second pass is best-effort.
         pass
+    # Build a server-side TLS context from the certificate and key.
+    # Purpose.CLIENT_AUTH is the correct specifier for a TLS server
+    # authenticating connecting clients.
     try:
-        # Purpose.CLIENT_AUTH is the correct specifier for a server
-        # authenticating connecting clients (vs CLIENT used by a TLS
-        # client to verify a server). DO NOT pass check_hostname=True
-        # here — that is client-side verification semantics; the
-        # server only hands a cert to the client.
         ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
         ctx.load_cert_chain(certfile=str(cert_path), keyfile=str(key_path))
     except Exception as e:
@@ -131,13 +123,30 @@ def _build_ssl_context():
     return ctx
 
 class YouTubeDownloaderBot:
+    """Central bot state container.
+
+    Holds configuration, per-user settings, cookies, recent downloads, and
+    ephemeral state for inline keyboards. It is created once at startup and
+    passed into every handler.
+    """
+
     def __init__(self):
         from config import Config
+        # Load environment-based configuration.
         self.config = Config()
+        # Base URL used to build public download links; strip any trailing
+        # slash so path joining is consistent.
         self.base_url = self.config.BASE_DOWNLOAD_LINK.rstrip('/')
-        try: port = int(self.base_url.split(':')[-1]) if ':' in self.base_url.split('/')[2] else 8000
-        except: port = 8000
-        for d in (DATA_DIR, DOWNLOADS_DIR): d.mkdir(parents=True, exist_ok=True)
+        # Try to derive the file-server port from the base URL. If parsing
+        # fails for any reason, fall back to 8000.
+        try:
+            port = int(self.base_url.split(':')[-1]) if ':' in self.base_url.split('/')[2] else 8000
+        except Exception:
+            port = 8000
+        # Ensure persistent directories exist before any handler writes to
+        # them (user videos, cookies, downloads, etc.).
+        for d in (DATA_DIR, DOWNLOADS_DIR):
+            d.mkdir(parents=True, exist_ok=True)
         self._cookie_file_ids: Dict[int, str] = {}
         self._cookie_data: Dict[int, bytes] = {}
         self._cookie_tmpfiles: Dict[int, str] = {}

@@ -1,8 +1,21 @@
-"""aiohttp file server"""
+"""aiohttp file server for serving downloaded files.
+
+This module runs an aiohttp web application that exposes the `downloads/`
+directory over HTTP (or HTTPS when an SSL context is provided). It supports
+Range requests for resume-capable downloads and returns correct MIME types
+for the media formats the bot produces.
+
+AI RULE: If you modify this file, you must also update and fix the comments,
+docstrings, and descriptions to keep them accurate and current. Every function
+must have a descriptive docstring explaining its purpose, parameters, and
+return values. Inline comments should explain WHY, not WHAT.
+"""
+
 import logging
 import socket
 from pathlib import Path
 from aiohttp import web
+
 
 logger = logging.getLogger('yt_bot')
 DOWNLOADS_DIR = Path('downloads')
@@ -21,16 +34,12 @@ _CHUNK_BYTES = 1024 * 1024
 class _AiohttpNoiseFilter(logging.Filter):
     """Demote aiohttp's BadHttpMessage probe-spam from ERROR to DEBUG.
 
-    aiohttp's HTTP parser raises `BadHttpMessage` for every malformed probe
-    (missing Host header, junk bytes, unsupported HTTP version) and emits it
-    through the `aiohttp.server` logger with `exc_info=True`.  Because the
-    file server is exposed on a public port we get hit by background scanners
-    many times per minute, drowning out operator logs.
-
-    Mutating `record.levelno` to DEBUG makes our INFO+ StreamHandler skip the
-    record entirely; the traceback never prints.  Real protocol-level errors
-    that don't match these fragments keep their original level.
+    Background internet scanners constantly hit public ports with malformed
+    HTTP requests. Without this filter, aiohttp logs each one as an ERROR with
+    a traceback, drowning out legitimate log messages. The filter changes the
+    level of known probe patterns to DEBUG so they are silently ignored.
     """
+
     PATTERNS = (
         'badhttpmessage',
         "missing 'host' header",
@@ -43,8 +52,12 @@ class _AiohttpNoiseFilter(logging.Filter):
     )
 
     def filter(self, record):
+        """Mutate known probe records to DEBUG level before logging."""
+        # Look at the rendered message text so we can match the actual error
+        # text emitted by aiohttp.
         msg = record.getMessage().lower()
         if record.levelno >= logging.ERROR and any(p in msg for p in self.PATTERNS):
+            # Mutate the record to DEBUG so default INFO+ handlers skip it.
             record.levelno = logging.DEBUG
             record.levelname = 'DEBUG'
         return True
@@ -53,20 +66,24 @@ class _AiohttpNoiseFilter(logging.Filter):
 # Install once at import time so it survives across all FileServer instances.
 logging.getLogger('aiohttp.server').addFilter(_AiohttpNoiseFilter())
 
+
 class FileServer:
+    """Async HTTP/HTTPS file server backed by aiohttp.
+
+    The server exposes files from `downloads/` and is started by the main bot
+    in the same event loop. Range requests are supported for resumable downloads.
+    """
+
     # `ssl_context=None` opts the server into HTTPS mode when an
     # ssl.SSLContext built from a PEM cert+key is forwarded by
     # YouTubeDownloaderBot.__init__ (path resolved from the SSL_CERT_FILE
-    # / SSL_KEY_FILE env vars). Default is None (plain HTTP) so an
-    # operator upgrading the binary without setting those vars sees
-    # exactly the previous behaviour — no surprise protocol flip. The
-    # regression pin lives in
-    # tests/test_fileserver.py::TestFileServerSSLContext so a future
-    # refactor that drops the kwarg or forgets to forward it to
-    # web.TCPSite surfaces immediately.
+    # / SSL_KEY_FILE env vars). Default is None (plain HTTP) so an operator
+    # upgrading the binary without setting those vars sees exactly the
+    # previous behaviour — no surprise protocol flip.
     def __init__(self, port=8000, ssl_context=None):
         self.port = port
         self.ssl_context = ssl_context
+        # Build an aiohttp application with a single route for downloads.
         self.app = web.Application()
         # GET serves the body. HEAD serves only headers -- Telegram
         # mobile clients probe HEAD before GET to learn Content-Length
@@ -82,21 +99,14 @@ class FileServer:
     def _enable_tcp_nodelay(request):
         """Disable Nagle on this connection's underlying socket.
 
-        Nagle's algorithm buffers small writes (~ <1 KiB) waiting for an
-        ACK before sending. Useful for telnet, HARMFUL for the FINAL
-        packet of a long HTTP file serve: with Nagle off, every write
-        goes to the wire immediately, so the trailing few KB after a
-        series of 1 MiB chunks aren't held back by 200 ms of ACK-wait.
-
-        Combined with the `Connection: close` header and the per-write
-        `await response.drain()`, this single socket-level change kills
-        the "stall at 99%" symptom on mobile + CGNAT clients (which
-        idle their NATted TCP connection at 30-60 s).
-
-        Best-effort only: some transports (pipes, mocks, test fixtures)
-        lack a real socket or refuse setsockopt. Never fail a download
-        over a Nagle tweak we couldn't apply.
+        Nagle's algorithm buffers small writes waiting for an ACK before
+        sending the next packet. For the final bytes of a large file transfer
+        this can cause a visible "stall at 99 %". Disabling it makes the last
+        chunk flush immediately.
         """
+        # `transport.get_extra_info('socket')` returns the underlying socket,
+        # if any. Some transports (e.g. test fakes) may not expose one, so any
+        # error is silently ignored rather than failing the request.
         try:
             sock = request.transport.get_extra_info('socket')
             if sock is not None:
@@ -105,17 +115,21 @@ class FileServer:
             pass
 
     async def _handle_download(self, request):
+        """Serve a single file, optionally honouring a Range header."""
+        # Resolve the requested filename against the downloads directory.
         filename = request.match_info['filename']
         filepath = DOWNLOADS_DIR / filename
+
+        # Reject requests for missing or directory paths to avoid leaking
+        # information about the filesystem outside `downloads/`.
         if not filepath.exists() or not filepath.is_file():
             raise web.HTTPNotFound()
 
         file_size = filepath.stat().st_size
-        # `Connection: close` removes the keep-alive ambiguity that turns
-        # a successful final-byte send into a "stall at 99%" for clients
-        # which use the TCP close event to mark download complete (most
-        # mobile Telegram clients). Trade one extra RTT on the NEXT
-        # download for unambiguous EOF semantics on THIS one.
+
+        # Force `Connection: close` so the client knows the stream ended when
+        # the connection closes. This avoids ambiguous EOF on mobile clients.
+        # Standard headers for a static file with Range support.
         headers = {
             'Content-Type': _mime(filepath.suffix),
             'Accept-Ranges': 'bytes',
@@ -124,6 +138,7 @@ class FileServer:
             'Connection': 'close',
         }
 
+        # Parse the Range header if present (e.g. "bytes=0-1023").
         range_header = request.headers.get('Range', '')
         if range_header.startswith('bytes='):
             try:
@@ -163,10 +178,8 @@ class FileServer:
                             remaining -= len(chunk)
                             bytes_sent += len(chunk)
                 except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError) as e:
-                    # See non-Range path comment for the INFO/DEBUG
-                    # level rationale (operator-visibility at default
-                    # CONFIG_LOG_LEVEL). Disconnects during a Range
-                    # resume are the same diagnostic.
+                    # Log client disconnects during Range transfers. See the
+                    # non-Range path for the rationale behind INFO level.
                     logger.info(
                         'file-serve client disconnect during Range after %d/%d bytes of %s: %s',
                         bytes_sent, length, filename, e)
@@ -174,6 +187,7 @@ class FileServer:
             except (ValueError, IndexError):
                 pass
 
+        # Non-Range path: serve the entire file in 1 MiB chunks.
         response = web.StreamResponse()
         headers['Content-Length'] = str(file_size)
         response.headers.update(headers)
@@ -194,16 +208,14 @@ class FileServer:
             # (real network problem) or at EOF (the end-of-stream race
             # fixed by NODELAY + drain + Connection: close). INFO, not
             # WARNING, because legitimate "user closed Telegram app"
-            # disconnects are normal noise on a public port. INFO
-            # guarantees operators at default CONFIG_LOG_LEVEL (INFO)
-            # see this diagnostic in journalctl WITHOUT having to set
-            # LOG_LEVEL=DEBUG in `.env`.
+            # disconnects are normal noise on a public port.
             logger.info(
                 'file-serve client disconnect after %d/%d bytes of %s: %s',
                 bytes_sent, file_size, filename, e)
         return response
 
     async def start(self):
+        """Start the aiohttp server on 0.0.0.0:port."""
         self._runner = web.AppRunner(self.app)
         await self._runner.setup()
         # `ssl_context=self.ssl_context` (default None) is the aiohttp 3.x
@@ -221,6 +233,7 @@ class FileServer:
 
 
 def _mime(ext):
+    """Return the correct MIME type for a given file extension."""
     return {
         '.mp4': 'video/mp4', '.webm': 'video/webm', '.mkv': 'video/x-matroska',
         '.mp3': 'audio/mpeg', '.m4a': 'audio/mp4', '.opus': 'audio/opus',

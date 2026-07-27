@@ -1,4 +1,13 @@
-"""Command handlers: /start, /help, /recent, /status, /cancel"""
+"""Command handlers: /start, /help, /recent, /status, /cancel.
+
+Each function receives the shared `bot` instance plus the Telegram update and
+context objects, and sends the appropriate response back to the user.
+
+AI RULE: If you modify this file, you must also update and fix the comments,
+docstrings, and descriptions to keep them accurate and current. Every function
+must have a descriptive docstring explaining its purpose, parameters, and
+return values. Inline comments should explain WHY, not WHAT.
+"""
 import asyncio
 import shutil
 import socket
@@ -7,11 +16,15 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from app.handlers.navigation import nav_clear_user, show_recent
 
 def _port_reachable(host, port, timeout=1.0):
-    """True if a TCP connection to `host:port` succeeds within `timeout` seconds."""
+    """Return True if a TCP connection to `host:port` succeeds within `timeout` seconds."""
     try:
+        # `socket.create_connection` returns once the three-way TCP handshake
+        # completes, which confirms the target port is reachable.
         with socket.create_connection((host, port), timeout=timeout):
             return True
     except (ConnectionRefusedError, socket.timeout, OSError):
+        # Any network-level failure (refused, timeout, DNS, etc.) means the
+        # service is not reachable from the bot host.
         return False
 
 def _run_sync(cmd, timeout=1.5):
@@ -128,23 +141,36 @@ async def _gather_proxy_info():
     return lines
 
 async def start_cmd(bot, u, c):
+    """Handle the /start command.
+
+    Supports two entry points:
+      1. Deep-link tokens (`/start dl_<token>`) from inline results.
+      2. The normal welcome flow, which shows the main menu.
+    """
     uid = u.effective_user.id; args = c.args
     from app.utils import ok
     if not ok(bot, uid): await u.message.reply_text("⛔"); return
     if args and args[0].startswith('dl_'):
+        # Deep-link token passed via /start dl_<token>; route to the token
+        # handler, which serves a cached file or starts a download.
         from app.handlers.tokens import handle_token_start
         await handle_token_start(bot, uid, args[0], u.message); return
     # Set default language from Telegram
     if uid not in bot._user_langs:
+        # Persist the language code so subtitle selection and UI labels can
+        # default to the user's Telegram language.
         bot._user_langs[uid] = u.effective_user.language_code or 'en'
         bot.save()
     from app.handlers.messages import _ensure
     await _ensure(bot, uid)
+    # Reset any leftover per-message navigation for this user, then show
+    # the welcome message with the main inline menu.
     nav_clear_user(bot, uid)
     from app.handlers.navigation import welcome_text, menu
     await u.message.reply_text(await welcome_text(bot), reply_markup=menu(bot, uid))
 
 async def help_cmd(bot, u, c):
+    """Show a short help text with the main menu keyboard."""
     from app.handlers.navigation import menu
     await u.message.reply_text(
         "📚 Send YouTube link.\n"
@@ -154,7 +180,7 @@ async def help_cmd(bot, u, c):
 
 
 async def settings_cmd(bot, u, c):
-    """Per-user settings viewer/editor (`/settings`).
+    """Show a summary of the user's current settings with the main menu.
 
     Wraps the existing inline menu (which already exposes per-setting
     buttons) with an intro text summarizing the current values so users
@@ -190,6 +216,8 @@ async def settings_cmd(bot, u, c):
     delivery_labels = {
         'ask': 'Ask each time', 'telegram': 'Telegram', 'link': 'Link',
     }
+    # If the user chose MP4 + embed subtitles, warn them that the actual
+    # delivery will be a separate .srt because MP4 cannot mux soft subs.
     extra = ''
     if container == 'mp4' and sm_stored == 'embed':
         extra = "\n\n⚠️ MP4 + embed → subs will come as a separate .srt file."
@@ -207,9 +235,12 @@ async def settings_cmd(bot, u, c):
         intro, parse_mode='Markdown', reply_markup=menu(bot, uid))
 
 async def recent_cmd(bot, u, c):
-    nav_clear_user(bot, u.effective_user.id); await show_recent(bot, u, c)
+    """Handle /recent: clear per-message state and show recent downloads."""
+    nav_clear_user(bot, u.effective_user.id)
+    await show_recent(bot, u, c)
 
 async def status_cmd(bot, u, c):
+    """Report bot runtime state, including Warp proxy health."""
     """Report bot runtime state incl. Warp proxy health. Async-safe; every probe is bounded."""
     from app.utils import ok
     from app.handlers.navigation import menu
@@ -224,6 +255,7 @@ async def status_cmd(bot, u, c):
     await u.message.reply_text("\n".join(lines), reply_markup=menu(bot, uid))
 
 async def cancel_cmd(bot, u, c):
+    """Cancel the current conversation and return to the main menu."""
     nav_clear_user(bot, u.effective_user.id)
     from app.handlers.navigation import menu
     from telegram.ext import ConversationHandler

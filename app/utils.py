@@ -1,5 +1,11 @@
 # app/utils.py
-"""Utility functions"""
+"""Utility functions, shared constants, and yt-dlp error classification.
+
+AI RULE: If you modify this file, you must also update and fix the comments,
+docstrings, and descriptions to keep them accurate and current. Every function
+must have a descriptive docstring explaining its purpose, parameters, and
+return values. Inline comments should explain WHY, not WHAT.
+"""
 import json, re, subprocess, time
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -9,12 +15,32 @@ DOWNLOADS_DIR = Path('downloads')
 YOUTUBE_RE = re.compile(r'(https?://)?(www\.)?(youtube\.com|youtu\.be)/\S+')
 
 def check_ffmpeg():
+    """Return True if ffmpeg is installed and callable on the system PATH.
+
+    Runs `ffmpeg -version` in a subprocess with a 5-second timeout. The result
+    is cached on `bot.has_ffmpeg` at startup and checked before any
+    ffmpeg-based post-processing (subtitle mux, audio transcode).
+    """
     try: subprocess.run(['ffmpeg', '-version'], capture_output=True, timeout=5); return True
     except: return False
 
-def ok(bot, uid): return not bot.config.get_whitelist() or uid in bot.config.get_whitelist()
+def ok(bot, uid):
+    """Return True if the user is allowed to use the bot.
+
+    If WHITELIST_USERS is unset/empty (default), all users are allowed.
+    Otherwise only users whose Telegram ID appears in the comma-separated
+    whitelist may interact with the bot. This is the first gate checked by
+    every handler before doing any work.
+    """
+    return not bot.config.get_whitelist() or uid in bot.config.get_whitelist()
 
 def extract_url(text):
+    """Extract the first YouTube URL from a text message.
+
+    Matches youtube.com and youtu.be links (with or without scheme). Bare
+    `www.`-prefixed URLs get an `https://` prefix so they parse as valid HTTP
+    URIs downstream. Returns None if no YouTube-looking URL is found.
+    """
     m = YOUTUBE_RE.search(text)
     if m:
         u = m.group(0)
@@ -24,12 +50,26 @@ def extract_url(text):
     return None
 
 def extract_video_id(url):
+    """Extract the 11-character YouTube video ID from a URL.
+
+    Handles standard watch URLs, youtu.be short links, embed URLs, /v/ URLs,
+    and /shorts/ URLs. Returns None if no 11-char alphanumeric+hyphen+
+    underscore ID is found. Used for deduplication, cache keying, and inline
+    result identification.
+    """
     for p in [r'(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/embed/|youtube\.com/v/)([a-zA-Z0-9_-]{11})', r'youtube\.com/shorts/([a-zA-Z0-9_-]{11})']:
         m = re.search(p, url)
         if m: return m.group(1)
     return None
 
 def esc(text):
+    """Escape Telegram Markdown special characters in a string.
+
+    Prepends a backslash to each of '*', '_', '`', '[', ']' so that the text
+    renders literally when used inside a ParseMode.MARKDOWN message. Used for
+    titles, descriptions, uploader names, and comments -- anything that might
+    contain underscores or asterisks from YouTube metadata.
+    """
     for c in '*_`[]': text = text.replace(c, '\\' + c)
     return text
 
@@ -258,6 +298,13 @@ def _info_thumbnail_url(info):
 
 
 def load_data(bot):
+    """Load all persistent state from JSON files into the bot instance.
+
+    Reads from `data/` directory at startup. Each file is optional -- missing
+    files are silently skipped so a fresh deployment starts with empty state
+    instead of crashing. Deserializes user_videos.json, cookie_file_ids.json,
+    global_file_ids.json, user_langs.json, and user_settings.json.
+    """
     from app.models import VideoRecord
     try:
         fp = DATA_DIR / 'user_videos.json'
@@ -281,6 +328,15 @@ def load_data(bot):
     except: pass
 
 def save_data(bot):
+    """Persist all in-memory bot state to JSON files in `data/`.
+
+    Writes user_videos.json, cookie_file_ids.json, global_file_ids.json,
+    user_langs.json, and user_settings.json with 2-space indentation. Each
+    write is individually wrapped in try/except so a single disk-full or
+    permission error on one file does not prevent the others from being saved.
+    Called after every state mutation (new download, cookie upload, settings
+    change).
+    """
     try: (DATA_DIR / 'user_videos.json').write_text(json.dumps({str(k): [v.to_dict() for v in vs] for k, vs in bot.videos.items()}, indent=2))
     except: pass
     try: (DATA_DIR / 'cookie_file_ids.json').write_text(json.dumps({str(k): v for k, v in bot._cookie_file_ids.items()}, indent=2))
@@ -571,9 +627,22 @@ def _ensure_settings(bot, uid):
     return s
 
 def get_video_quality(bot, uid):
+    """Return the user's preferred video quality string (default 'best').
+
+    Reads from `bot._user_settings[uid]['video_quality']`. Returns one of
+    VIDEO_QUALITY_OPTIONS: 'best', '2160p', '1440p', '1080p', '720p',
+    '480p', '360p', or 'worst'.
+    """
     return _ensure_settings(bot, uid).get('video_quality', 'best')
 
 def get_audio_quality(bot, uid):
+    """Return the user's preferred audio quality string (default 'best').
+
+    Reads from `bot._user_settings[uid]['audio_quality']`. Returns one of
+    AUDIO_QUALITY_OPTIONS: 'best', '320', '256', '192', '128', '96', or
+    'worst'. Maps to yt-dlp bitrate-limited format selectors in
+    AUDIO_QUALITY_FMT.
+    """
     return _ensure_settings(bot, uid).get('audio_quality', 'best')
 
 def get_subtitle_mode(bot, uid):

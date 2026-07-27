@@ -1,4 +1,10 @@
-"""Synchronous yt-dlp download functions"""
+"""Synchronous yt-dlp download functions.
+
+AI RULE: If you modify this file, you must also update and fix the comments,
+docstrings, and descriptions to keep them accurate and current. Every function
+must have a descriptive docstring explaining its purpose, parameters, and
+return values. Inline comments should explain WHY, not WHAT.
+"""
 import logging, tempfile, os, re, subprocess, shutil, time
 from pathlib import Path
 import yt_dlp

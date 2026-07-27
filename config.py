@@ -2,16 +2,28 @@ import logging
 import os
 from dotenv import load_dotenv
 
+# Load environment variables from a .env file if one exists. This lets
+# operators configure the bot without exporting variables manually.
 load_dotenv()
 
 # Module-level logger for security/audit events that need to surface in
 # journalctl. `Config.is_admin` logs here when ADMIN_USERS parses to an
-# empty set due to all-malformed tokens — a fail-closed safety net that
+# empty set due to all-malformed tokens -- a fail-closed safety net that
 # the operator notices on their next restart.
+
+# ============================================================================
+# AI RULE: If you modify this file, you must also update and fix the comments,
+# docstrings, and descriptions to keep them accurate and current. Every function
+# must have a descriptive docstring explaining its purpose, parameters, and
+# return values. Inline comments should explain WHY, not WHAT.
+# ============================================================================
+
 logger = logging.getLogger('yt_bot')
 
 def _env_bool(key, default='false'):
     """Parse an env var as bool. Truthy = 1/true/yes/on (case-insensitive)."""
+    # Any value other than the explicit truthy strings below is treated as
+    # False, including set-but-empty or typo values (e.g. 'tru').
     return os.getenv(key, default).strip().lower() in ('1', 'true', 'yes', 'on')
 
 
@@ -60,6 +72,13 @@ def _env_log_level(key, default='INFO'):
     return getattr(logging, raw)
 
 class Config:
+    """Central configuration class populated from environment variables.
+
+    All attributes are resolved at import time. Operators who need to change
+    a setting must update the corresponding env var (or .env file) and
+    restart the bot.
+    """
+
     BOT_TOKEN = os.getenv('BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
     BASE_DOWNLOAD_LINK = os.getenv('BASE_DOWNLOAD_LINK', 'http://your-server-ip:8000')
     WHITELIST_USERS = os.getenv('WHITELIST_USERS', '')
@@ -144,7 +163,7 @@ class Config:
     # NOT cached at import: `is_admin()` re-parses ADMIN_USERS each call so
     # test monkey-patching takes effect without a module reload.
     ADMIN_USERS = os.getenv('ADMIN_USERS', '')
-    
+
     @classmethod
     def get_whitelist(cls):
         if not cls.WHITELIST_USERS:

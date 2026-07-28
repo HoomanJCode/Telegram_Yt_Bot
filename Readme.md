@@ -48,7 +48,9 @@
 - 🍪 **Cookie Management** — Per-user cookie storage in RAM only
 - 👥 **Whitelist System** — Restrict bot to specific users
 - 👑 **Admin Gating** — Lock `/cookies` to specific Telegram user IDs
-- 📱 **Interactive Menus** — Inline keyboard navigation with back-stack
+- 📱 **4-Button Main Menu** — Streamlined layout: My Downloads, Cookies, Quick Settings, Help
+- ⚙️ **Quick Settings** — Consolidated settings screen: change all 7 settings from one place, no back-and-forth
+- 🧭 **Smart Back-Stack** — Per-message navigation history, Back returns to where you came from
 - 🌐 **Built-in File Server** — No separate HTTP server needed (aiohttp)
 - 🔒 **Native HTTPS** — TLS termination without reverse proxy (optional)
 - 🔄 **Cloudflare Warp Proxy** — Route downloads through Warp (optional)
@@ -136,21 +138,32 @@ python bot.py
 
 ## 📱 Quick Usage
 
+### Main Menu
+
+After `/start`, you see a clean **4-button main menu**:
+
+```
+📹 My Downloads (0)     — View and manage past downloads
+🍪 Upload               — Upload cookies.txt (shows ✅ Active when set; also shows status toast)
+⚙️ Quick Settings        — All settings in one screen (video/audio quality, subs, delivery, …)
+❓ Help / Commands       — Quick reference
+```
+
 ### Basic Flow
-1. **Upload Cookies** — `/cookies` — Send a cookies.txt file (required first step)
+1. **Upload Cookies** — Tap `🍪 Upload Cookies` or send `/cookies` (required first step)
 2. **Send YouTube Link** — Paste any YouTube URL
-3. **Choose Format** — Video (MKV/MP4) / Audio (MP3/M4A) / Thumbnails
+3. **Choose Format** — Video (MKV / MP4) / Audio (MP3 / M4A) / Thumbnail
 4. **Choose Delivery** — Telegram upload or download link
 
 ### Commands
 
 | Command | Description |
 |---------|-------------|
-| `/start` | Welcome message and main menu |
-| `/help` | Help and usage information |
-| `/cookies` | Upload YouTube cookies file |
-| `/recent` | View recent downloads |
-| `/settings` | Change quality, format, and delivery defaults |
+| `/start` | Welcome message + 4-button main menu |
+| `/help` | Quick command reference + main menu |
+| `/cookies` | Upload YouTube cookies file (also via 🍪 button) |
+| `/recent` | View recent downloads (also via 📹 button) |
+| `/settings` | Open Quick Settings screen (also via ⚙️ button) |
 | `/status` | Check bot health and proxy status |
 | `/cancel` | Cancel current operation |
 

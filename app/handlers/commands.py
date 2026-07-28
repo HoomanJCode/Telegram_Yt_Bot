@@ -180,59 +180,18 @@ async def help_cmd(bot, u, c):
 
 
 async def settings_cmd(bot, u, c):
-    """Show a summary of the user's current settings with the main menu.
+    """Show the consolidated Quick Settings screen.
 
-    Wraps the existing inline menu (which already exposes per-setting
-    buttons) with an intro text summarizing the current values so users
-    who prefer text commands over inline buttons have a discoverable
-    entry point. Does not introduce new state — reuses
-    `get_video_quality`/`get_audio_quality`/`get_subtitle_mode`/
-    `get_default_delivery` and the existing `setvq_*`/`setaq_*`/
-    `setsm_*`/`setdelivery_*`/`setlang_*` callback handlers.
+    Reuses `show_settings_summary` so the /settings command and the
+    inline Quick Settings button render the exact same UI.
     """
     from app.utils import ok
-    from app.utils import (
-        VIDEO_QUALITY_LABELS, AUDIO_QUALITY_LABELS, SUBTITLE_MODE_LABELS,
-        AUTO_FORMAT_LABELS, VIDEO_CONTAINER_LABELS,
-    )
-    from app.handlers.navigation import menu
+    from app.handlers.navigation import show_settings_summary
     uid = u.effective_user.id
     if not ok(bot, uid):
         await u.message.reply_text("⛔")
         return
-
-    settings = bot._user_settings.get(uid, {})
-    vq = settings.get('video_quality', 'best')
-    aq = settings.get('audio_quality', 'best')
-    sm_stored = settings.get('subtitle_mode', 'embed')
-    delivery = settings.get('default_delivery', 'ask')
-    af = settings.get('auto_format', 'ask')
-    container = settings.get('video_container', 'auto')
-    # Container-aware sub_mode: when the user picked MP4 + embed, the
-    # EFFECTIVE sub mode cascades to 'separate' (MP4 cannot mux soft
-    # subs). Show the user what they'll actually get, not the raw stored
-    # value that gets cascaded silently inside the downloader.
-    sm_effective = 'separate' if (container == 'mp4' and sm_stored == 'embed') else sm_stored
-    delivery_labels = {
-        'ask': 'Ask each time', 'telegram': 'Telegram', 'link': 'Link',
-    }
-    # If the user chose MP4 + embed subtitles, warn them that the actual
-    # delivery will be a separate .srt because MP4 cannot mux soft subs.
-    extra = ''
-    if container == 'mp4' and sm_stored == 'embed':
-        extra = "\n\n⚠️ MP4 + embed → subs will come as a separate .srt file."
-    intro = (
-        "⚙️ *Your settings* (tap a button below to change):\n\n"
-        f"🎬 Video: {VIDEO_QUALITY_LABELS.get(vq, vq)}\n"
-        f"🎵 Audio: {AUDIO_QUALITY_LABELS.get(aq, aq)}\n"
-        f"📝 Subs: {SUBTITLE_MODE_LABELS.get(sm_effective, sm_effective)}\n"
-        f"🎞️ Container: {VIDEO_CONTAINER_LABELS.get(container, container)}\n"
-        f"📤 Delivery: {delivery_labels.get(delivery, delivery)}\n"
-        f"⚡ Auto-format: {AUTO_FORMAT_LABELS.get(af, af)}"
-        f"{extra}"
-    )
-    await u.message.reply_text(
-        intro, parse_mode='Markdown', reply_markup=menu(bot, uid))
+    await show_settings_summary(bot, u, c)
 
 async def recent_cmd(bot, u, c):
     """Handle /recent: clear per-message state and show recent downloads."""

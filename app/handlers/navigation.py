@@ -38,6 +38,7 @@ NAV_MAIN = 'main'
 NAV_RECENT = 'recent'
 NAV_FORMAT = 'format'
 NAV_DELIVERY = 'delivery'
+NAV_SETTINGS = 'settings'
 
 # Telegram's edit_text caps the rendered message text at 4096 bytes. We
 # leave 60 chars of SAFE_TEXT_MAX headroom for the trailing kb string
@@ -155,44 +156,85 @@ logger = logging.getLogger('yt_bot')
 
 def menu(bot, uid):
     """Build and return the main inline menu keyboard for a user."""
-    has = uid in bot._cookie_data
+    has_cookies = uid in bot._cookie_data
     vc = len(bot.videos.get(uid, []))
-    settings = bot._user_settings.get(uid, {})
+    # Cookie button is contextual: when cookies are active the user
+    # doesn't need to re-enter the upload conversation, so the button
+    # becomes a status toast. When inactive it routes into the
+    # ConversationHandler entry point (`c`) defined in handlers/cookies.py.
+    cookie_cb = 'cs' if has_cookies else 'c'
+    cookie_label = f"🍪 {'✅ Active' if has_cookies else 'Upload'}"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"📹 My Downloads ({vc})", callback_data='r')],
+        [InlineKeyboardButton(cookie_label, callback_data=cookie_cb)],
+        [InlineKeyboardButton("⚙️ Quick Settings", callback_data='cfg')],
+        [InlineKeyboardButton("❓ Help / Commands", callback_data='h')],
+    ])
+
+async def show_settings_summary(bot, u, c):
+    """Render the consolidated Quick Settings screen and push a main-menu frame.
+
+    Builds a single message that summarises every user-configurable
+    option and attaches a keyboard to jump to any individual picker.
+    The new message gets a `NAV_MAIN` stack frame so its 🔙 Back
+    button returns the user to the main menu.
+    """
+    # Support being called from both callback queries and slash commands.
+    # For callbacks we reply through the underlying message; for commands
+    # `u.message` is already the incoming message object.
+    if u.callback_query:
+        q = u.callback_query.message
+    else:
+        q = u.message
+    uid = u.effective_user.id
+    settings = bot._user_settings.get(uid, {}) or {}
     lang = bot._user_langs.get(uid, 'en')
-    delivery = settings.get('default_delivery', 'ask')
-    delivery_label = {'ask': 'Ask', 'telegram': 'Telegram', 'link': 'Link'}.get(delivery, 'Ask')
+
     vq = settings.get('video_quality', 'best')
     aq = settings.get('audio_quality', 'best')
     sm_stored = settings.get('subtitle_mode', 'embed')
-    cn_stored = settings.get('video_container', 'auto')
+    cn = settings.get('video_container', 'auto')
+    delivery = settings.get('default_delivery', 'ask')
     af = settings.get('auto_format', 'ask')
-    vq_short = 'Best' if vq == 'best' else vq.upper() if vq != 'worst' else '~'
-    aq_short = 'Best' if aq == 'best' else f"{aq}k" if aq != 'worst' else '~'
-    # Container-aware subtitle mode: when the user has both container='mp4'
-    # AND subtitle_mode='embed' set, the EFFECTIVE subtitle mode is
-    # 'separate' (the embed-vs-MKV link is broken). Reflect that on the
-    # button label so the user sees what they'll actually receive, not
-    # what their settings dict nominally contains.
-    sm_effective = 'separate' if (cn_stored == 'mp4' and sm_stored == 'embed') else sm_stored
-    sm_short = {'embed': 'MKV', 'separate': 'SRT', 'off': 'Off'}.get(sm_effective, 'MKV')
-    cn_short = VIDEO_CONTAINER_SHORT.get(cn_stored, 'MKV') if cn_stored in VIDEO_CONTAINER_OPTIONS else 'MKV'
-    # Defensive: stored `af` may be legacy garbage; menu() reads raw
-    # settings for the button label only — `get_auto_format` is the
-    # authoritative validator (used in messages.py:on_msg).
-    af_short = AUTO_FORMAT_SHORT.get(af, 'Ask') if af in AUTO_FORMAT_OPTIONS else 'Ask'
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📹 Recent Downloads", callback_data='r')],
-        [InlineKeyboardButton("🍪 Upload Cookies", callback_data='c')],
-        [InlineKeyboardButton(f"🎬 Video: {vq_short}", callback_data='vq'),
-         InlineKeyboardButton(f"🎵 Audio: {aq_short}", callback_data='aq'),
-         InlineKeyboardButton(f"📝 Subs: {sm_short}", callback_data='sm')],
-        [InlineKeyboardButton(f"🌐 Language: {lang.upper()}", callback_data='lang'),
-         InlineKeyboardButton(f"📤 Delivery: {delivery_label}", callback_data='delivery'),
-         InlineKeyboardButton(f"🍪 {'✅' if has else '❌'}", callback_data='cs')],
-        [InlineKeyboardButton(f"⚡ Auto: {af_short}", callback_data='af'),
-         InlineKeyboardButton(f"🎞️ Container: {cn_short}", callback_data='cn')],
-        [InlineKeyboardButton(f"📦 {vc} files", callback_data='vc')],
+
+    # MP4 cannot mux soft subtitles, so an MP4 + embed combo is
+    # cascaded to a separate .srt delivery. Show the effective value.
+    sm_effective = 'separate' if (cn == 'mp4' and sm_stored == 'embed') else sm_stored
+
+    delivery_labels = {'ask': 'Ask each time', 'telegram': 'Telegram', 'link': 'Link'}
+    lang_names = {'en': 'English', 'fa': 'فارسی', 'ar': 'العربية', 'ru': 'Русский', 'es': 'Español'}
+
+    extra = ""
+    if cn == 'mp4' and sm_stored == 'embed':
+        extra = "\n\n⚠️ MP4 + embed → subs will come as a separate .srt file."
+
+    intro = (
+        "⚙️ *Quick Settings*\n\n"
+        f"🎬 Video: {VIDEO_QUALITY_LABELS.get(vq, vq)}\n"
+        f"🎵 Audio: {AUDIO_QUALITY_LABELS.get(aq, aq)}\n"
+        f"📝 Subs: {SUBTITLE_MODE_LABELS.get(sm_effective, sm_effective)}\n"
+        f"🎞️ Container: {VIDEO_CONTAINER_LABELS.get(cn, cn)}\n"
+        f"📤 Delivery: {delivery_labels.get(delivery, delivery)}\n"
+        f"⚡ Auto-format: {AUTO_FORMAT_LABELS.get(af, af)}\n"
+        f"🌐 Language: {lang_names.get(lang, lang.upper())}"
+        f"{extra}"
+    )
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎬 Quality", callback_data='vq'),
+         InlineKeyboardButton("🎵 Audio", callback_data='aq')],
+        [InlineKeyboardButton("📝 Subtitles", callback_data='sm'),
+         InlineKeyboardButton("🎞️ Container", callback_data='cn')],
+        [InlineKeyboardButton("📤 Delivery", callback_data='delivery'),
+         InlineKeyboardButton("⚡ Auto-format", callback_data='af')],
+        [InlineKeyboardButton("🌐 Language", callback_data='lang')],
+        [InlineKeyboardButton("🔙 Back", callback_data='b')],
     ])
+
+    new_msg = await q.reply_text(intro, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+    nav_push(bot, new_msg.chat.id, new_msg.message_id, NAV_MAIN)
+    return new_msg
+
 
 async def welcome_text(bot):
     """Return the welcome text shown on /start and after back-navigation."""
@@ -453,6 +495,11 @@ async def handle_back(bot, u, c):
         # race against show_format_choice's own write inside the same
         # event-loop tick).
         await show_format_choice(bot, uid, url, video_id, q.message); await q.message.delete()
+    elif prev == NAV_SETTINGS:
+        # Returning from a settings picker back to the consolidated
+        # Quick Settings screen. Re-render the summary on a fresh message
+        # and remove the picker the user just left.
+        await show_settings_summary(bot, u, c); await q.message.delete()
     else:
         await q.message.reply_text(await welcome_text(bot), reply_markup=menu(bot, uid)); await q.message.delete()
 
@@ -461,6 +508,19 @@ async def router(bot, u, c):
     q = u.callback_query
     if q is None:
         return
+    d, uid = q.data, u.effective_user.id
+
+    # Cookie status is handled as a toast so the user isn't bounced to a
+    # new message for a read-only status check. Intercept it before the
+    # blanket q.answer() so we can answer with alert text safely.
+    if d == 'cs':
+        try:
+            text = "✅ Cookies active" if uid in bot._cookie_data else "❌ Upload with /cookies"
+            await q.answer(text, show_alert=True)
+        except BadRequest:
+            pass
+        return
+
     try:
         await q.answer()
     except BadRequest:
@@ -468,7 +528,6 @@ async def router(bot, u, c):
         # readable from the incoming update, so we can still dispatch
         # to the handler. The handler's own q.answer() is also wrapped.
         pass
-    d, uid = q.data, u.effective_user.id
     if d == 'b': await handle_back(bot, u, c)
     elif d == 'r':
         # Per-message nav on the /recent trigger message so a back-click
@@ -477,6 +536,24 @@ async def router(bot, u, c):
         # frame on this message -- they push NAV_RECENT on the delivery
         # screen show_delivery renders, see formats.show_delivery.
         nav_push(bot, q.message.chat.id, q.message.message_id, NAV_MAIN); await show_recent(bot, u, c)
+    elif d == 'cfg':
+        # Open the consolidated Quick Settings screen from the main menu.
+        # The old main-menu message is replaced by the new summary.
+        await show_settings_summary(bot, u, c); await q.message.delete()
+    elif d == 'h':
+        # Inline help to avoid a circular import with commands.py.
+        help_text = (
+            "📚 *Help*\n\n"
+            "• Send any YouTube link to download.\n"
+            "• Use the buttons below to change settings.\n"
+            "• /settings — open Quick Settings.\n"
+            "• /cookies — upload cookies.txt (admin only).\n"
+            "• /recent — list your downloads.\n"
+            "• /status — bot and proxy status.\n"
+            "• Inline: @botname <link>"
+        )
+        await q.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN,
+                                   reply_markup=menu(bot, uid))
     elif d == 'lang': await _change_language(bot, u, c)
     elif d == 'delivery': await _change_delivery(bot, u, c)
     elif d == 'vq': await _change_video_quality(bot, u, c)
@@ -491,8 +568,6 @@ async def router(bot, u, c):
     elif d.startswith('setsm_'): await _set_subtitle_mode(bot, u, c)
     elif d.startswith('setaf_'): await _set_auto_format(bot, u, c)
     elif d.startswith('setcn_'): await _set_video_container(bot, u, c)
-    elif d == 'cs': await q.message.reply_text("✅ Cookies active" if uid in bot._cookie_data else "❌ Upload with /cookies")
-    elif d == 'vc': await q.message.reply_text(f"📦 {len(bot.videos.get(uid,[]))} files")
     elif d == 'clear_all': await _clear_all(bot, u, c)
     elif d.startswith('fmt_'): from app.handlers.formats import choose_format; await choose_format(bot, u, c)
     elif d == 'backfmt': from app.handlers.formats import back_to_formats; await back_to_formats(bot, u, c)
@@ -515,18 +590,18 @@ async def _change_language(bot, u, c):
         [InlineKeyboardButton(f"{'✅' if current == 'es' else '⬜'} Español", callback_data='setlang_es')],
         [InlineKeyboardButton("🔙 Back", callback_data='b')],
     ])
-    await q.message.reply_text("🌐 Select subtitle language:", reply_markup=kb)
+    new_msg = await q.message.reply_text("🌐 Select subtitle language:", reply_markup=kb)
+    nav_push(bot, new_msg.chat.id, new_msg.message_id, NAV_SETTINGS)
     await q.message.delete()
 
 async def _set_language(bot, u, c):
-    """Persist the chosen subtitle language and show the main menu."""
-    q = u.callback_query; await q.answer()
+    """Persist the chosen subtitle language and return to Quick Settings."""
+    q = u.callback_query
     uid = u.effective_user.id
     lang = q.data.split('_')[1]
     bot._user_langs[uid] = lang
     bot.save()
-    lang_names = {'en': 'English', 'fa': 'فارسی', 'ar': 'العربية', 'ru': 'Русский', 'es': 'Español'}
-    await q.message.reply_text(f"🌐 Language set to {lang_names.get(lang, lang.upper())}", reply_markup=menu(bot, uid))
+    await show_settings_summary(bot, u, c)
     await q.message.delete()
 
 async def _change_delivery(bot, u, c):
@@ -539,20 +614,20 @@ async def _change_delivery(bot, u, c):
         [InlineKeyboardButton(f"{'✅' if current == 'link' else '⬜'} Get Download Link", callback_data='setdelivery_link')],
         [InlineKeyboardButton("🔙 Back", callback_data='b')],
     ])
-    await q.message.reply_text("📤 Default delivery method:", reply_markup=kb)
+    new_msg = await q.message.reply_text("📤 Default delivery method:", reply_markup=kb)
+    nav_push(bot, new_msg.chat.id, new_msg.message_id, NAV_SETTINGS)
     await q.message.delete()
 
 async def _set_delivery(bot, u, c):
-    """Persist the chosen default delivery method and show the main menu."""
-    q = u.callback_query; await q.answer()
+    """Persist the chosen default delivery method and return to Quick Settings."""
+    q = u.callback_query
     uid = u.effective_user.id
     method = q.data.split('_')[1]
     if uid not in bot._user_settings:
         bot._user_settings[uid] = {}
     bot._user_settings[uid]['default_delivery'] = method
     bot.save()
-    labels = {'ask': 'Ask every time', 'telegram': 'Send via Telegram', 'link': 'Get Download Link'}
-    await q.message.reply_text(f"📤 Default delivery: {labels.get(method, method)}", reply_markup=menu(bot, uid))
+    await show_settings_summary(bot, u, c)
     await q.message.delete()
 
 async def _change_video_quality(bot, u, c):
@@ -564,21 +639,20 @@ async def _change_video_quality(bot, u, c):
         marker = '✅' if current == opt else '⬜'
         rows.append([InlineKeyboardButton(f"{marker} {VIDEO_QUALITY_LABELS.get(opt, opt)}", callback_data=f'setvq_{opt}')])
     rows.append([InlineKeyboardButton("🔙 Back", callback_data='b')])
-    await q.message.reply_text("🎬 Video quality (default: 🏆 Best):", reply_markup=InlineKeyboardMarkup(rows))
+    new_msg = await q.message.reply_text("🎬 Video quality (default: 🏆 Best):", reply_markup=InlineKeyboardMarkup(rows))
+    nav_push(bot, new_msg.chat.id, new_msg.message_id, NAV_SETTINGS)
     await q.message.delete()
 
 async def _set_video_quality(bot, u, c):
-    """Persist the chosen video quality and show the main menu."""
-    q = u.callback_query; await q.answer()
+    """Persist the chosen video quality and return to Quick Settings."""
+    q = u.callback_query
     uid = u.effective_user.id
     qkey = q.data[len('setvq_'):]
     if uid not in bot._user_settings or not isinstance(bot._user_settings.get(uid), dict):
         bot._user_settings[uid] = {}
     bot._user_settings[uid]['video_quality'] = qkey
     bot.save()
-    await q.message.reply_text(
-        f"🎬 Video quality set to {VIDEO_QUALITY_LABELS.get(qkey, qkey)}",
-        reply_markup=menu(bot, uid))
+    await show_settings_summary(bot, u, c)
     await q.message.delete()
 
 async def _change_audio_quality(bot, u, c):
@@ -590,21 +664,20 @@ async def _change_audio_quality(bot, u, c):
         marker = '✅' if current == opt else '⬜'
         rows.append([InlineKeyboardButton(f"{marker} {AUDIO_QUALITY_LABELS.get(opt, opt)}", callback_data=f'setaq_{opt}')])
     rows.append([InlineKeyboardButton("🔙 Back", callback_data='b')])
-    await q.message.reply_text("🎵 Audio quality (default: 🏆 Best):", reply_markup=InlineKeyboardMarkup(rows))
+    new_msg = await q.message.reply_text("🎵 Audio quality (default: 🏆 Best):", reply_markup=InlineKeyboardMarkup(rows))
+    nav_push(bot, new_msg.chat.id, new_msg.message_id, NAV_SETTINGS)
     await q.message.delete()
 
 async def _set_audio_quality(bot, u, c):
-    """Persist the chosen audio quality and show the main menu."""
-    q = u.callback_query; await q.answer()
+    """Persist the chosen audio quality and return to Quick Settings."""
+    q = u.callback_query
     uid = u.effective_user.id
     qkey = q.data[len('setaq_'):]
     if uid not in bot._user_settings or not isinstance(bot._user_settings.get(uid), dict):
         bot._user_settings[uid] = {}
     bot._user_settings[uid]['audio_quality'] = qkey
     bot.save()
-    await q.message.reply_text(
-        f"🎵 Audio quality set to {AUDIO_QUALITY_LABELS.get(qkey, qkey)}",
-        reply_markup=menu(bot, uid))
+    await show_settings_summary(bot, u, c)
     await q.message.delete()
 
 async def _change_subtitle_mode(bot, u, c):
@@ -623,12 +696,13 @@ async def _change_subtitle_mode(bot, u, c):
             desc = ' (no subs)'
         rows.append([InlineKeyboardButton(f"{marker} {label}{desc}", callback_data=f'setsm_{opt}')])
     rows.append([InlineKeyboardButton("🔙 Back", callback_data='b')])
-    await q.message.reply_text("📝 Subtitle mode (default: 🔗 Embed MKV):", reply_markup=InlineKeyboardMarkup(rows))
+    new_msg = await q.message.reply_text("📝 Subtitle mode (default: 🔗 Embed MKV):", reply_markup=InlineKeyboardMarkup(rows))
+    nav_push(bot, new_msg.chat.id, new_msg.message_id, NAV_SETTINGS)
     await q.message.delete()
 
 async def _set_subtitle_mode(bot, u, c):
-    """Persist the chosen subtitle mode and show the main menu."""
-    q = u.callback_query; await q.answer()
+    """Persist the chosen subtitle mode and return to Quick Settings."""
+    q = u.callback_query
     uid = u.effective_user.id
     qkey = q.data[len('setsm_'):]
     if qkey not in SUBTITLE_MODE_OPTIONS:
@@ -637,9 +711,7 @@ async def _set_subtitle_mode(bot, u, c):
         bot._user_settings[uid] = {}
     bot._user_settings[uid]['subtitle_mode'] = qkey
     bot.save()
-    await q.message.reply_text(
-        f"📝 Subtitle mode set to {SUBTITLE_MODE_LABELS.get(qkey, qkey)}",
-        reply_markup=menu(bot, uid))
+    await show_settings_summary(bot, u, c)
     await q.message.delete()
 
 
@@ -664,15 +736,16 @@ async def _change_auto_format(bot, u, c):
             f"{marker} {AUTO_FORMAT_LABELS.get(opt, opt)}{desc}",
             callback_data=f'setaf_{opt}')])
     rows.append([InlineKeyboardButton("🔙 Back", callback_data='b')])
-    await q.message.reply_text(
+    new_msg = await q.message.reply_text(
         "⚡ Default format when you send a YouTube link (private chat only):",
         reply_markup=InlineKeyboardMarkup(rows))
+    nav_push(bot, new_msg.chat.id, new_msg.message_id, NAV_SETTINGS)
     await q.message.delete()
 
 
 async def _set_auto_format(bot, u, c):
-    """Persist the chosen auto-format default and show the main menu."""
-    q = u.callback_query; await q.answer()
+    """Persist the chosen auto-format default and return to Quick Settings."""
+    q = u.callback_query
     uid = u.effective_user.id
     qkey = q.data[len('setaf_'):]
     if qkey not in AUTO_FORMAT_OPTIONS:
@@ -681,9 +754,7 @@ async def _set_auto_format(bot, u, c):
         bot._user_settings[uid] = {}
     bot._user_settings[uid]['auto_format'] = qkey
     bot.save()
-    await q.message.reply_text(
-        f"⚡ Auto-format set to {AUTO_FORMAT_LABELS.get(qkey, qkey)}",
-        reply_markup=menu(bot, uid))
+    await show_settings_summary(bot, u, c)
     await q.message.delete()
 
 
@@ -704,16 +775,16 @@ async def _change_video_container(bot, u, c):
             f"{marker} {VIDEO_CONTAINER_LABELS.get(opt, opt)}{desc}",
             callback_data=f'setcn_{opt}')])
     rows.append([InlineKeyboardButton("🔙 Back", callback_data='b')])
-    await q.message.reply_text(
+    new_msg = await q.message.reply_text(
         "🎞️ Default video output container:",
         reply_markup=InlineKeyboardMarkup(rows))
+    nav_push(bot, new_msg.chat.id, new_msg.message_id, NAV_SETTINGS)
     await q.message.delete()
 
 
 async def _set_video_container(bot, u, c):
-    """Persist the chosen video container and show the main menu."""
     """Persist the user's video_container choice to disk."""
-    q = u.callback_query; await q.answer()
+    q = u.callback_query
     uid = u.effective_user.id
     qkey = q.data[len('setcn_'):]
     if qkey not in VIDEO_CONTAINER_OPTIONS:
@@ -722,16 +793,7 @@ async def _set_video_container(bot, u, c):
         bot._user_settings[uid] = {}
     bot._user_settings[uid]['video_container'] = qkey
     bot.save()
-    # Surface the cascade so the user understands why their `Subs:` button
-    # label will *visibly* flip to 'SRT' when they pick MP4 + had embed.
-    extra = ''
-    sm_stored = bot._user_settings[uid].get('subtitle_mode', 'embed')
-    if qkey == 'mp4' and sm_stored == 'embed':
-        extra = "\n⚠️ MP4 + embed → subs will come as a separate .srt file."
-    await q.message.reply_text(
-        f"🎞️ Container set to {VIDEO_CONTAINER_LABELS.get(qkey, qkey)}"
-        f"{extra}",
-        reply_markup=menu(bot, uid))
+    await show_settings_summary(bot, u, c)
     await q.message.delete()
 
 async def _clear_all(bot, u, c):

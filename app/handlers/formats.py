@@ -218,10 +218,10 @@ def format_choice_kb(bot, uid, video_id):
     # friends). Trade-off reminders in the labels make the format ↔
     # subtitle relationship explicit (MP4 lacks soft-sub embed).
     video_buttons = {
-        'fmt_video_mkv': ("🎬 Video (MKV) — best quality + auto-subs",
-                          "✅ 🎬 Video (MKV) - Downloaded"),
-        'fmt_video_mp4': ("🎬 Video (MP4) — universal compat, subs separate",
-                          "✅ 🎬 Video (MP4) - Downloaded"),
+        'fmt_video_mkv': ("🎬 Video — MKV (best quality)",
+                          "✅ 🎬 Video — MKV (Downloaded)"),
+        'fmt_video_mp4': ("🎬 Video — MP4 (universal)",
+                          "✅ 🎬 Video — MP4 (Downloaded)"),
     }
     for fmt, (plain, downloaded) in video_buttons.items():
         # _video_variant_extensions(...) returns the per-callback
@@ -235,13 +235,13 @@ def format_choice_kb(bot, uid, video_id):
             bot, uid, video_id, 'video', extensions=frozenset(exts))
         kb.append([InlineKeyboardButton(
             downloaded if cached else plain, callback_data=fmt)])
-    a_label = f"🎵 Audio ({'MP3' if bot.has_ffmpeg else 'M4A'})"
+    a_label = f"🎵 Audio — {'MP3' if bot.has_ffmpeg else 'M4A'}"
     if 'audio' in existing_media_types:
-        a_label = "✅ 🎵 Audio - Downloaded"
+        a_label = "✅ 🎵 Audio — Downloaded"
     kb.append([InlineKeyboardButton(a_label, callback_data='fmt_audio')])
-    t_label = "🖼️ Thumbnails"
+    t_label = "🖼️ Thumbnail only"
     if 'thumb' in existing_media_types:
-        t_label = "✅ 🖼️ Thumbnails - Downloaded"
+        t_label = "✅ 🖼️ Thumbnail — Downloaded"
     kb.append([InlineKeyboardButton(t_label, callback_data='fmt_thumb')])
     kb.append([InlineKeyboardButton("🔙 Back", callback_data='b')])
     return InlineKeyboardMarkup(kb)

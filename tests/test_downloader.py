@@ -1554,23 +1554,6 @@ class TestFetchInfoCaching(unittest.TestCase):
             'the TTL return the same info dict without a network round-trip.'
         )
 
-    def test_extractor_args_present_on_cache_miss(self):
-        # NOTE: this assertion was redundant with the existing
-        # `TestFetchInfoExtractorArgs` cases (test_includes_extractor_args_
-        # when_max_comments_set + test_omits_extractor_args_when_max_
-        # comments_zero), which already drive fetch_info through the
-        # cache-miss path with MAX_COMMENTS set/unset. Closed-out per
-        # closing-review of b470192: TestFetchInfoExtractorArgs is the
-        # canonical home for the extractor_args shape contract;
-        # TestFetchInfoCaching is the canonical home for the cache
-        # contract. Splitting the contract across two classes made a
-        # future regression harder to trace -- consolidating the
-        # test layout here keeps the read-through-graph one-to-one.
-        self.skipTest(
-            'extractor_args shape contract lives in '
-            'TestFetchInfoExtractorArgs; TestFetchInfoCaching keeps '
-            'the cache-shaped cases only.')
-
 
 class TestFetchInfoExtractorArgs(unittest.TestCase):
     """Pins the opt-in contract for `Config.MAX_COMMENTS`-driven comment

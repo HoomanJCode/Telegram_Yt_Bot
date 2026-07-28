@@ -171,17 +171,15 @@ def menu(bot, uid):
         [InlineKeyboardButton("❓ Help / Commands", callback_data='h')],
     ])
 
-async def show_settings_summary(bot, u, c):
-    """Render the consolidated Quick Settings screen and push a main-menu frame.
+async def show_settings_summary(bot, u, c, edit_message=None):
+    """Render the consolidated Quick Settings screen.
 
-    Builds a single message that summarises every user-configurable
-    option and attaches a keyboard to jump to any individual picker.
-    The new message gets a `NAV_MAIN` stack frame so its 🔙 Back
-    button returns the user to the main menu.
+    When `edit_message` is provided (e.g. from a `_set_*` callback), uses
+    `edit_text()` to update the picker message in-place — no delete-then-
+    reply flicker. Otherwise sends a fresh reply message via `q.reply_text`.
+    Either way, the resulting message gets a `NAV_MAIN` stack frame so its
+    🔙 Back button returns the user to the main menu.
     """
-    # Support being called from both callback queries and slash commands.
-    # For callbacks we reply through the underlying message; for commands
-    # `u.message` is already the incoming message object.
     if u.callback_query:
         q = u.callback_query.message
     else:
@@ -231,7 +229,19 @@ async def show_settings_summary(bot, u, c):
         [InlineKeyboardButton("🔙 Back", callback_data='b')],
     ])
 
-    new_msg = await q.reply_text(intro, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+    if edit_message is not None:
+        # Edit the picker message in-place — no flicker. The caller
+        # (one of the _set_* functions) is responsible for NOT also
+        # calling q.message.delete(). The nav stack already has a
+        # NAV_SETTINGS frame from the _change_* picker; we push
+        # NAV_MAIN on top so Back on the summary pops to the main
+        # menu (the orphaned NAV_SETTINGS below it is harmless
+        # because the message survives).
+        new_msg = await edit_message.edit_text(
+            intro, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+    else:
+        new_msg = await q.reply_text(
+            intro, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
     nav_push(bot, new_msg.chat.id, new_msg.message_id, NAV_MAIN)
     return new_msg
 
@@ -601,8 +611,8 @@ async def _set_language(bot, u, c):
     lang = q.data.split('_')[1]
     bot._user_langs[uid] = lang
     bot.save()
-    await show_settings_summary(bot, u, c)
-    await q.message.delete()
+    # Edit the picker message in-place to show updated settings — no flicker.
+    await show_settings_summary(bot, u, c, edit_message=q.message)
 
 async def _change_delivery(bot, u, c):
     """Render the default delivery method picker."""
@@ -627,8 +637,7 @@ async def _set_delivery(bot, u, c):
         bot._user_settings[uid] = {}
     bot._user_settings[uid]['default_delivery'] = method
     bot.save()
-    await show_settings_summary(bot, u, c)
-    await q.message.delete()
+    await show_settings_summary(bot, u, c, edit_message=q.message)
 
 async def _change_video_quality(bot, u, c):
     """Render the video quality picker."""
@@ -652,8 +661,7 @@ async def _set_video_quality(bot, u, c):
         bot._user_settings[uid] = {}
     bot._user_settings[uid]['video_quality'] = qkey
     bot.save()
-    await show_settings_summary(bot, u, c)
-    await q.message.delete()
+    await show_settings_summary(bot, u, c, edit_message=q.message)
 
 async def _change_audio_quality(bot, u, c):
     """Render the audio quality picker."""
@@ -677,8 +685,7 @@ async def _set_audio_quality(bot, u, c):
         bot._user_settings[uid] = {}
     bot._user_settings[uid]['audio_quality'] = qkey
     bot.save()
-    await show_settings_summary(bot, u, c)
-    await q.message.delete()
+    await show_settings_summary(bot, u, c, edit_message=q.message)
 
 async def _change_subtitle_mode(bot, u, c):
     """Render the subtitle mode picker."""
@@ -711,8 +718,7 @@ async def _set_subtitle_mode(bot, u, c):
         bot._user_settings[uid] = {}
     bot._user_settings[uid]['subtitle_mode'] = qkey
     bot.save()
-    await show_settings_summary(bot, u, c)
-    await q.message.delete()
+    await show_settings_summary(bot, u, c, edit_message=q.message)
 
 
 async def _change_auto_format(bot, u, c):
@@ -754,8 +760,7 @@ async def _set_auto_format(bot, u, c):
         bot._user_settings[uid] = {}
     bot._user_settings[uid]['auto_format'] = qkey
     bot.save()
-    await show_settings_summary(bot, u, c)
-    await q.message.delete()
+    await show_settings_summary(bot, u, c, edit_message=q.message)
 
 
 async def _change_video_container(bot, u, c):
@@ -793,8 +798,7 @@ async def _set_video_container(bot, u, c):
         bot._user_settings[uid] = {}
     bot._user_settings[uid]['video_container'] = qkey
     bot.save()
-    await show_settings_summary(bot, u, c)
-    await q.message.delete()
+    await show_settings_summary(bot, u, c, edit_message=q.message)
 
 async def _clear_all(bot, u, c):
     """Delete all downloaded files and clear the user's recent list."""

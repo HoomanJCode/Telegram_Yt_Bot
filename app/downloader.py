@@ -972,7 +972,7 @@ def download(bot, uid, url, media_type, video_quality=None, audio_quality=None, 
                 try:
                     os.rename(sub, str(target))
                     renamed_subs.append(str(target))
-                except:
+                except (OSError, IOError):
                     renamed_subs.append(sub)
             else:
                 renamed_subs.append(sub)

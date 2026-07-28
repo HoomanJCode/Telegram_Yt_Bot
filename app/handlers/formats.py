@@ -382,11 +382,12 @@ async def show_delivery(bot, msg, record):
                 if Path(sub).exists():
                     size_kb = Path(sub).stat().st_size / 1024
                     if size_kb < 50 * 1024:  # <50MB → send as Telegram doc
-                        await msg.reply_document(
-                            document=open(sub, 'rb'),
-                            filename=Path(sub).name,
-                            caption=f"📝 Subtitle: {Path(sub).name}", reply_to_message_id=msg.message_id,
-                        )
+                        with open(sub, 'rb') as fh:
+                            await msg.reply_document(
+                                document=fh,
+                                filename=Path(sub).name,
+                                caption=f"📝 Subtitle: {Path(sub).name}", reply_to_message_id=msg.message_id,
+                            )
                     else:
                         await msg.reply_text(
                             f"📝 Subtitle too large for Telegram ({size_kb/1024:.1f}MB)\n"
@@ -394,8 +395,10 @@ async def show_delivery(bot, msg, record):
                             parse_mode=ParseMode.MARKDOWN,
                             reply_to_message_id=msg.message_id,
                         )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                'show_delivery: failed to send subtitle file(s): %s',
+                exc, exc_info=True)
 
     # If user has a default set, skip the keyboard and deliver directly
     default = get_default_delivery(bot, uid)
@@ -477,16 +480,45 @@ async def send_telegram(bot, u, c):
     _delivery_screen, never via bot.videos[uid][idx]."""
     q = u.callback_query
     try:
-        await q.answer()
-    except BadRequest:
-        pass
-    rec = _resolve_delivery_record(bot, q)
-    if rec is None:
-        await _unavailable_message(bot, q)
-        return
-    from app.handlers.tokens import send_file
-    await send_file(bot, q.message, rec)
-    await q.message.delete()
+        try:
+            await q.answer()
+        except BadRequest:
+            pass
+        rec = _resolve_delivery_record(bot, q)
+        if rec is None:
+            await _unavailable_message(bot, q)
+            return
+        from app.handlers.tokens import send_file
+        await send_file(bot, q.message, rec)
+        await q.message.delete()
+    except Exception as exc:
+        logger.error(
+            'send_telegram CRASH: %s: %s\n%s',
+            type(exc).__name__, str(exc)[:300], traceback.format_exc())
+        try:
+            await q.message.reply_text(
+                f"❌ Telegram delivery failed: {type(exc).__name__}",
+                reply_to_message_id=q.message.message_id)
+        except Exception:
+            pass
+
+
+def _build_dl_url(bot, file_path):
+    """Build a download URL with a guaranteed http(s) scheme.
+
+    Returns None if the bot has no base_url or the filename cannot
+    be quoted. Centralising this avoids duplicate URL-sanitisation
+    blocks in the markdown and plain-text code paths.
+    """
+    raw_base = (bot.base_url or '').strip()
+    if not raw_base:
+        return None
+    if not raw_base.startswith('http'):
+        raw_base = f"https://{raw_base}"
+    try:
+        return f"{raw_base}/{quote(Path(file_path).name)}"
+    except Exception:
+        return None
 
 
 async def _reply_link_text(bot, msg, rec):
@@ -503,24 +535,15 @@ async def _reply_link_text(bot, msg, rec):
     """
     text = None  # set inside try; None signals 'could not build'
     try:
-        # Guard against empty/missing base_url. If BASE_DOWNLOAD_LINK
-        # is unset in .env, bot.base_url is '' — we can't build a
-        # download button but can still show the file info.
-        raw_base = (bot.base_url or '').strip()
-        if not raw_base:
+        dl_url = _build_dl_url(bot, rec.file_path)
+        if not dl_url:
             raise ValueError('bot.base_url is empty — set BASE_DOWNLOAD_LINK in .env')
-        # Ensure the base URL has a scheme (Telegram requires it for
-        # InlineKeyboardButton.url). config.BASE_DOWNLOAD_LINK may be
-        # set as a bare domain like "host:8000" by the user.
-        if not raw_base.startswith('http'):
-            raw_base = f"https://{raw_base}"
-        dl_url = f"{raw_base}/{quote(Path(rec.file_path).name)}"
         mb = Path(rec.file_path).stat().st_size / 1024 / 1024
         text = (
             f"🎬 *{esc(rec.title[:200])}*\n\n"
             f"📦 {mb:.2f} MB\n"
             f"📥 {dl_url}\n\n"
-            f"⚠️ File will be deleted after {bot.config.STORAGE_DAYS} days."
+            f"️ File will be deleted after {bot.config.STORAGE_DAYS} days."
         )
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("📥 Download", url=dl_url)],
@@ -541,18 +564,12 @@ async def _reply_link_text(bot, msg, rec):
         # download button. The original dl_url may have been the
         # source of the BadRequest, so rebuild it with the scheme
         # fix applied unconditionally. Same empty-url guard as above.
-        try:
-            raw_base = (bot.base_url or '').strip()
-            if not raw_base:
-                raise ValueError('empty base_url')
-            if not raw_base.startswith('http'):
-                raw_base = f"https://{raw_base}"
-            dl_url = f"{raw_base}/{quote(Path(rec.file_path).name)}"
-        except Exception:
-            dl_url = None
+        dl_url = _build_dl_url(bot, rec.file_path)
         # Rebuild plain text including the URL if possible
         if text is not None:
-            plain = text.replace('*', '')
+            # Strip Markdown bold markers; esc() backslash-escapes
+            # literal asterisks, so remove the resulting \\* pairs too.
+            plain = text.replace(r'\*', '').replace('*', '')
         elif dl_url:
             plain = f"📥 {dl_url}"
         else:
@@ -621,22 +638,27 @@ async def back_to_formats(bot, u, c):
     would race against show_format_choice's own write)."""
     q = u.callback_query
     try:
-        await q.answer()
-    except BadRequest:
-        pass
-    rec = _resolve_delivery_record(bot, q)
-    if rec is None:
-        await _unavailable_message(bot, q)
-        return
-    if not rec.url or not rec.video_id:
-        return
-    from app.handlers.navigation import show_format_choice
-    # show_format_choice writes _pending_urls keyed by the new
-    # picker message_id. The deleted delivery message's
-    # _delivery_screen entry is allowed to evict naturally (LRU).
-    await show_format_choice(bot, u.effective_user.id, rec.url,
-                             rec.video_id, q.message)
-    await q.message.delete()
+        try:
+            await q.answer()
+        except BadRequest:
+            pass
+        rec = _resolve_delivery_record(bot, q)
+        if rec is None:
+            await _unavailable_message(bot, q)
+            return
+        if not rec.url or not rec.video_id:
+            return
+        from app.handlers.navigation import show_format_choice
+        # show_format_choice writes _pending_urls keyed by the new
+        # picker message_id. The deleted delivery message's
+        # _delivery_screen entry is allowed to evict naturally (LRU).
+        await show_format_choice(bot, u.effective_user.id, rec.url,
+                                 rec.video_id, q.message)
+        await q.message.delete()
+    except Exception as exc:
+        logger.error(
+            'back_to_formats CRASH: %s: %s\n%s',
+            type(exc).__name__, str(exc)[:300], traceback.format_exc())
 
 
 async def also_get_other_format(bot, u, c):
@@ -652,46 +674,52 @@ async def also_get_other_format(bot, u, c):
     """
     q = u.callback_query
     try:
-        await q.answer()
-    except BadRequest:
-        pass
-    try:
-        _, mt = q.data.split('_', 1)
-    except ValueError:
-        return
-    if mt not in ('video', 'audio', 'thumb'):
-        return
-    rec = _resolve_delivery_record(bot, q)
-    if rec is None:
-        await _unavailable_message(bot, q)
-        return
-    if not rec.url or not rec.video_id:
-        # Mirror back_to_formats' defensive guard: a source record
-        # missing url/video_id can't be re-downloaded; surface the
-        # standard "unavailable" prompt instead of crashing inside
-        # download_task with a bad URL.
-        await _unavailable_message(bot, q)
-        return
-    uid = u.effective_user.id
-    # Dedup: don't re-download a media_type we already have for
-    # this video_id. Video dedup is intentionally NOT
-    # container-aware here -- the call sets container_override=None
-    # which defers to the user's stored video_container; we
-    # can't pick a single extension to dedup against. The
-    # audio+thumb branches group on a single (video_id, mt) so
-    # they're exact.
-    if mt in ('audio', 'thumb'):
-        existing = find_existing(bot, uid, rec.video_id, mt)
-        if existing:
-            await q.answer("Already downloaded!")
-            await show_delivery(bot, q.message, existing)
+        try:
+            await q.answer()
+        except BadRequest:
+            pass
+        try:
+            _, mt = q.data.split('_', 1)
+        except ValueError:
             return
-    from app.handlers.messages import download_task
-    async with bot._download_semaphore:
-        # container_override=None defers to the user's stored
-        # video_container (or 'auto' for audio/thumb which
-        # ignore container). Mirrors the auto_format='video'
-        # path so the per-user quality cascade is honored
-        # consistently.
-        await download_task(bot, uid, rec.url, q.message, mt,
-                            container_override=None)
+        if mt not in ('video', 'audio', 'thumb'):
+            return
+        rec = _resolve_delivery_record(bot, q)
+        if rec is None:
+            await _unavailable_message(bot, q)
+            return
+        if not rec.url or not rec.video_id:
+            # Mirror back_to_formats' defensive guard: a source record
+            # missing url/video_id can't be re-downloaded; surface the
+            # standard "unavailable" prompt instead of crashing inside
+            # download_task with a bad URL.
+            await _unavailable_message(bot, q)
+            return
+        uid = u.effective_user.id
+        # Dedup: don't re-download a media_type we already have for
+        # this video_id. Video dedup is intentionally NOT
+        # container-aware here -- the call sets container_override=None
+        # which defers to the user's stored video_container; we
+        # can't pick a single extension to dedup against. The
+        # audio+thumb branches group on a single (video_id, mt) so
+        # they're exact.
+        if mt in ('audio', 'thumb'):
+            existing = find_existing(bot, uid, rec.video_id, mt)
+            if existing:
+                await q.answer("Already downloaded!")
+                await show_delivery(bot, q.message, existing)
+                return
+        from app.handlers.messages import download_task
+        async with bot._download_semaphore:
+            # container_override=None defers to the user's stored
+            # video_container (or 'auto' for audio/thumb which
+            # ignore container). Mirrors the auto_format='video'
+            # path so the per-user quality cascade is honored
+            # consistently.
+            await download_task(bot, uid, rec.url, q.message, mt,
+                                container_override=None)
+    except Exception as exc:
+        logger.error(
+            'also_get_other_format CRASH: %s: %s\n%s',
+            type(exc).__name__, str(exc)[:300], traceback.format_exc()
+        )

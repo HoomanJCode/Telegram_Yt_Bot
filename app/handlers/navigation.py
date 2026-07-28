@@ -428,13 +428,19 @@ async def show_recent(bot, u, c, page=0):
 async def handle_back(bot, u, c):
     """Handle the generic 'back' callback by popping the per-message stack."""
     q = u.callback_query; uid = u.effective_user.id
+    try:
+        await q.answer()
+    except BadRequest:
+        # Query is too old or invalid — still try to handle the back
+        # action because the callback data and message are present.
+        pass
     # Per-message keying: pop the nav-stack frame belonging to the
     # message the user clicked `b` on. Earlier the key was uid-only
     # so any button on any of the user's messages would pop the same
     # shared per-uid stack -- the regression we just fixed surfaced
     # when a /start or new URL scrolled up enough to overwrite the
     # frame a stale `b` was about to pop.
-    prev, data = nav_pop(bot, q.message.chat.id, q.message.message_id); await q.answer()
+    prev, data = nav_pop(bot, q.message.chat.id, q.message.message_id)
     if prev == NAV_MAIN:
         await q.message.reply_text(await welcome_text(bot), reply_markup=menu(bot, uid)); await q.message.delete()
     elif prev == NAV_RECENT:
@@ -453,6 +459,8 @@ async def handle_back(bot, u, c):
 async def router(bot, u, c):
     """Dispatch incoming callback queries to the appropriate handler."""
     q = u.callback_query
+    if q is None:
+        return
     try:
         await q.answer()
     except BadRequest:

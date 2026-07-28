@@ -549,18 +549,17 @@ async def router(bot, u, c):
         pass
     if d == 'b': await handle_back(bot, u, c)
     elif d == 'r':
-        # Per-message nav on the /recent trigger message so a back-click
-        # on the /recent rendering's own message goes to NAV_MAIN
-        # (defaults). The /recent-list entries themselves do not push a
-        # frame on this message -- they push NAV_RECENT on the delivery
-        # screen show_delivery renders, see formats.show_delivery.
-        nav_push(bot, q.message.chat.id, q.message.message_id, NAV_MAIN); await show_recent(bot, u, c)
+        # Edit the main menu in-place to show the recent list. Push
+        # NAV_MAIN so Back on the recent list returns to welcome+menu.
+        nav_push(bot, q.message.chat.id, q.message.message_id, NAV_MAIN)
+        await show_recent(bot, u, c, edit_message=q.message)
     elif d == 'cfg':
-        # Open the consolidated Quick Settings screen from the main menu.
-        # The old main-menu message is replaced by the new summary.
-        await show_settings_summary(bot, u, c); await q.message.delete()
+        # Edit the main menu in-place to show Quick Settings — no flicker.
+        # The main menu's stack is empty so show_settings_summary pushes
+        # NAV_MAIN; Back on the summary returns to welcome+menu.
+        await show_settings_summary(bot, u, c, edit_message=q.message)
     elif d == 'h':
-        # Inline help to avoid a circular import with commands.py.
+        username = await _username(bot)
         help_text = (
             "📚 *Help*\n\n"
             "• Send any YouTube link to download.\n"
@@ -569,9 +568,9 @@ async def router(bot, u, c):
             "• /cookies — upload cookies.txt (admin only).\n"
             "• /recent — list your downloads.\n"
             "• /status — bot and proxy status.\n"
-            "• Inline: @botname <link>"
+            f"• Inline: @{username} <link>"
         )
-        await q.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN,
+        await q.message.edit_text(help_text, parse_mode=ParseMode.MARKDOWN,
                                    reply_markup=menu(bot, uid))
     elif d == 'lang': await _change_language(bot, u, c)
     elif d == 'delivery': await _change_delivery(bot, u, c)
@@ -824,6 +823,10 @@ async def _select(bot, u, c):
     if not videos or idx >= len(videos):
         await show_recent(bot, u, c, edit_message=q.message)
         return
+    # Edit the recent-list message to show a delivery screen.
+    # show_delivery sends a new reply and puts the record in
+    # _delivery_screen keyed by the new message_id, so we must
+    # delete the old recent-list message after.
     nav_push(bot, q.message.chat.id, q.message.message_id, NAV_RECENT)
     from app.handlers.formats import show_delivery
     await show_delivery(bot, q.message, videos[idx])

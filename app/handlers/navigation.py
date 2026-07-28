@@ -559,7 +559,7 @@ async def router(bot, u, c):
         # NAV_MAIN; Back on the summary returns to welcome+menu.
         await show_settings_summary(bot, u, c, edit_message=q.message)
     elif d == 'h':
-        # Inline help to avoid a circular import with commands.py.
+        username = await _username(bot)
         help_text = (
             "📚 *Help*\n\n"
             "• Send any YouTube link to download.\n"
@@ -568,7 +568,7 @@ async def router(bot, u, c):
             "• /cookies — upload cookies.txt (admin only).\n"
             "• /recent — list your downloads.\n"
             "• /status — bot and proxy status.\n"
-            "• Inline: @botname <link>"
+            f"• Inline: @{username} <link>"
         )
         await q.message.edit_text(help_text, parse_mode=ParseMode.MARKDOWN,
                                    reply_markup=menu(bot, uid))

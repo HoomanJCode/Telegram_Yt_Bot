@@ -26,6 +26,7 @@
 | Document | Description |
 |----------|-------------|
 | **[📖 USAGE.md](./docs/USAGE.md)** | Commands, download flow, inline mode, settings, and FAQ |
+| **[🗺️ USER_FLOWS.md](./docs/USER_FLOWS.md)** | Complete map of all menus, settings, user paths, and callback reference |
 | **[🔧 CONFIGURATION.md](./docs/CONFIGURATION.md)** | All environment variables explained with examples |
 | **[📦 DEPLOYMENT.md](./docs/DEPLOYMENT.md)** | VPS setup, CI/CD via GitHub Actions, systemd service |
 | **[🏗️ ARCHITECTURE.md](./docs/ARCHITECTURE.md)** | Codebase structure, data flow, design decisions |
@@ -204,7 +205,8 @@ Telegram_Yt_Bot/
 │   ├── DEPLOYMENT.md      # Deployment guide
 │   ├── DEVELOPMENT.md     # Developer setup & conventions
 │   ├── SSL_CLOUDFLARE.md  # HTTPS with Cloudflare
-│   └── USAGE.md           # User guide
+│   ├── USAGE.md           # User guide
+│   └── USER_FLOWS.md      # Complete user interaction map
 │
 ├── tests/                 # Unit tests
 ├── data/                  # Persistent state (JSON)

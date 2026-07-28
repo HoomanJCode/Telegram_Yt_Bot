@@ -427,8 +427,12 @@ async def show_format_choice(bot, uid, url, video_id, msg):
         logger.error("Format choice error [%s]: %s", category, str(e)[:200])
         await s.edit_text(friendly_error_msg(category), reply_markup=menu(bot, uid))
 
-async def show_recent(bot, u, c, page=0):
-    """Render a paginated list of the user's recent downloads."""
+async def show_recent(bot, u, c, page=0, edit_message=None):
+    """Render a paginated list of the user's recent downloads.
+
+    When `edit_message` is provided, transforms the target message in-place
+    via `edit_text()` — no delete-then-reply flicker. Otherwise sends a
+    fresh reply via `msg.reply_text`."""
     uid = u.effective_user.id; msg = u.callback_query.message if u.callback_query else u.message
     # Eagerly drop records whose files no longer exist (operator cleared
     # downloads/ from VPS, retention sweep, server migration, etc.) so this
@@ -438,7 +442,12 @@ async def show_recent(bot, u, c, page=0):
     videos = bot.videos.get(uid, [])
     if not videos:
         cleaned_line = f"\n🗑️ Cleaned {pruned} missing entries." if pruned else ""
-        await msg.reply_text(f"📭 No files.{cleaned_line}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data='b')]]))
+        text = f"📭 No files.{cleaned_line}"
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data='b')]])
+        if edit_message is not None:
+            await edit_message.edit_text(text, reply_markup=markup)
+        else:
+            await msg.reply_text(text, reply_markup=markup)
         return
     pp, tp = 5, max(1, (len(videos)+4)//5); page = max(0, min(page, tp-1)); pv = videos[page*pp:(page+1)*pp]
     emoji_map = {'video': '🎬', 'audio': '🎵', 'thumb': '🖼️'}
@@ -475,7 +484,11 @@ async def show_recent(bot, u, c, page=0):
     if page < tp-1: nav.append(InlineKeyboardButton("➡️", callback_data=f'p_{page+1}'))
     if nav: kb.append(nav)
     kb.append([InlineKeyboardButton("🔙 Menu", callback_data='b')])
-    await msg.reply_text(txt, disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(kb))
+    markup = InlineKeyboardMarkup(kb)
+    if edit_message is not None:
+        await edit_message.edit_text(txt, disable_web_page_preview=True, reply_markup=markup)
+    else:
+        await msg.reply_text(txt, disable_web_page_preview=True, reply_markup=markup)
 
 async def handle_back(bot, u, c):
     """Handle the generic 'back' callback by popping the per-message stack."""
@@ -494,24 +507,20 @@ async def handle_back(bot, u, c):
     # frame a stale `b` was about to pop.
     prev, data = nav_pop(bot, q.message.chat.id, q.message.message_id)
     if prev == NAV_MAIN:
-        await q.message.reply_text(await welcome_text(bot), reply_markup=menu(bot, uid)); await q.message.delete()
+        await q.message.edit_text(await welcome_text(bot), reply_markup=menu(bot, uid))
     elif prev == NAV_RECENT:
-        await show_recent(bot, u, c); await q.message.delete()
+        await show_recent(bot, u, c, edit_message=q.message)
     elif prev == NAV_FORMAT:
         url, video_id = data
-        # Re-rendering the format picker for the popped (url, video_id).
-        # show_format_choice writes `_pending_urls` keyed by the new
-        # picker message_id, so we don't re-write here (doing so would
-        # race against show_format_choice's own write inside the same
-        # event-loop tick).
+        # show_format_choice creates a new "🔍 Fetching info..." status
+        # message internally, so this path still uses reply+delete (the
+        # format picker message has a completely different structure from
+        # the delivery screen it replaces).
         await show_format_choice(bot, uid, url, video_id, q.message); await q.message.delete()
     elif prev == NAV_SETTINGS:
-        # Returning from a settings picker back to the consolidated
-        # Quick Settings screen. Re-render the summary on a fresh message
-        # and remove the picker the user just left.
-        await show_settings_summary(bot, u, c); await q.message.delete()
+        await show_settings_summary(bot, u, c, edit_message=q.message)
     else:
-        await q.message.reply_text(await welcome_text(bot), reply_markup=menu(bot, uid)); await q.message.delete()
+        await q.message.edit_text(await welcome_text(bot), reply_markup=menu(bot, uid))
 
 async def router(bot, u, c):
     """Dispatch incoming callback queries to the appropriate handler."""
@@ -586,7 +595,7 @@ async def router(bot, u, c):
     elif d.startswith('lk_'): from app.handlers.formats import send_link; await send_link(bot, u, c)
     elif d.startswith('sel_'): await _select(bot, u, c)
     elif d.startswith('d_'): await _delete(bot, u, c)
-    elif d.startswith('p_'): await show_recent(bot, u, c, int(d.split('_')[1]))
+    elif d.startswith('p_'): await show_recent(bot, u, c, int(d.split('_')[1]), edit_message=q.message)
 
 async def _change_language(bot, u, c):
     """Render the language picker keyboard."""
@@ -600,9 +609,8 @@ async def _change_language(bot, u, c):
         [InlineKeyboardButton(f"{'✅' if current == 'es' else '⬜'} Español", callback_data='setlang_es')],
         [InlineKeyboardButton("🔙 Back", callback_data='b')],
     ])
-    new_msg = await q.message.reply_text("🌐 Select subtitle language:", reply_markup=kb)
-    nav_push(bot, new_msg.chat.id, new_msg.message_id, NAV_SETTINGS)
-    await q.message.delete()
+    await q.message.edit_text("🌐 Select subtitle language:", reply_markup=kb)
+    nav_push(bot, q.message.chat.id, q.message.message_id, NAV_SETTINGS)
 
 async def _set_language(bot, u, c):
     """Persist the chosen subtitle language and return to Quick Settings."""
@@ -624,9 +632,8 @@ async def _change_delivery(bot, u, c):
         [InlineKeyboardButton(f"{'✅' if current == 'link' else '⬜'} Get Download Link", callback_data='setdelivery_link')],
         [InlineKeyboardButton("🔙 Back", callback_data='b')],
     ])
-    new_msg = await q.message.reply_text("📤 Default delivery method:", reply_markup=kb)
-    nav_push(bot, new_msg.chat.id, new_msg.message_id, NAV_SETTINGS)
-    await q.message.delete()
+    await q.message.edit_text("📤 Default delivery method:", reply_markup=kb)
+    nav_push(bot, q.message.chat.id, q.message.message_id, NAV_SETTINGS)
 
 async def _set_delivery(bot, u, c):
     """Persist the chosen default delivery method and return to Quick Settings."""
@@ -648,9 +655,8 @@ async def _change_video_quality(bot, u, c):
         marker = '✅' if current == opt else '⬜'
         rows.append([InlineKeyboardButton(f"{marker} {VIDEO_QUALITY_LABELS.get(opt, opt)}", callback_data=f'setvq_{opt}')])
     rows.append([InlineKeyboardButton("🔙 Back", callback_data='b')])
-    new_msg = await q.message.reply_text("🎬 Video quality (default: 🏆 Best):", reply_markup=InlineKeyboardMarkup(rows))
-    nav_push(bot, new_msg.chat.id, new_msg.message_id, NAV_SETTINGS)
-    await q.message.delete()
+    await q.message.edit_text("🎬 Video quality (default: 🏆 Best):", reply_markup=InlineKeyboardMarkup(rows))
+    nav_push(bot, q.message.chat.id, q.message.message_id, NAV_SETTINGS)
 
 async def _set_video_quality(bot, u, c):
     """Persist the chosen video quality and return to Quick Settings."""
@@ -672,9 +678,8 @@ async def _change_audio_quality(bot, u, c):
         marker = '✅' if current == opt else '⬜'
         rows.append([InlineKeyboardButton(f"{marker} {AUDIO_QUALITY_LABELS.get(opt, opt)}", callback_data=f'setaq_{opt}')])
     rows.append([InlineKeyboardButton("🔙 Back", callback_data='b')])
-    new_msg = await q.message.reply_text("🎵 Audio quality (default: 🏆 Best):", reply_markup=InlineKeyboardMarkup(rows))
-    nav_push(bot, new_msg.chat.id, new_msg.message_id, NAV_SETTINGS)
-    await q.message.delete()
+    await q.message.edit_text("🎵 Audio quality (default: 🏆 Best):", reply_markup=InlineKeyboardMarkup(rows))
+    nav_push(bot, q.message.chat.id, q.message.message_id, NAV_SETTINGS)
 
 async def _set_audio_quality(bot, u, c):
     """Persist the chosen audio quality and return to Quick Settings."""
@@ -703,9 +708,8 @@ async def _change_subtitle_mode(bot, u, c):
             desc = ' (no subs)'
         rows.append([InlineKeyboardButton(f"{marker} {label}{desc}", callback_data=f'setsm_{opt}')])
     rows.append([InlineKeyboardButton("🔙 Back", callback_data='b')])
-    new_msg = await q.message.reply_text("📝 Subtitle mode (default: 🔗 Embed MKV):", reply_markup=InlineKeyboardMarkup(rows))
-    nav_push(bot, new_msg.chat.id, new_msg.message_id, NAV_SETTINGS)
-    await q.message.delete()
+    await q.message.edit_text("📝 Subtitle mode (default: 🔗 Embed MKV):", reply_markup=InlineKeyboardMarkup(rows))
+    nav_push(bot, q.message.chat.id, q.message.message_id, NAV_SETTINGS)
 
 async def _set_subtitle_mode(bot, u, c):
     """Persist the chosen subtitle mode and return to Quick Settings."""
@@ -742,11 +746,10 @@ async def _change_auto_format(bot, u, c):
             f"{marker} {AUTO_FORMAT_LABELS.get(opt, opt)}{desc}",
             callback_data=f'setaf_{opt}')])
     rows.append([InlineKeyboardButton("🔙 Back", callback_data='b')])
-    new_msg = await q.message.reply_text(
+    await q.message.edit_text(
         "⚡ Default format when you send a YouTube link (private chat only):",
         reply_markup=InlineKeyboardMarkup(rows))
-    nav_push(bot, new_msg.chat.id, new_msg.message_id, NAV_SETTINGS)
-    await q.message.delete()
+    nav_push(bot, q.message.chat.id, q.message.message_id, NAV_SETTINGS)
 
 
 async def _set_auto_format(bot, u, c):
@@ -780,11 +783,10 @@ async def _change_video_container(bot, u, c):
             f"{marker} {VIDEO_CONTAINER_LABELS.get(opt, opt)}{desc}",
             callback_data=f'setcn_{opt}')])
     rows.append([InlineKeyboardButton("🔙 Back", callback_data='b')])
-    new_msg = await q.message.reply_text(
+    await q.message.edit_text(
         "🎞️ Default video output container:",
         reply_markup=InlineKeyboardMarkup(rows))
-    nav_push(bot, new_msg.chat.id, new_msg.message_id, NAV_SETTINGS)
-    await q.message.delete()
+    nav_push(bot, q.message.chat.id, q.message.message_id, NAV_SETTINGS)
 
 
 async def _set_video_container(bot, u, c):
@@ -820,8 +822,7 @@ async def _select(bot, u, c):
     prune_missing(bot, uid)
     videos = bot.videos.get(uid, [])
     if not videos or idx >= len(videos):
-        await show_recent(bot, u, c)
-        await q.message.delete()
+        await show_recent(bot, u, c, edit_message=q.message)
         return
     nav_push(bot, q.message.chat.id, q.message.message_id, NAV_RECENT)
     from app.handlers.formats import show_delivery

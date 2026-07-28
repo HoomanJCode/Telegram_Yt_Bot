@@ -8,6 +8,7 @@
 
 - [Entry Points](#entry-points)
 - [The Main Menu](#the-main-menu)
+- [Quick Settings Screen](#quick-settings-screen)
 - [Complete Settings Tree](#complete-settings-tree)
 - [Download Flow](#download-flow)
 - [Delivery Options](#delivery-options)
@@ -30,7 +31,7 @@ There are **5 ways** a user can begin interacting with the bot:
 | **/start** | User sends `/start` in private chat | Welcome message + main menu. If called with `dl_<token>`, handles a deep link from inline mode. |
 | **Paste URL** | User sends any YouTube link | Extract URL → auto-download or show format picker (see [Download Flow](#download-flow)) |
 | **/help** | User sends `/help` | Quick command reference + main menu |
-| **/settings** | User sends `/settings` | Text summary of all current settings + main menu |
+| **/settings** | User sends `/settings` | Open Quick Settings screen |
 | **@botname** | User types `@botname <url>` in ANY chat | Inline query results (see [Inline Mode](#inline-mode)) |
 
 ```mermaid
@@ -65,51 +66,33 @@ flowchart TB
 
 ## The Main Menu
 
-The **main inline keyboard** is shown after `/start`, `/help`, `/settings`, or when pressing the **🔙 Back** button until reaching the root. It is the central hub for all navigation.
+The **main inline keyboard** is shown after `/start`, `/help`, `/cancel`, or when pressing the **🔙 Back** button until reaching the root. It is the central hub for all navigation. Settings are now grouped behind **⚙️ Quick Settings**.
 
 ```mermaid
 flowchart TB
     subgraph MENU["Main Menu — menu(bot, uid)"]
         direction TB
-        R1["Row 1: 📹 Recent Downloads<br/><i>callback: r</i>"]
-        R2["Row 2: 🍪 Upload Cookies<br/><i>callback: c</i>"]
-        R3["Row 3: 🎬 Video: {Best/2160P/1080P/...}<br/><i>vq</i> | 🎵 Audio: {Best/320k/...}<br/><i>aq</i> | 📝 Subs: {MKV/SRT/Off}<br/><i>sm</i>"]
-        R4["Row 4: 🌐 Language: {EN/FA/...}<br/><i>lang</i> | 📤 Delivery: {Ask/TG/Link}<br/><i>delivery</i> | 🍪 {✅/❌}<br/><i>cs</i>"]
-        R5["Row 5: ⚡ Auto: {Ask/Video/Audio/Thumb}<br/><i>af</i> | 🎞️ Container: {MKV/MP4}<br/><i>cn</i>"]
-        R6["Row 6: 📦 {count} files<br/><i>vc</i>"]
+        R1["Row 1: 📹 My Downloads ({count})<br/><i>callback: r</i>"]
+        R2["Row 2: 🍪 {✅ Active / Upload Cookies}<br/><i>callback: cs when active, c when inactive</i>"]
+        R3["Row 3: ⚙️ Quick Settings<br/><i>callback: cfg</i>"]
+        R4["Row 4: ❓ Help / Commands<br/><i>callback: h</i>"]
     end
 
-    R1 --- R2 --- R3 --- R4 --- R5 --- R6
+    R1 --- R2 --- R3 --- R4
 ```
 
-> **Note about 🍪 Upload Cookies**: The `c` callback is **not** dispatched by `router()`. It is intercepted by PTB's `ConversationHandler` registration in `app/__init__.py` before reaching the router. All other callbacks go through the router.
+> **Note about  Cookies**: The `c` callback is **not** dispatched by `router()`. It is intercepted by PTB's `ConversationHandler` registration in `app/__init__.py` before reaching the router. When cookies are already active, the button uses `cs` and shows a status toast instead.
 
 ### Button Reference
 
 | Button | Callback | Action |
 |--------|----------|--------|
-| 📹 **Recent Downloads** | `r` | Opens paginated recent downloads list |
-| 🍪 **Upload Cookies** | `c` | Starts `/cookies` conversation handler (intercepted by ConversationHandler, not router) |
-| 🎬 **Video: {q}** | `vq` | Opens video quality picker |
-| 🎵 **Audio: {q}** | `aq` | Opens audio quality picker |
-| 📝 **Subs: {mode}** | `sm` | Opens subtitle mode picker |
-| 🌐 **Language: {lang}** | `lang` | Opens subtitle language picker |
-| 📤 **Delivery: {mode}** | `delivery` | Opens default delivery method picker |
-| 🍪 **{✅/❌}** | `cs` | Shows cookie status (✅ active / ❌ upload needed) |
-| ⚡ **Auto: {format}** | `af` | Opens auto-format default picker |
-| 🎞️ **Container: {c}** | `cn` | Opens video container picker (Auto/MKV vs MP4) |
-| 📦 **{count} files** | `vc` | Shows file count message |
+| 📹 **My Downloads (N)** | `r` | Opens paginated recent downloads list |
+| 🍪 **{✅ Active / Upload Cookies}** | `c` when inactive, `cs` when active | Starts `/cookies` conversation (via ConversationHandler) or shows cookie status toast |
+| ⚙️ **Quick Settings** | `cfg` | Opens the consolidated Quick Settings screen |
+| ❓ **Help / Commands** | `h` | Shows a quick help text + main menu |
 
-### Dynamic Labels
-
-Several button labels change based on current settings:
-
-- **Video quality**: Shows `Best`, `4K`, `1080p`, `720p`, `480p`, `360p`, or `~` (worst)
-- **Audio quality**: Shows `Best`, `320k`, `256k`, `192k`, `128k`, `96k`, or `~` (worst)
-- **Subs**: Shows `MKV` (embed), `SRT` (separate), or `Off`. **When MP4 + embed is set**, the effective mode cascades to **SRT** and the label reflects this!
-- **Container**: Shows `MKV` (auto) or `MP4` (forced)
-- **Cookie**: ✅ green check if cookies are loaded in RAM; ❌ red X otherwise
-- **Language**: Shows the 2-letter code in uppercase (EN, FA, AR, RU, ES)
+> **Tip**: Tap **⚙️ Quick Settings** to see and change video quality, audio quality, subtitles, language, delivery method, auto-format, and container in one place.
 
 ### Router Dispatch
 
@@ -121,7 +104,10 @@ flowchart TD
 
     ROUTER --> B{"data == 'b'?"}
     ROUTER --> R{"data == 'r'?"}
-    ROUTER --> NAV{"data in<br/>nav/settings?"}
+    ROUTER --> CFG{"data == 'cfg'?"}
+    ROUTER --> H{"data == 'h'?"}
+    ROUTER --> CS{"data == 'cs'?"}
+    ROUTER --> NAV{"data in<br/>settings pickers?"}
     ROUTER --> SET{"data starts with<br/>'set...'?"}
     ROUTER --> FMT{"data starts with<br/>'fmt_'?"}
     ROUTER --> DEL{"data in<br/>{tg_send, lk_send,<br/>backfmt, morefmt_*}?"}
@@ -130,8 +116,11 @@ flowchart TD
 
     B -->|"Yes"| BACK["handle_back()<br/>Pop per-message nav stack"]
     R -->|"Yes"| REC["show_recent()<br/>Push NAV_MAIN → show list"]
-    NAV -->|"Yes<br/>lang, delivery, vq, aq,<br/>sm, af, cn, cs, vc"| PICKERS["Open setting picker<br/>or show status"]
-    SET -->|"Yes<br/>setlang_*, setdelivery_*,<br/>setvq_*, setaq_*, setsm_*,<br/>setaf_*, setcn_*"| PERSIST["Persist setting<br/>+ show menu"]
+    CFG -->|"Yes"| SHOW_CFG["show_settings_summary()<br/>Open Quick Settings"]
+    H -->|"Yes"| HELP_MSG["Inline help text<br/>+ main menu"]
+    CS -->|"Yes"| TOAST["q.answer() toast<br/>Cookie status ✅/❌"]
+    NAV -->|"Yes<br/>vq, aq, sm, lang,<br/>delivery, af, cn"| PICKERS["Open specific<br/>setting picker"]
+    SET -->|"Yes<br/>setlang_*, setdelivery_*,<br/>setvq_*, setaq_*, setsm_*,<br/>setaf_*, setcn_*"| PERSIST["Persist setting<br/>+ return to Quick Settings"]
     FMT -->|"Yes<br/>fmt_video_mkv, fmt_video_mp4,<br/>fmt_audio, fmt_thumb"| CHOOSE["choose_format()<br/>Dedup check → download"]
     DEL -->|"Yes"| DELIVERY["Delivery handlers<br/>send_telegram(), send_link(),<br/>back_to_formats(),<br/>also_get_other_format()"]
     RECENT -->|"Yes"| REC_ACTIONS["_select(), _delete(),<br/>show_recent(page)<br/>_clear_all()"]
@@ -141,6 +130,7 @@ flowchart TD
     style ROUTER fill:#1a1a2e,color:#fff
     style BACK fill:#1565c0,color:#fff
     style REC fill:#1565c0,color:#fff
+    style SHOW_CFG fill:#533483,color:#fff
     style PICKERS fill:#533483,color:#fff
     style PERSIST fill:#2e7d32,color:#fff
     style CHOOSE fill:#e65100,color:#fff
@@ -149,44 +139,101 @@ flowchart TD
 
 ---
 
-## Complete Settings Tree
+## Quick Settings Screen
 
-Every setting follows a **two-step pattern**: a *change* function opens a picker keyboard, and a *set* function persists the choice and returns to the main menu.
+The **Quick Settings** screen is a consolidated view of all user-configurable options. It shows the current value of every setting and provides a single button for each picker. Pressing **🔙 Back** returns to the main menu.
 
 ```mermaid
 flowchart TD
-    MAIN["Main Menu"] --> VQ["🎬 Video Quality<br/><i>_change_video_quality()</i>"]
-    MAIN --> AQ["🎵 Audio Quality<br/><i>_change_audio_quality()</i>"]
-    MAIN --> SM["📝 Subtitle Mode<br/><i>_change_subtitle_mode()</i>"]
-    MAIN --> LANG["🌐 Language<br/><i>_change_language()</i>"]
-    MAIN --> DEL["📤 Delivery<br/><i>_change_delivery()</i>"]
-    MAIN --> AF["⚡ Auto Format<br/><i>_change_auto_format()</i>"]
-    MAIN --> CN["🎞️ Container<br/><i>_change_video_container()</i>"]
+    SUM["️ Quick Settings<br/>show_settings_summary()"]
+
+    SUM --> VQ["🎬 Quality<br/><i>_change_video_quality()</i>"]
+    SUM --> AQ["🎵 Audio<br/><i>_change_audio_quality()</i>"]
+    SUM --> SM["📝 Subtitles<br/><i>_change_subtitle_mode()</i>"]
+    SUM --> CN["🎞️ Container<br/><i>_change_video_container()</i>"]
+    SUM --> DEL["📤 Delivery<br/><i>_change_delivery()</i>"]
+    SUM --> AF["⚡ Auto-format<br/><i>_change_auto_format()</i>"]
+    SUM --> LANG["🌐 Language<br/><i>_change_language()</i>"]
+    SUM --> BACK["🔙 Back<br/><i>handle_back() → main menu</i>"]
+```
+
+### Summary Message
+
+The summary message displays the **effective** values, including the MP4+embed cascade warning:
+
+```
+⚙️ Quick Settings
+
+🎬 Video: 🏆 Best
+🎵 Audio: 🏆 Best
+📝 Subs: 🔗 Embed (MKV)
+🎞️ Container: 🔀 Auto
+📤 Delivery: ❓ Ask each time
+⚡ Auto-format: ❓ Ask
+🌐 Language: English
+
+[🎬 Quality] [🎵 Audio]
+[📝 Subtitles] [️ Container]
+[📤 Delivery] [⚡ Auto-format]
+[🌐 Language]
+[🔙 Back]
+```
+
+### Dynamic Labels
+
+The summary reflects current settings and effective values:
+
+- **Video quality**: 🏆 Best, 📺 4K, 📺 1440p, 📺 1080p, 📺 720p, 📺 480p, 📺 360p, or ⬇️ Worst
+- **Audio quality**: 🏆 Best,  320k, 🎵 256k, 🎵 192k, 🎵 128k, 🎵 96k, or ⬇️ Worst
+- **Subs**: 🔗 Embed (MKV), 📎 Separate file, or 🚫 Off. **When MP4 + embed is set**, the effective mode cascades to **📎 Separate file** and the label reflects this!
+- **Container**: 🔀 Auto or 🎬 MP4
+- **Delivery**: ❓ Ask each time, 📤 Telegram, or 🔗 Link
+- **Auto-format**: ❓ Ask, 🎬 Auto Video, 🎵 Auto Audio, or 🖼️ Auto Thumb
+- **Language**: English, فارسی, العربية, Русский, or Español
+
+---
+
+## Complete Settings Tree
+
+Every setting follows a **two-step pattern**: a *change* function opens a picker keyboard, and a *set* function persists the choice and returns to the **Quick Settings** screen.
+
+```mermaid
+flowchart TD
+    MAIN["Main Menu"] --> CFG["⚙️ Quick Settings<br/><i>show_settings_summary()</i>"]
+
+    CFG --> VQ["🎬 Video Quality<br/><i>_change_video_quality()</i>"]
+    CFG --> AQ["🎵 Audio Quality<br/><i>_change_audio_quality()</i>"]
+    CFG --> SM["📝 Subtitle Mode<br/><i>_change_subtitle_mode()</i>"]
+    CFG --> LANG["🌐 Language<br/><i>_change_language()</i>"]
+    CFG --> DEL["📤 Delivery<br/><i>_change_delivery()</i>"]
+    CFG --> AF["⚡ Auto Format<br/><i>_change_auto_format()</i>"]
+    CFG --> CN["🎞️ Container<br/><i>_change_video_container()</i>"]
 
     VQ --> VQ_PICK["Picker: 🏆 Best, 📺 4K,<br/>📺 1440p, 📺 1080p,<br/>📺 720p, 📺 480p, 📺 360p,<br/>⬇️ Worst"]
-    VQ_PICK -->|"setvq_{opt}"| VQ_SET["_set_video_quality()<br/>✅ Show confirmation + menu"]
+    VQ_PICK -->|"setvq_{opt}"| VQ_SET["_set_video_quality()<br/>✅ Show confirmation + Quick Settings"]
 
-    AQ --> AQ_PICK["Picker: 🏆 Best, 🎵 320k,<br/>🎵 256k, 🎵 192k,<br/>🎵 128k, 🎵 96k,<br/>⬇️ Worst"]
-    AQ_PICK -->|"setaq_{opt}"| AQ_SET["_set_audio_quality()<br/>✅ Show confirmation + menu"]
+    AQ --> AQ_PICK["Picker: 🏆 Best, 🎵 320k,<br/> 256k, 🎵 192k,<br/>🎵 128k, 🎵 96k,<br/>⬇️ Worst"]
+    AQ_PICK -->|"setaq_{opt}"| AQ_SET["_set_audio_quality()<br/>✅ Show confirmation + Quick Settings"]
 
     SM --> SM_PICK["Picker: 🔗 Embed (MKV),<br/>📎 Separate file (.srt),<br/>🚫 Off"]
-    SM_PICK -->|"setsm_{opt}"| SM_SET["_set_subtitle_mode()<br/>✅ Show confirmation + menu"]
+    SM_PICK -->|"setsm_{opt}"| SM_SET["_set_subtitle_mode()<br/>✅ Show confirmation + Quick Settings"]
 
     LANG --> LANG_PICK["Picker: ✅/⬜ English,<br/>✅/⬜ فارسی, ✅/⬜ العربية,<br/>✅/⬜ Русский, ✅/⬜ Español"]
-    LANG_PICK -->|"setlang_{code}"| LANG_SET["_set_language()<br/>✅ Show confirmation + menu"]
+    LANG_PICK -->|"setlang_{code}"| LANG_SET["_set_language()<br/>✅ Show confirmation + Quick Settings"]
 
     DEL --> DEL_PICK["Picker: ❓ Ask every time,<br/>📤 Send via Telegram,<br/>📋 Get Download Link"]
-    DEL_PICK -->|"setdelivery_{method}"| DEL_SET["_set_delivery()<br/>✅ Show confirmation + menu"]
+    DEL_PICK -->|"setdelivery_{method}"| DEL_SET["_set_delivery()<br/>✅ Show confirmation + Quick Settings"]
 
     AF --> AF_PICK["Picker: ❓ Ask (show keyboard),<br/>🎬 Auto Video, 🎵 Auto Audio,<br/>🖼️ Auto Thumb"]
-    AF_PICK -->|"setaf_{fmt}"| AF_SET["_set_auto_format()<br/>✅ Show confirmation + menu"]
+    AF_PICK -->|"setaf_{fmt}"| AF_SET["_set_auto_format()<br/>✅ Show confirmation + Quick Settings"]
 
     CN --> CN_PICK["Picker: 🔀 Auto (best codec),<br/>🎬 MP4 (universal compat)"]
-    CN_PICK -->|"setcn_{opt}"| CN_SET["_set_video_container()<br/>✅ Show confirmation + menu<br/>⚠️ Warn if MP4+embed cascade"]
+    CN_PICK -->|"setcn_{opt}"| CN_SET["_set_video_container()<br/> Show confirmation + Quick Settings<br/>⚠️ Warn if MP4+embed cascade"]
 
-    VQ_SET & AQ_SET & SM_SET & LANG_SET & DEL_SET & AF_SET & CN_SET --> MAIN
+    VQ_SET & AQ_SET & SM_SET & LANG_SET & DEL_SET & AF_SET & CN_SET --> CFG
 
     style MAIN fill:#1a1a2e,color:#fff,stroke:#16213e
+    style CFG fill:#533483,color:#fff
     style VQ_PICK fill:#1565c0,color:#fff
     style AQ_PICK fill:#1565c0,color:#fff
     style SM_PICK fill:#1565c0,color:#fff
@@ -613,10 +660,11 @@ flowchart TD
 
 | Constant | Meaning | Push Location |
 |----------|---------|--------------|
-| `NAV_MAIN` | Return to welcome screen | Menu button in `/recent`, format picker, delivery screen |
+| `NAV_MAIN` | Return to welcome screen | Menu button in `/recent`, Quick Settings, format picker, delivery screen |
 | `NAV_RECENT` | Return to recent downloads | Delivery screen (`show_delivery`) |
 | `NAV_FORMAT` | Return to format picker | Delivery screen (back to format picker for same video) |
 | `NAV_DELIVERY` | Return to delivery screen | (reserved, not yet used) |
+| `NAV_SETTINGS` | Return to Quick Settings screen | Every settings picker (`_change_*`) |
 
 ### Back Button Resolution
 
@@ -628,7 +676,10 @@ flowchart TD
     PREV -->|"NAV_MAIN (or empty)"| WELCOME["Welcome text + main menu<br/>Delete old msg"]
     PREV -->|"NAV_RECENT"| RECENT["show_recent()<br/>Delete old msg"]
     PREV -->|"NAV_FORMAT"| FORMAT["show_format_choice(url, video_id)<br/>Delete old msg"]
+    PREV -->|"NAV_SETTINGS"| QSETTINGS["show_settings_summary()<br/>Delete old msg"]
     PREV -->|"Other"| WELCOME
+
+    style QSETTINGS fill:#533483,color:#fff
 
     style CLICK fill:#1a1a2e,color:#fff
     style WELCOME fill:#2e7d32,color:#fff
@@ -716,9 +767,10 @@ _check_group(chat_id):
 |----------|---------|-------------|
 | `b` | `handle_back()` | Back: pop per-message nav stack |
 | `r` | `show_recent()` | Recent downloads list |
-| `c` | `ask_cookies()` | Start cookie upload |
-| `vc` | (inline) | Show file count |
-| `cs` | (inline) | Show cookie status |
+| `c` | `ask_cookies()` | Start cookie upload (intercepted by ConversationHandler) |
+| `cs` | `router()` | Show cookie status toast |
+| `cfg` | `show_settings_summary()` | Open the consolidated Quick Settings screen |
+| `h` | `router()` | Show inline help text + main menu |
 | `clear_all` | `_clear_all()` | Delete all user files |
 
 ### Settings — Open Picker
@@ -858,7 +910,7 @@ flowchart TB
     ENTRY -->|"YouTube link"| LINK["on_msg()"]
     ENTRY -->|"@botname url"| INLINE["inline_query()"]
     ENTRY -->|"/help"| HELP["Quick reference + menu"]
-    ENTRY -->|"/settings"| SETTINGS_SUM["Settings summary + menu"]
+    ENTRY -->|"/settings"| SETTINGS_SUM["Open Quick Settings"]
     ENTRY -->|"/recent"| RECENT_PAGE["Paginated recent list"]
     ENTRY -->|"/status"| STATUS_PAGE["Warp proxy health"]
     ENTRY -->|"/cookies"| COOKIE_FLOW["Cookie upload conversation"]
@@ -869,10 +921,10 @@ flowchart TB
     SETTINGS_SUM --> MENU
     STATUS_PAGE("Status text + menu<br/><i>shown together</i>") --> MENU
 
-    MENU --> SETTINGS["Any setting button"]
+    MENU --> SETTINGS["⚙️ Quick Settings"]
     SETTINGS --> PICKER["Picker keyboard"]
     PICKER -->|"set*_{value}"| CONFIRM["✅ Confirmation"]
-    CONFIRM --> MENU
+    CONFIRM --> SETTINGS
 
     LINK --> PRIVATE{Private?}
     PRIVATE -->|"Yes"| AUTO_FORMAT{"Auto-format?"}

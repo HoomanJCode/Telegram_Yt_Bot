@@ -424,6 +424,27 @@ class TestTranscodeAudioToAac(unittest.TestCase):
             'downstream filename-sanitize step does not see an '
             'unexpected suffix.')
 
+    def test_ffmpeg_cmd_copies_subtitle_stream(self):
+        # Embedded subtitle streams (common after _merge_subs_into_mkv)
+        # must be copied unchanged. Re-encoding them can fail or confuse
+        # TV players that expect the original SRT track in MKV.
+        video = self._setup_video()
+        tmp = f'{video}.transcode.tmp.mkv'
+        Path(tmp).write_bytes(b'\0' * 6000)
+        recorded = {}
+        def fake_run(cmd, **kwargs):
+            recorded['cmd'] = cmd
+            return MagicMock(returncode=0)
+        with patch('app.downloader.subprocess.run', side_effect=fake_run):
+            _transcode_audio_to_aac(video)
+        cmd = recorded['cmd']
+        self.assertEqual(
+            cmd[cmd.index('-c:s') + 1], 'copy',
+            '-c:s copy is mandatory when the source has embedded '
+            'subtitles; otherwise ffmpeg may try to re-encode them, '
+            'which can silently fail and leave the audio track in an '
+            'undetectable state on smart TVs.')
+
     def test_ffmpeg_uses_map_zero_for_all_streams(self):
         # `-map 0` selects every input stream so a video with
         # multiple audio tracks / subtitles passes them through
@@ -546,6 +567,24 @@ class TestTranscodeAudioToAac(unittest.TestCase):
         self.assertNotIn('-metadata', recorded['cmd'])
 
     # ---- already-mkv case (no rename collision) ------------------
+
+    def test_webm_input_forces_mkv_output(self):
+        # AAC is not valid in WebM. The helper must remux to MKV and
+        # remove the original .webm so the caller doesn't serve an
+        # invalid container to the user.
+        tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
+        video = Path(tmpdir) / 'source.webm'
+        video.write_bytes(b'\0' * 5000)
+        mkv_tmp = str(video) + '.transcode.tmp.mkv'
+        Path(mkv_tmp).write_bytes(b'\0' * 6000)
+        with patch('app.downloader.subprocess.run') as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            result = _transcode_audio_to_aac(str(video))
+            expected = str(video.with_suffix('.mkv'))
+            self.assertEqual(result, expected)
+            self.assertFalse(video.exists())
+            self.assertTrue(Path(expected).exists())
 
     def test_already_mkv_input_no_unlink_collision(self):
         # Regression: the helper's temp file MUST have a distinct

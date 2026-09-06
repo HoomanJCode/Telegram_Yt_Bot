@@ -62,14 +62,58 @@
 
 ---
 
-## 📋 Prerequisites
+## 🐳 Docker Deployment (Recommended)
 
-### System Requirements
-- Python 3.8+
-- Linux (recommended) / macOS / Windows
-- FFmpeg (optional, for MP3 audio conversion & subtitle embedding)
-- Deno JavaScript runtime (required for yt-dlp YouTube extraction)
-- Telegram Bot Token from [@BotFather](https://t.me/BotFather)
+Using Docker is the easiest way to run the bot on a server — no need to install Python, FFmpeg, or any dependencies manually.
+
+### Quick Start (build locally)
+```bash
+# 1. Clone the repo
+git clone https://github.com/HoomanJCode/Telegram_Yt_Bot.git
+cd Telegram_Yt_Bot
+
+# 2. Create your .env file
+cp .env.example .env
+nano .env   # Edit with your BOT_TOKEN and BASE_DOWNLOAD_LINK
+
+# 3. Build and run
+docker compose up -d
+```
+
+### Quick Start (use pre-built image)
+```bash
+# 1. Pull the latest image
+docker pull ghcr.io/hoomanjcode/telegram_yt_bot:latest
+
+# 2. Create your .env file
+mkdir -p telegram-yt-bot && cd telegram-yt-bot
+cat > .env << EOF
+BOT_TOKEN=your_bot_token_here
+BASE_DOWNLOAD_LINK=http://your-server-ip:8000
+STORAGE_DAYS=2
+EOF
+
+# 3. Run
+docker compose up -d
+```
+
+### Useful Commands
+```bash
+docker compose up -d        # Start in background
+docker compose down         # Stop the bot
+docker compose logs -f      # Watch live logs
+docker compose restart      # Restart the bot
+docker compose pull         # Pull latest pre-built image
+docker compose build        # Rebuild from source (local build)
+```
+
+### What You Need on Your Server
+- [Docker](https://docs.docker.com/engine/install/) installed
+- [Docker Compose](https://docs.docker.com/compose/install/) (usually included with Docker)
+
+---
+
+## 📋 Prerequisites
 
 ### Install FFmpeg (recommended)
 ```bash
@@ -187,44 +231,83 @@ Three ways to serve download links over HTTPS:
 
 ```
 Telegram_Yt_Bot/
-├── bot.py                 # Entry point (calls app.main())
-├── config.py              # Configuration parser (env vars)
-├── serve_files.py         # Standalone HTTP server (alternative)
-├── requirements.txt       # Python dependencies
-├── env.example            # Environment variable template
-├── deploy.sh              # Automated deployment script
-├── README.md              # This file
+├── bot.py                  # Entry point (calls app.main())
+├── config.py               # Configuration parser (env vars)
+├── requirements.txt        # Python dependencies
+├── Dockerfile              # Docker image build
+├── docker-compose.yml      # Docker Compose config
+├── .env.example            # Environment variable template
+├── README.md               # This file
 │
-├── app/                   # Main application package
-│   ├── __init__.py        # Bootstrap: logging, wiring, main()
-│   ├── bot.py             # YouTubeDownloaderBot (central state)
-│   ├── downloader.py      # yt-dlp download functions
-│   ├── fileserver.py      # aiohttp async file server
-│   ├── models.py          # VideoRecord data class
-│   └── utils.py           # Utilities, constants, error classification
+├── .github/workflows/
+│   ├── ci.yml              # Tests (on push/PR)
+│   └── release.yml         # Build image + Release + Deploy (on tag)
 │
-├── app/handlers/          # Telegram update handlers
-│   ├── commands.py        # Slash commands (/start, /help, etc.)
-│   ├── cookies.py         # Cookie upload conversation
-│   ├── formats.py         # Format choice & delivery keyboards
-│   ├── inline.py          # Inline query mode (@botname)
-│   ├── messages.py        # Plain-text YouTube link processing
-│   ├── navigation.py      # Menu system & settings UI
-│   └── tokens.py          # Deep-link tokens & file delivery
+├── app/                    # Main application package
+│   ├── __init__.py         # Bootstrap: logging, wiring, main()
+│   ├── bot.py              # YouTubeDownloaderBot (central state)
+│   ├── downloader.py       # yt-dlp download functions
+│   ├── fileserver.py       # aiohttp async file server
+│   ├── models.py           # VideoRecord data class
+│   └── utils.py            # Utilities, constants, error classification
 │
-├── docs/                  # Documentation
-│   ├── ARCHITECTURE.md    # Codebase architecture
-│   ├── CONFIGURATION.md   # Environment variables
-│   ├── DEPLOYMENT.md      # Deployment guide
-│   ├── DEVELOPMENT.md     # Developer setup & conventions
-│   ├── SSL_CLOUDFLARE.md  # HTTPS with Cloudflare
-│   ├── USAGE.md           # User guide
-│   └── USER_FLOWS.md      # Complete user interaction map
+├── app/handlers/           # Telegram update handlers
+│   ├── commands.py         # Slash commands (/start, /help, etc.)
+│   ├── cookies.py          # Cookie upload conversation
+│   ├── formats.py          # Format choice & delivery keyboards
+│   ├── inline.py           # Inline query mode (@botname)
+│   ├── messages.py         # Plain-text YouTube link processing
+│   ├── navigation.py       # Menu system & settings UI
+│   └── tokens.py           # Deep-link tokens & file delivery
 │
-├── tests/                 # Unit tests
-├── data/                  # Persistent state (JSON)
-└── downloads/             # Downloaded media files
+├── docs/                   # Documentation
+├── tests/                  # Unit tests
+├── data/                   # Persistent state (gitignored)
+└── downloads/              # Downloaded media files (gitignored)
 ```
+
+---
+
+## 🔄 CI/CD Pipeline
+
+### Tests (on every push/PR)
+- Python unit tests via `unittest`
+
+### Release (on tag push `v*`)
+1. **Run tests** — ensures code is working
+2. **Build Docker image** → pushed to [GitHub Container Registry](https://github.com/HoomanJCode/Telegram_Yt_Bot/pkgs/container/telegram_yt_bot) (public)
+3. **GitHub Release** → created with changelog and pull commands
+4. **Deploy to VPS** → auto-deploys via Docker (if secrets configured)
+
+### How to release
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+The pipeline will test, build, release, and deploy automatically.
+
+### VPS Secrets (optional)
+
+**Step 1: Generate SSH key on your VPS**
+```bash
+ssh-keygen -t ed25519 -C "github-deploy" -f ~/.ssh/github_deploy_key -N ""
+cat ~/.ssh/github_deploy_key.pub >> ~/.ssh/authorized_keys
+chmod 600 ~/.ssh/authorized_keys
+```
+
+**Step 2: Add secrets in GitHub**
+Go to **Settings → Secrets and variables → Actions** and add:
+
+| Secret | Value |
+|--------|-------|
+| `VPS_HOST` | Your server IP |
+| `VPS_SSH_PRIVATE_KEY` | Output of `cat ~/.ssh/github_deploy_key` (the **private** key) |
+| `BOT_TOKEN` | Telegram bot token |
+| `BASE_DOWNLOAD_LINK` | Public URL for download links |
+| `WHITELIST_USERS` | Comma-separated user IDs (optional) |
+| `ADMIN_USERS` | Comma-separated admin IDs (optional) |
+
+> ⚠️ The `VPS_SSH_PRIVATE_KEY` must be the **private** key, not the public key. Include the full `-----BEGIN...` and `-----END...` lines.
 
 ---
 

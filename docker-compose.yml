@@ -1,0 +1,15 @@
+version: "3.8"
+
+services:
+  bot:
+    build: .
+    container_name: youtube-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./downloads:/app/downloads
+      - ./ssl:/app/ssl

@@ -445,7 +445,7 @@ def _is_already_universal_codec(video_file):
 
 def _transcode_audio_to_aac(video_file, title=None):
     """Re-encode a video file's audio stream to AAC (192kbps), leaving the
-    video stream alone.
+    video stream (and any subtitle streams) alone.
 
     Triggered when `Config.AAC_TRANSCODE` is True -- we explicitly
     hand-fan Opus audio through ffmpeg because yt-dlp's merge
@@ -466,26 +466,33 @@ def _transcode_audio_to_aac(video_file, title=None):
       2. `-c:v copy` so the AVC stream goes through with zero decode/re-
          encode CPU cost. The 30-90s total transcode cost is dominated by
          the AAC re-encode.
-      3. `-c:a aac -b:a 192k` with the native ffmpeg `aac` encoder. We
+      3. `-c:s copy` passes embedded subtitle streams through unchanged.
+         Without this, ffmpeg would attempt to re-encode subtitle streams
+         when `-map 0` selects them, which can fail or produce an output TV
+         players cannot decode.
+      4. `-c:a aac -b:a 192k` with the native ffmpeg `aac` encoder. We
          deliberately do NOT pin to `libfdk_aac` -- the native encoder is
          ubiquitous on every Linux VPS ffmpeg build, while libfdk lives
          behind a license flag and isn't installed everywhere. 192kbps is
          the sweet spot for stereo near-transparency; below 128kbps the
          codec artifacts become audible against a typical YouTube Opus
          128k source.
-      4. `-map 0` selects every input stream, so a video with no audio
+      5. `-map 0` selects every input stream, so a video with no audio
          at all produces an output with no audio stream (no crash, no
          fake-silent-track). The native `aac` encoder is a safe no-op on
          an empty audio muxer.
-      5. `-metadata title=...` mirrors `_merge_subs_into_mkv`'s title
+      6. `-metadata title=...` mirrors `_merge_subs_into_mkv`'s title
          passthrough so the resulting file keeps the YouTube title in
          VLC / mpv / Plex. Control characters / newlines are stripped to
          keep a malicious title from smuggling an ffmpeg flag into the
          argv list.
-      6. Output extension matches the input's extension so the downstream
+      7. WebM input is remuxed to MKV because AAC is not valid in the
+         WebM container; the output path changes to `.mkv` and the old
+         `.webm` source is removed after the successful transcode.
+      8. Output extension matches the input's extension so the downstream
          filename-sanitize step in download() doesn't need to know we
-         touched the file.
-      7. Atomic os.replace on success; temp file unlinked on failure.
+         touched the file, EXCEPT for the WebM->MKV exception above.
+      9. Atomic os.replace on success; temp file unlinked on failure.
          Mid-flight ffmpeg crash leaves the original video intact
          (caller falls through to delivering the untranscoded file -- a
          degraded-but-functional outcome, not a 500 to the user).
@@ -498,14 +505,20 @@ def _transcode_audio_to_aac(video_file, title=None):
     if not video_file or not Path(video_file).exists():
         return None
     src_ext = Path(video_file).suffix.lower() or '.mkv'
-    out_path = video_file
-    tmp_file = f"{video_file}.transcode.tmp{src_ext}"
+    # AAC cannot be muxed into WebM. If the source is a .webm, force the
+    # output container to MKV so the re-encoded audio is valid. The
+    # caller's subsequent sanitize-rename step will carry the new .mkv
+    # extension.
+    out_ext = src_ext if src_ext != '.webm' else '.mkv'
+    out_path = video_file if src_ext == out_ext else str(Path(video_file).with_suffix(out_ext))
+    tmp_file = f"{video_file}.transcode.tmp{out_ext}"
 
     cmd = [
         'ffmpeg', '-y', '-loglevel', 'error',
         '-i', video_file,
         '-map', '0',
         '-c:v', 'copy',
+        '-c:s', 'copy',
         '-c:a', 'aac', '-b:a', '192k',
     ]
     if title:
@@ -523,9 +536,23 @@ def _transcode_audio_to_aac(video_file, title=None):
                 and Path(tmp_file).exists()
                 and Path(tmp_file).stat().st_size > 0):
             os.replace(tmp_file, out_path)
+            # If we changed container (e.g. .webm -> .mkv), the original
+            # source file with the old extension is now leftover; remove
+            # it to avoid duplicate files in downloads/.
+            if out_path != video_file and Path(video_file).exists():
+                try:
+                    os.unlink(video_file)
+                except OSError:
+                    pass
             return out_path
-    except Exception:
-        pass
+        # ffmpeg failed or produced empty output; log stderr for diagnosis.
+        logger.error(
+            'Audio transcode to AAC failed for %s (returncode=%s, stderr=%s)',
+            video_file, result.returncode, (result.stderr or '')[:500])
+    except Exception as exc:
+        logger.error(
+            'Audio transcode to AAC raised for %s: %s',
+            video_file, exc, exc_info=True)
     # Cleanup temp on any failure so the downloads dir doesn't accumulate
     # half-written transcode attempts.
     if Path(tmp_file).exists():

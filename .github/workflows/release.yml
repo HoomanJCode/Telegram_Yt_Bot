@@ -179,12 +179,29 @@ jobs:
           IMAGE="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower]'):${TAG}"
           CONTAINER="youtube-bot"
 
+          # Create .env file locally, then copy to VPS
+          cat > /tmp/.env << EOF
+          BOT_TOKEN=${BOT_TOKEN}
+          BASE_DOWNLOAD_LINK=${BASE_DOWNLOAD_LINK}
+          WHITELIST_USERS=${WHITELIST_USERS}
+          ADMIN_USERS=${ADMIN_USERS}
+          STORAGE_DAYS=${STORAGE_DAYS}
+          COOKIE_TTL_HOURS=${COOKIE_TTL_HOURS}
+          MAX_TELEGRAM_FILE_SIZE=${MAX_TELEGRAM_SIZE_MB}
+          USE_WARP=${USE_WARP}
+          MIN_DISK_FREE_MB=${MIN_DISK_FREE_MB}
+          AAC_TRANSCODE=${AAC_TRANSCODE}
+          MAX_COMMENTS=${MAX_COMMENTS}
+          LOG_LEVEL=${LOG_LEVEL}
+          EOF
+
+          # Create deploy script
           cat > /tmp/deploy.sh << SCRIPTEOF
           #!/bin/bash
           set -e
 
           echo "========================================"
-          echo "  Deploying \${IMAGE}"
+          echo "  Deploying ${IMAGE}"
           echo "========================================"
 
           # Install Docker if not present
@@ -194,37 +211,20 @@ jobs:
           fi
 
           # Create project directory
-          mkdir -p \${DEPLOY_DIR}/{data,downloads,ssl}
-
-          # Create .env file
-          cat > \${DEPLOY_DIR}/.env << EOF
-          BOT_TOKEN=\${BOT_TOKEN}
-          BASE_DOWNLOAD_LINK=\${BASE_DOWNLOAD_LINK}
-          WHITELIST_USERS=\${WHITELIST_USERS}
-          ADMIN_USERS=\${ADMIN_USERS}
-          STORAGE_DAYS=\${STORAGE_DAYS}
-          COOKIE_TTL_HOURS=\${COOKIE_TTL_HOURS}
-          MAX_TELEGRAM_FILE_SIZE=\${MAX_TELEGRAM_SIZE_MB}
-          USE_WARP=\${USE_WARP}
-          MIN_DISK_FREE_MB=\${MIN_DISK_FREE_MB}
-          AAC_TRANSCODE=\${AAC_TRANSCODE}
-          MAX_COMMENTS=\${MAX_COMMENTS}
-          LOG_LEVEL=\${LOG_LEVEL}
-          EOF
-          chmod 600 \${DEPLOY_DIR}/.env
+          mkdir -p ${DEPLOY_DIR}/{data,downloads,ssl}
 
           # Validate token
-          if grep -q "^BOT_TOKEN=$" \${DEPLOY_DIR}/.env 2>/dev/null; then
+          if grep -q "^BOT_TOKEN=$" /tmp/.env 2>/dev/null; then
             echo "❌ ERROR: BOT_TOKEN is empty!"
             exit 1
           fi
 
           # Create docker-compose.yml
-          cat > \${DEPLOY_DIR}/docker-compose.yml << EOF
+          cat > ${DEPLOY_DIR}/docker-compose.yml << EOF
           services:
             bot:
-              image: \${IMAGE}
-              container_name: \${CONTAINER}
+              image: ${IMAGE}
+              container_name: ${CONTAINER}
               restart: unless-stopped
               env_file:
                 - .env
@@ -236,8 +236,12 @@ jobs:
                 - ./ssl:/app/ssl
           EOF
 
+          # Copy .env to deploy dir
+          cp /tmp/.env ${DEPLOY_DIR}/.env
+          chmod 600 ${DEPLOY_DIR}/.env
+
           # Pull and restart
-          cd \${DEPLOY_DIR}
+          cd ${DEPLOY_DIR}
           docker compose pull
           docker compose up -d --remove-orphans
 
@@ -246,18 +250,19 @@ jobs:
 
           # Verify
           sleep 10
-          if docker inspect --format='{{.State.Status}}' \${CONTAINER} 2>/dev/null | grep -q "running"; then
+          if docker inspect --format='{{.State.Status}}' ${CONTAINER} 2>/dev/null | grep -q "running"; then
             echo "✅ Container is running!"
-            docker inspect --format='{{.State.Status}}' \${CONTAINER}
-            docker logs --tail=10 \${CONTAINER}
+            docker inspect --format='{{.State.Status}}' ${CONTAINER}
+            docker logs --tail=10 ${CONTAINER}
           else
             echo "❌ Container failed to start!"
-            docker logs --tail=30 \${CONTAINER}
+            docker logs --tail=30 ${CONTAINER}
             exit 1
           fi
 
           echo "✅ Deployment Complete!"
           SCRIPTEOF
 
+          scp -P 22 /tmp/.env root@${VPS_HOST}:/tmp/.env
           scp -P 22 /tmp/deploy.sh root@${VPS_HOST}:/tmp/deploy.sh
           ssh -p 22 root@${VPS_HOST} "bash /tmp/deploy.sh"

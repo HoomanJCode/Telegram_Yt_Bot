@@ -204,25 +204,25 @@ jobs:
           scp -P 22 /tmp/.env root@${VPS_HOST}:${DEPLOY_DIR}/.env
           ssh -p 22 root@${VPS_HOST} "chmod 600 ${DEPLOY_DIR}/.env"
 
-          # Write docker-compose.yml on VPS
-          ssh -p 22 root@${VPS_HOST} "cat > ${DEPLOY_DIR}/docker-compose.yml << 'COMPEOF'
+          # Create docker-compose.yml locally
+          cat > /tmp/docker-compose.yml << EOF
 services:
   bot:
-    image: IMAGE_PLACEHOLDER
-    container_name: CONTAINER_PLACEHOLDER
+    image: ${IMAGE}
+    container_name: ${CONTAINER}
     restart: unless-stopped
     env_file:
       - .env
     ports:
-      - \"8000:8000\"
+      - "8000:8000"
     volumes:
       - ./data:/app/data
       - ./downloads:/app/downloads
       - ./ssl:/app/ssl
-COMPEOF"
+EOF
 
-          # Replace placeholders on VPS
-          ssh -p 22 root@${VPS_HOST} "sed -i 's|IMAGE_PLACEHOLDER|${IMAGE}|g; s|CONTAINER_PLACEHOLDER|${CONTAINER}|g' ${DEPLOY_DIR}/docker-compose.yml"
+          # Copy docker-compose.yml to VPS
+          scp -P 22 /tmp/docker-compose.yml root@${VPS_HOST}:${DEPLOY_DIR}/docker-compose.yml
 
           # Validate token on VPS
           ssh -p 22 root@${VPS_HOST} "grep -q '^BOT_TOKEN=$' ${DEPLOY_DIR}/.env && (echo '❌ ERROR: BOT_TOKEN is empty!' && exit 1) || echo '✅ BOT_TOKEN is set'"

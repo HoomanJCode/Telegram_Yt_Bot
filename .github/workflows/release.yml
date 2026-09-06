@@ -194,21 +194,19 @@ jobs:
           printf 'LOG_LEVEL=%s\n' "$LOG_LEVEL" >> /tmp/.env
 
           # Create docker-compose.yml locally
-          cat > /tmp/docker-compose.yml << COMPEOF
-          services:
-            bot:
-              image: ${IMAGE}
-              container_name: ${CONTAINER}
-              restart: unless-stopped
-              env_file:
-                - .env
-              ports:
-                - "8000:8000"
-              volumes:
-                - ./data:/app/data
-                - ./downloads:/app/downloads
-                - ./ssl:/app/ssl
-          COMPEOF
+          printf 'services:\n' > /tmp/docker-compose.yml
+          printf '  bot:\n' >> /tmp/docker-compose.yml
+          printf '    image: %s\n' "$IMAGE" >> /tmp/docker-compose.yml
+          printf '    container_name: %s\n' "$CONTAINER" >> /tmp/docker-compose.yml
+          printf '    restart: unless-stopped\n' >> /tmp/docker-compose.yml
+          printf '    env_file:\n' >> /tmp/docker-compose.yml
+          printf '      - .env\n' >> /tmp/docker-compose.yml
+          printf '    ports:\n' >> /tmp/docker-compose.yml
+          printf '      - "8000:8000"\n' >> /tmp/docker-compose.yml
+          printf '    volumes:\n' >> /tmp/docker-compose.yml
+          printf '      - ./data:/app/data\n' >> /tmp/docker-compose.yml
+          printf '      - ./downloads:/app/downloads\n' >> /tmp/docker-compose.yml
+          printf '      - ./ssl:/app/ssl\n' >> /tmp/docker-compose.yml
 
           # Install Docker if not present
           ssh -p 22 root@${VPS_HOST} "command -v docker || (curl -fsSL https://get.docker.com | sh)"

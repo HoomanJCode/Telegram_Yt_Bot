@@ -179,52 +179,26 @@ jobs:
           IMAGE="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower]'):${TAG}"
           CONTAINER="youtube-bot"
 
-          cat > /tmp/deploy.sh << SCRIPTEOF
-          #!/bin/bash
-          set -e
+          # Create .env locally (secrets available here)
+          printf 'BOT_TOKEN=%s\n' "$BOT_TOKEN" > /tmp/.env
+          printf 'BASE_DOWNLOAD_LINK=%s\n' "$BASE_DOWNLOAD_LINK" >> /tmp/.env
+          printf 'WHITELIST_USERS=%s\n' "$WHITELIST_USERS" >> /tmp/.env
+          printf 'ADMIN_USERS=%s\n' "$ADMIN_USERS" >> /tmp/.env
+          printf 'STORAGE_DAYS=%s\n' "$STORAGE_DAYS" >> /tmp/.env
+          printf 'COOKIE_TTL_HOURS=%s\n' "$COOKIE_TTL_HOURS" >> /tmp/.env
+          printf 'MAX_TELEGRAM_FILE_SIZE=%s\n' "$MAX_TELEGRAM_SIZE_MB" >> /tmp/.env
+          printf 'USE_WARP=%s\n' "$USE_WARP" >> /tmp/.env
+          printf 'MIN_DISK_FREE_MB=%s\n' "$MIN_DISK_FREE_MB" >> /tmp/.env
+          printf 'AAC_TRANSCODE=%s\n' "$AAC_TRANSCODE" >> /tmp/.env
+          printf 'MAX_COMMENTS=%s\n' "$MAX_COMMENTS" >> /tmp/.env
+          printf 'LOG_LEVEL=%s\n' "$LOG_LEVEL" >> /tmp/.env
 
-          echo "========================================"
-          echo "  Deploying \${IMAGE}"
-          echo "========================================"
-
-          # Install Docker if not present
-          if ! command -v docker &> /dev/null; then
-            echo "📦 Installing Docker..."
-            curl -fsSL https://get.docker.com | sh
-          fi
-
-          # Create project directory
-          mkdir -p \${DEPLOY_DIR}/{data,downloads,ssl}
-
-          # Create .env file
-          cat > \${DEPLOY_DIR}/.env << 'EOF'
-          BOT_TOKEN=\${BOT_TOKEN}
-          BASE_DOWNLOAD_LINK=\${BASE_DOWNLOAD_LINK}
-          WHITELIST_USERS=\${WHITELIST_USERS}
-          ADMIN_USERS=\${ADMIN_USERS}
-          STORAGE_DAYS=\${STORAGE_DAYS}
-          COOKIE_TTL_HOURS=\${COOKIE_TTL_HOURS}
-          MAX_TELEGRAM_FILE_SIZE=\${MAX_TELEGRAM_SIZE_MB}
-          USE_WARP=\${USE_WARP}
-          MIN_DISK_FREE_MB=\${MIN_DISK_FREE_MB}
-          AAC_TRANSCODE=\${AAC_TRANSCODE}
-          MAX_COMMENTS=\${MAX_COMMENTS}
-          LOG_LEVEL=\${LOG_LEVEL}
-          EOF
-          chmod 600 \${DEPLOY_DIR}/.env
-
-          # Validate token
-          if grep -q "^BOT_TOKEN=$" \${DEPLOY_DIR}/.env 2>/dev/null; then
-            echo "❌ ERROR: BOT_TOKEN is empty!"
-            exit 1
-          fi
-
-          # Create docker-compose.yml
-          cat > \${DEPLOY_DIR}/docker-compose.yml << 'EOF'
+          # Create docker-compose.yml locally
+          cat > /tmp/docker-compose.yml << COMPEOF
           services:
             bot:
-              image: \${IMAGE}
-              container_name: \${CONTAINER}
+              image: ${IMAGE}
+              container_name: ${CONTAINER}
               restart: unless-stopped
               env_file:
                 - .env
@@ -234,29 +208,28 @@ jobs:
                 - ./data:/app/data
                 - ./downloads:/app/downloads
                 - ./ssl:/app/ssl
-          EOF
+          COMPEOF
+
+          # Install Docker if not present
+          ssh -p 22 root@${VPS_HOST} "command -v docker || (curl -fsSL https://get.docker.com | sh)"
+
+          # Create deploy directory
+          ssh -p 22 root@${VPS_HOST} "mkdir -p ${DEPLOY_DIR}/{data,downloads,ssl}"
+
+          # Copy files to VPS
+          scp -P 22 /tmp/.env root@${VPS_HOST}:${DEPLOY_DIR}/.env
+          scp -P 22 /tmp/docker-compose.yml root@${VPS_HOST}:${DEPLOY_DIR}/docker-compose.yml
+          ssh -p 22 root@${VPS_HOST} "chmod 600 ${DEPLOY_DIR}/.env"
+
+          # Validate token
+          ssh -p 22 root@${VPS_HOST} "grep -q '^BOT_TOKEN=$' ${DEPLOY_DIR}/.env && echo '❌ BOT_TOKEN is empty!' && exit 1 || echo '✅ BOT_TOKEN is set'"
 
           # Pull and restart
-          cd \${DEPLOY_DIR}
-          docker compose pull
-          docker compose up -d --remove-orphans
+          ssh -p 22 root@${VPS_HOST} "cd ${DEPLOY_DIR} && docker compose pull && docker compose up -d --remove-orphans"
 
           # Clean old images
-          docker image prune -f
+          ssh -p 22 root@${VPS_HOST} "docker image prune -f"
 
           # Verify
           sleep 10
-          if docker ps --filter "name=\${CONTAINER}" --filter "status=running" | grep -q "\${CONTAINER}"; then
-            echo "✅ Container is running!"
-            docker logs --tail=10 \${CONTAINER}
-          else
-            echo "❌ Container failed to start!"
-            docker logs --tail=30 \${CONTAINER}
-            exit 1
-          fi
-
-          echo "✅ Deployment Complete!"
-          SCRIPTEOF
-
-          scp -P 22 /tmp/deploy.sh root@${VPS_HOST}:/tmp/deploy.sh
-          ssh -p 22 root@${VPS_HOST} "bash /tmp/deploy.sh"
+          ssh -p 22 root@${VPS_HOST} "docker ps --filter 'name=${CONTAINER}' --filter 'status=running' | grep -q ${CONTAINER} && echo '✅ Container is running!' && docker logs --tail=10 ${CONTAINER} || (echo '❌ Container failed!' && docker logs --tail=30 ${CONTAINER} && exit 1)"

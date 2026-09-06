@@ -6,6 +6,8 @@ RUN apt-get update && \
         gcc \
         libffi-dev \
         make \
+        cmake \
+        python3 \
         git && \
     rm -rf /var/lib/apt/lists/*
 

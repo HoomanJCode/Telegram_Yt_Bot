@@ -181,20 +181,18 @@ jobs:
           CONTAINER="youtube-bot"
 
           # Create .env on runner
-          cat > /tmp/.env << 'ENVEOF'
-          BOT_TOKEN=${BOT_TOKEN}
-          BASE_DOWNLOAD_LINK=${BASE_DOWNLOAD_LINK}
-          WHITELIST_USERS=${WHITELIST_USERS}
-          ADMIN_USERS=${ADMIN_USERS}
-          STORAGE_DAYS=${STORAGE_DAYS}
-          COOKIE_TTL_HOURS=${COOKIE_TTL_HOURS}
-          MAX_TELEGRAM_FILE_SIZE=${MAX_TELEGRAM_SIZE_MB}
-          USE_WARP=${USE_WARP}
-          MIN_DISK_FREE_MB=${MIN_DISK_FREE_MB}
-          AAC_TRANSCODE=${AAC_TRANSCODE}
-          MAX_COMMENTS=${MAX_COMMENTS}
-          LOG_LEVEL=${LOG_LEVEL}
-          ENVEOF
+          printf 'BOT_TOKEN=%s\n' "$BOT_TOKEN" > /tmp/.env
+          printf 'BASE_DOWNLOAD_LINK=%s\n' "$BASE_DOWNLOAD_LINK" >> /tmp/.env
+          printf 'WHITELIST_USERS=%s\n' "$WHITELIST_USERS" >> /tmp/.env
+          printf 'ADMIN_USERS=%s\n' "$ADMIN_USERS" >> /tmp/.env
+          printf 'STORAGE_DAYS=%s\n' "$STORAGE_DAYS" >> /tmp/.env
+          printf 'COOKIE_TTL_HOURS=%s\n' "$COOKIE_TTL_HOURS" >> /tmp/.env
+          printf 'MAX_TELEGRAM_FILE_SIZE=%s\n' "$MAX_TELEGRAM_SIZE_MB" >> /tmp/.env
+          printf 'USE_WARP=%s\n' "$USE_WARP" >> /tmp/.env
+          printf 'MIN_DISK_FREE_MB=%s\n' "$MIN_DISK_FREE_MB" >> /tmp/.env
+          printf 'AAC_TRANSCODE=%s\n' "$AAC_TRANSCODE" >> /tmp/.env
+          printf 'MAX_COMMENTS=%s\n' "$MAX_COMMENTS" >> /tmp/.env
+          printf 'LOG_LEVEL=%s\n' "$LOG_LEVEL" >> /tmp/.env
 
           # Install Docker if not present
           ssh -p 22 root@${VPS_HOST} "command -v docker || (curl -fsSL https://get.docker.com | sh)"
@@ -207,21 +205,21 @@ jobs:
           ssh -p 22 root@${VPS_HOST} "chmod 600 ${DEPLOY_DIR}/.env"
 
           # Write docker-compose.yml on VPS
-          ssh -p 22 root@${VPS_HOST} "cat > ${DEPLOY_DIR}/docker-compose.yml" << 'COMPEOF'
-          services:
-            bot:
-              image: IMAGE_PLACEHOLDER
-              container_name: CONTAINER_PLACEHOLDER
-              restart: unless-stopped
-              env_file:
-                - .env
-              ports:
-                - "8000:8000"
-              volumes:
-                - ./data:/app/data
-                - ./downloads:/app/downloads
-                - ./ssl:/app/ssl
-          COMPEOF
+          ssh -p 22 root@${VPS_HOST} "cat > ${DEPLOY_DIR}/docker-compose.yml << 'COMPEOF'
+services:
+  bot:
+    image: IMAGE_PLACEHOLDER
+    container_name: CONTAINER_PLACEHOLDER
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - \"8000:8000\"
+    volumes:
+      - ./data:/app/data
+      - ./downloads:/app/downloads
+      - ./ssl:/app/ssl
+COMPEOF"
 
           # Replace placeholders on VPS
           ssh -p 22 root@${VPS_HOST} "sed -i 's|IMAGE_PLACEHOLDER|${IMAGE}|g; s|CONTAINER_PLACEHOLDER|${CONTAINER}|g' ${DEPLOY_DIR}/docker-compose.yml"

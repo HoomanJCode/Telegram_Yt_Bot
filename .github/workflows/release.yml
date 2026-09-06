@@ -176,10 +176,14 @@ jobs:
           LOG_LEVEL: ${{ vars.LOG_LEVEL || 'INFO' }}
         run: |
           DEPLOY_DIR="/opt/telegram-yt-bot"
-          IMAGE="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower]'):${TAG}"
           CONTAINER="youtube-bot"
+          IMAGE_NAME="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          IMAGE_TAG="${TAG}"
+          echo "IMAGE_NAME=${IMAGE_NAME}"
+          echo "IMAGE_TAG=${IMAGE_TAG}"
 
           # Create .env locally (secrets available here)
+          cat > /tmp/.env
           printf 'BOT_TOKEN=%s\n' "$BOT_TOKEN" > /tmp/.env
           printf 'BASE_DOWNLOAD_LINK=%s\n' "$BASE_DOWNLOAD_LINK" >> /tmp/.env
           printf 'WHITELIST_USERS=%s\n' "$WHITELIST_USERS" >> /tmp/.env
@@ -193,10 +197,10 @@ jobs:
           printf 'MAX_COMMENTS=%s\n' "$MAX_COMMENTS" >> /tmp/.env
           printf 'LOG_LEVEL=%s\n' "$LOG_LEVEL" >> /tmp/.env
 
-          # Create docker-compose.yml locally
+          # Create docker-compose.yml locally using printf with placeholder
           printf 'services:\n' > /tmp/docker-compose.yml
           printf '  bot:\n' >> /tmp/docker-compose.yml
-          printf '    image: %s\n' "$IMAGE" >> /tmp/docker-compose.yml
+          printf '    image: IMAGE_PLACEHOLDER\n' >> /tmp/docker-compose.yml
           printf '    container_name: %s\n' "$CONTAINER" >> /tmp/docker-compose.yml
           printf '    restart: unless-stopped\n' >> /tmp/docker-compose.yml
           printf '    env_file:\n' >> /tmp/docker-compose.yml
@@ -208,6 +212,10 @@ jobs:
           printf '      - ./downloads:/app/downloads\n' >> /tmp/docker-compose.yml
           printf '      - ./ssl:/app/ssl\n' >> /tmp/docker-compose.yml
 
+          # Replace placeholder with actual image on VPS
+          FULL_IMAGE="ghcr.io/${IMAGE_NAME}:${IMAGE_TAG}"
+          echo "Full image: ${FULL_IMAGE}"
+
           # Install Docker if not present
           ssh -p 22 root@${VPS_HOST} "command -v docker || (curl -fsSL https://get.docker.com | sh)"
 
@@ -218,6 +226,9 @@ jobs:
           scp -P 22 /tmp/.env root@${VPS_HOST}:${DEPLOY_DIR}/.env
           scp -P 22 /tmp/docker-compose.yml root@${VPS_HOST}:${DEPLOY_DIR}/docker-compose.yml
           ssh -p 22 root@${VPS_HOST} "chmod 600 ${DEPLOY_DIR}/.env"
+
+          # Replace placeholder with actual image on VPS
+          ssh -p 22 root@${VPS_HOST} "sed -i 's|IMAGE_PLACEHOLDER|${FULL_IMAGE}|g' ${DEPLOY_DIR}/docker-compose.yml"
 
           # Validate token
           ssh -p 22 root@${VPS_HOST} "grep -q '^BOT_TOKEN=$' ${DEPLOY_DIR}/.env && echo '❌ BOT_TOKEN is empty!' && exit 1 || echo '✅ BOT_TOKEN is set'"

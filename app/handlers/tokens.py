@@ -265,11 +265,19 @@ async def send_file(bot, msg, record_or_req):
         await msg.reply_text("❌ File deleted.", reply_to_message_id=msg.message_id)
         return
 
-    mb = Path(fp).stat().st_size / 1024 / 1024
-    # Telegram Bot API has a 50 MB limit for regular bots.
-    if mb > bot.config.MAX_TELEGRAM_FILE_SIZE:
+    size = Path(fp).stat().st_size
+    mb = size / 1024 / 1024
+    # MAX_TELEGRAM_FILE_SIZE is stored in BYTES (config.py parses the
+    # MB env var and multiplies by 1024*1024), so compare bytes against
+    # bytes. The old `mb > MAX_TELEGRAM_FILE_SIZE` compared a MiB float
+    # against a byte count and NEVER fired, so oversized files sailed
+    # past the guard, were rejected by Telegram mid-upload, and surfaced
+    # as a bare "❌ Failed." instead of this link fallback.
+    if size > bot.config.MAX_TELEGRAM_FILE_SIZE:
+        limit_mb = bot.config.MAX_TELEGRAM_FILE_SIZE / 1024 / 1024
         await msg.reply_text(
-            f"⚠️ Too large ({mb:.1f}MB)\n📥 `{bot.base_url}/{quote(Path(fp).name)}`",
+            f"⚠️ *Too large for Telegram upload* ({mb:.1f} MB > {limit_mb:.0f} MB limit)\n"
+            f"📥 Download it directly: `{bot.base_url}/{quote(Path(fp).name)}`",
             parse_mode=ParseMode.MARKDOWN,
         )
         return

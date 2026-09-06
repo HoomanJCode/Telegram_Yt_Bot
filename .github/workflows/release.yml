@@ -175,64 +175,88 @@ jobs:
           MAX_COMMENTS: ${{ vars.MAX_COMMENTS || '0' }}
           LOG_LEVEL: ${{ vars.LOG_LEVEL || 'INFO' }}
         run: |
-          REPO_LOWER=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')
-          IMAGE="ghcr.io/${REPO_LOWER}:${TAG}"
           DEPLOY_DIR="/opt/telegram-yt-bot"
+          IMAGE="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower]'):${TAG}"
           CONTAINER="youtube-bot"
 
-          # Create .env locally (secrets are available here)
-          cat > /tmp/.env << ENVEOF
-BOT_TOKEN=${BOT_TOKEN}
-BASE_DOWNLOAD_LINK=${BASE_DOWNLOAD_LINK}
-WHITELIST_USERS=${WHITELIST_USERS}
-ADMIN_USERS=${ADMIN_USERS}
-STORAGE_DAYS=${STORAGE_DAYS}
-COOKIE_TTL_HOURS=${COOKIE_TTL_HOURS}
-MAX_TELEGRAM_FILE_SIZE=${MAX_TELEGRAM_SIZE_MB}
-USE_WARP=${USE_WARP}
-MIN_DISK_FREE_MB=${MIN_DISK_FREE_MB}
-AAC_TRANSCODE=${AAC_TRANSCODE}
-MAX_COMMENTS=${MAX_COMMENTS}
-LOG_LEVEL=${LOG_LEVEL}
-ENVEOF
+          cat > /tmp/deploy.sh << SCRIPTEOF
+          #!/bin/bash
+          set -e
 
-          # Create docker-compose.yml locally
-          cat > /tmp/docker-compose.yml << COMPEOF
-services:
-  bot:
-    image: ${IMAGE}
-    container_name: ${CONTAINER}
-    restart: unless-stopped
-    env_file:
-      - .env
-    ports:
-      - "8000:8000"
-    volumes:
-      - ./data:/app/data
-      - ./downloads:/app/downloads
-      - ./ssl:/app/ssl
-COMPEOF
+          echo "========================================"
+          echo "  Deploying \${IMAGE}"
+          echo "========================================"
 
           # Install Docker if not present
-          ssh -p 22 root@${VPS_HOST} "command -v docker || (curl -fsSL https://get.docker.com | sh)"
+          if ! command -v docker &> /dev/null; then
+            echo "📦 Installing Docker..."
+            curl -fsSL https://get.docker.com | sh
+          fi
 
-          # Create deploy directory
-          ssh -p 22 root@${VPS_HOST} "mkdir -p ${DEPLOY_DIR}/{data,downloads,ssl}"
+          # Create project directory
+          mkdir -p \${DEPLOY_DIR}/{data,downloads,ssl}
 
-          # Copy files to VPS
-          scp -P 22 /tmp/.env root@${VPS_HOST}:${DEPLOY_DIR}/.env
-          scp -P 22 /tmp/docker-compose.yml root@${VPS_HOST}:${DEPLOY_DIR}/docker-compose.yml
-          ssh -p 22 root@${VPS_HOST} "chmod 600 ${DEPLOY_DIR}/.env"
+          # Create .env file
+          cat > \${DEPLOY_DIR}/.env << 'EOF'
+          BOT_TOKEN=\${BOT_TOKEN}
+          BASE_DOWNLOAD_LINK=\${BASE_DOWNLOAD_LINK}
+          WHITELIST_USERS=\${WHITELIST_USERS}
+          ADMIN_USERS=\${ADMIN_USERS}
+          STORAGE_DAYS=\${STORAGE_DAYS}
+          COOKIE_TTL_HOURS=\${COOKIE_TTL_HOURS}
+          MAX_TELEGRAM_FILE_SIZE=\${MAX_TELEGRAM_SIZE_MB}
+          USE_WARP=\${USE_WARP}
+          MIN_DISK_FREE_MB=\${MIN_DISK_FREE_MB}
+          AAC_TRANSCODE=\${AAC_TRANSCODE}
+          MAX_COMMENTS=\${MAX_COMMENTS}
+          LOG_LEVEL=\${LOG_LEVEL}
+          EOF
+          chmod 600 \${DEPLOY_DIR}/.env
 
-          # Validate token on VPS
-          ssh -p 22 root@${VPS_HOST} "grep -q '^BOT_TOKEN=$' ${DEPLOY_DIR}/.env && echo '❌ BOT_TOKEN is empty!' && exit 1 || echo '✅ BOT_TOKEN is set'"
+          # Validate token
+          if grep -q "^BOT_TOKEN=$" \${DEPLOY_DIR}/.env 2>/dev/null; then
+            echo "❌ ERROR: BOT_TOKEN is empty!"
+            exit 1
+          fi
+
+          # Create docker-compose.yml
+          cat > \${DEPLOY_DIR}/docker-compose.yml << 'EOF'
+          services:
+            bot:
+              image: \${IMAGE}
+              container_name: \${CONTAINER}
+              restart: unless-stopped
+              env_file:
+                - .env
+              ports:
+                - "8000:8000"
+              volumes:
+                - ./data:/app/data
+                - ./downloads:/app/downloads
+                - ./ssl:/app/ssl
+          EOF
 
           # Pull and restart
-          ssh -p 22 root@${VPS_HOST} "cd ${DEPLOY_DIR} && docker compose pull && docker compose up -d --remove-orphans"
+          cd \${DEPLOY_DIR}
+          docker compose pull
+          docker compose up -d --remove-orphans
 
           # Clean old images
-          ssh -p 22 root@${VPS_HOST} "docker image prune -f"
+          docker image prune -f
 
-          # Verify container is running
+          # Verify
           sleep 10
-          ssh -p 22 root@${VPS_HOST} "docker ps --filter 'name=${CONTAINER}' --filter 'status=running' | grep -q ${CONTAINER} && echo '✅ Container is running!' && docker logs --tail=10 ${CONTAINER} || (echo '❌ Container failed!' && docker logs --tail=30 ${CONTAINER} && exit 1)"
+          if docker ps --filter "name=\${CONTAINER}" --filter "status=running" | grep -q "\${CONTAINER}"; then
+            echo "✅ Container is running!"
+            docker logs --tail=10 \${CONTAINER}
+          else
+            echo "❌ Container failed to start!"
+            docker logs --tail=30 \${CONTAINER}
+            exit 1
+          fi
+
+          echo "✅ Deployment Complete!"
+          SCRIPTEOF
+
+          scp -P 22 /tmp/deploy.sh root@${VPS_HOST}:/tmp/deploy.sh
+          ssh -p 22 root@${VPS_HOST} "bash /tmp/deploy.sh"

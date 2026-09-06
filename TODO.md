@@ -168,7 +168,7 @@ Labels explain WHY to choose each option, not just WHAT it is.
 | 7. Update format picker labels | `formats.py` → `format_choice_kb()` | Low |
 | 8. Add router callback for settings summary | `navigation.py` → `router()` | Low |
 | 9. Update USER_FLOWS.md | `docs/USER_FLOWS.md` | Medium |
-| 10. Update README menu description | `Readme.md` | Low |
+| 10. Update README menu description | `README.md` | Low |
 | 11. Compile-check + run tests | All | Required |
 | 12. Code review | — | Required |
 
@@ -418,7 +418,7 @@ Currently shown in welcome text (`📱 Inline: @botname <link>`). In the new des
 | 12. Update `help_cmd()` | `commands.py` | Low | Keep as-is or route to help screen |
 | 13. Update format picker labels | `formats.py` | Low | Change 4 string literals |
 | 14. Update USER_FLOWS.md | `docs/USER_FLOWS.md` | Medium | Rewrite menu + settings diagrams |
-| 15. Update README | `Readme.md` | Low | Menu description |
+| 15. Update README | `README.md` | Low | Menu description |
 | 16. Update tests | `tests/*.py` | Medium | Menu row counts, callback checks |
 | 17. Compile-check all 17 files | All | Required | |
 | 18. Run test suite | `tests/` | Required | |

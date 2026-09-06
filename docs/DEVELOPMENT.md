@@ -39,7 +39,7 @@ export PATH="$HOME/.deno/bin:$PATH"
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/yourusername/Telegram_Yt_Bot.git
+git clone https://github.com/HoomanJCode/Telegram_Yt_Bot.git
 cd Telegram_Yt_Bot
 
 # 2. Create and activate virtual environment
@@ -52,7 +52,7 @@ pip install -r requirements.txt
 pip install --upgrade yt-dlp yt-dlp-ejs
 
 # 4. Create .env file from example
-cp env.example .env
+cp .env.example .env
 # Edit .env with your bot token and settings
 
 # 5. Create required directories

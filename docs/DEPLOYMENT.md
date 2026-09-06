@@ -116,7 +116,7 @@ The deploy workflow will:
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/yourusername/Telegram_Yt_Bot.git /opt/TelegramYtBot
+git clone https://github.com/HoomanJCode/Telegram_Yt_Bot.git /opt/TelegramYtBot
 cd /opt/TelegramYtBot
 
 # 2. Install system dependencies
@@ -136,7 +136,7 @@ pip install -r requirements.txt
 pip install --upgrade yt-dlp yt-dlp-ejs
 
 # 5. Create .env file
-cp env.example .env
+cp .env.example .env
 nano .env
 
 # 6. Create required directories

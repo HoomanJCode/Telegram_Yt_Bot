@@ -83,7 +83,15 @@ class Config:
     BASE_DOWNLOAD_LINK = os.getenv('BASE_DOWNLOAD_LINK', 'http://your-server-ip:8000')
     WHITELIST_USERS = os.getenv('WHITELIST_USERS', '')
     DOWNLOAD_DIR = 'downloads'
-    MAX_TELEGRAM_FILE_SIZE = 50 * 1024 * 1024  # 50MB
+    # Max size (in bytes) of a file that may be uploaded to Telegram.
+    # Read from env as MB (matching .env.example's documented unit) and
+    # converted to bytes at import time. Default 2048 MB = 2 GB, the
+    # ceiling of the Local Bot API Server / regular user accounts.
+    # NOTE: the hosted api.telegram.org Bot API hard-caps regular bots
+    # at 50 MB regardless of this value, so operators on the hosted API
+    # should set MAX_TELEGRAM_FILE_SIZE=50 or smaller — larger files
+    # will be refused by Telegram and surface as the "Too large" prompt.
+    MAX_TELEGRAM_FILE_SIZE = _env_int('MAX_TELEGRAM_FILE_SIZE', 2048) * 1024 * 1024
     STORAGE_DAYS = int(os.getenv('STORAGE_DAYS', '2'))
     COOKIE_TTL_HOURS = int(os.getenv('COOKIE_TTL_HOURS', '0'))  # 0 = until restart
     # Route yt-dlp traffic through Cloudflare Warp at 127.0.0.1:40000.

@@ -168,7 +168,7 @@ jobs:
           ADMIN_USERS: ${{ secrets.ADMIN_USERS || '' }}
           STORAGE_DAYS: ${{ vars.STORAGE_DAYS || '2' }}
           COOKIE_TTL_HOURS: ${{ vars.COOKIE_TTL_HOURS || '0' }}
-          MAX_TELEGRAM_SIZE_MB: ${{ vars.MAX_TELEGRAM_SIZE_MB || '50' }}
+          MAX_TELEGRAM_SIZE_MB: ${{ vars.MAX_TELEGRAM_SIZE_MB || '2048' }}
           USE_WARP: ${{ secrets.USE_WARP || 'false' }}
           MIN_DISK_FREE_MB: ${{ vars.MIN_DISK_FREE_MB || '1024' }}
           AAC_TRANSCODE: ${{ vars.AAC_TRANSCODE || 'true' }}

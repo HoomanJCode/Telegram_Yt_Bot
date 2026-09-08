@@ -201,6 +201,13 @@ jobs:
             esac
           fi
 
+          # Derive the bot's internal listen port from BASE_DOWNLOAD_LINK when it
+          # specifies one (e.g. https://host:9000 -> 9000), else default 8000.
+          INTERNAL_PORT="8000"
+          URL_PORT=$(printf '%s' "$BASE_DOWNLOAD_LINK" | sed -nE 's#^[a-zA-Z][a-zA-Z0-9+.-]*://[^/:]+:([0-9]+).*#\1#p')
+          if [ -n "$URL_PORT" ]; then INTERNAL_PORT="$URL_PORT"; fi
+          echo "Internal bot port: ${INTERNAL_PORT}"
+
           # Create .env locally (secrets available here)
           printf 'BOT_TOKEN=%s\n' "$BOT_TOKEN" > /tmp/.env
           printf 'BASE_DOWNLOAD_LINK=%s\n' "$BASE_DOWNLOAD_LINK" >> /tmp/.env
@@ -220,7 +227,7 @@ jobs:
 
           # When HTTPS is disabled (no ORIGIN_DOMAIN), publish the bot port directly
           if [ -z "$ORIGIN_DOMAIN" ]; then
-            printf 'services:\n  bot:\n    ports:\n      - "8000:8000"\n' > /tmp/ports-override.yml
+            printf 'services:\n  bot:\n    ports:\n      - "%s:%s"\n' "$INTERNAL_PORT" "$INTERNAL_PORT" > /tmp/ports-override.yml
           fi
 
           # Pin the deployed image tag via BOT_IMAGE (compose default is :latest)
@@ -249,7 +256,7 @@ jobs:
 
           # Append this app's domain to the shared Caddyfile (skip if already present)
           if [ -n "$ORIGIN_DOMAIN" ]; then
-            ssh -p 22 root@${VPS_HOST} "if grep -q '${ORIGIN_DOMAIN}' /opt/caddy/Caddyfile; then echo '⚠️ Domain ${ORIGIN_DOMAIN} already in Caddyfile'; else printf '%s {\n    reverse_proxy ${CONTAINER}:8000\n}\n' '${ORIGIN_DOMAIN}' >> /opt/caddy/Caddyfile && docker exec caddy caddy reload --config /etc/caddy/Caddyfile && echo '✅ Caddy reloaded with new domain'; fi"
+            ssh -p 22 root@${VPS_HOST} "if grep -q '${ORIGIN_DOMAIN}' /opt/caddy/Caddyfile; then echo '⚠️ Domain ${ORIGIN_DOMAIN} already in Caddyfile'; else printf '%s {\n    reverse_proxy ${CONTAINER}:${INTERNAL_PORT}\n}\n' '${ORIGIN_DOMAIN}' >> /opt/caddy/Caddyfile && docker exec caddy caddy reload --config /etc/caddy/Caddyfile && echo '✅ Caddy reloaded with new domain'; fi"
           fi
 
           # Remove stale port override when switching to HTTPS

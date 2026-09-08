@@ -254,13 +254,24 @@ After `/start`, you see a clean **4-button main menu**:
 
 ## 🔒 HTTPS Options
 
-Three ways to serve download links over HTTPS:
+Four ways to serve download links over HTTPS:
 
 | Method | Description | Guide |
 |--------|-------------|-------|
+| **Shared Caddy (recommended)** | Automatic Let's Encrypt, zero config, multi-app | [Guide](./docs/CADDY.md) |
 | **Cloudflare Tunnel** | No open ports, fully managed TLS | [Guide](./docs/SSL_CLOUDFLARE.md#approach-1-cloudflare-tunnel-recommended) |
 | **Reverse Proxy** | Nginx/Caddy + Cloudflare proxied DNS | [Guide](./docs/SSL_CLOUDFLARE.md#approach-2-proxied-dns--reverse-proxy) |
 | **Native HTTPS** | Bot terminates TLS itself (Origin CA) | [Guide](./docs/SSL_CLOUDFLARE.md#approach-3-native-https-with-origin-ca) |
+
+### Automatic HTTPS via Shared Caddy (Default)
+
+The deploy workflow handles everything automatically:
+
+1. Set `BASE_DOWNLOAD_LINK=https://yt.yourdomain.com` (a **GitHub Secret**)
+2. Point DNS for `yt.yourdomain.com` to your VPS
+3. Deploy — Caddy auto-provisions the certificate
+
+The domain is derived from `BASE_DOWNLOAD_LINK` (skipped for `http://` URLs). If the shared Caddy isn't running on the VPS yet, it is created on first deploy. Multiple apps on the same VPS share one Caddy — see [docs/CADDY.md](./docs/CADDY.md) for the full integration guide.
 
 ---
 

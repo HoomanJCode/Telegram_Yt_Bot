@@ -157,6 +157,10 @@ jobs:
           mkdir -p ~/.ssh
           ssh-keyscan -p 22 -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
 
+      - name: 📥 Checkout repo files
+        if: steps.check.outputs.has_secrets == 'true'
+        uses: actions/checkout@v4
+
       - name: 🚀 Deploy via Docker
         if: steps.check.outputs.has_secrets == 'true'
         env:

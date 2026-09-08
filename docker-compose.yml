@@ -1,15 +1,17 @@
-version: "3.8"
-
 services:
   bot:
-    build: .
+    image: ${BOT_IMAGE:-ghcr.io/hoomanjcode/telegram-yt-bot:latest}
     container_name: youtube-bot
     restart: unless-stopped
     env_file:
       - .env
-    ports:
-      - "8000:8000"
     volumes:
       - ./data:/app/data
       - ./downloads:/app/downloads
       - ./ssl:/app/ssl
+    networks:
+      - caddy
+
+networks:
+  caddy:
+    external: true

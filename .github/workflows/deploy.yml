@@ -1,0 +1,198 @@
+name: Deploy
+
+# Deploy a released image tag to the VPS.
+# - Callable from release.yml (tag = pushed tag)
+# - Runnable manually from the Actions tab (defaults to the latest
+#   GitHub release tag, or pass an explicit tag)
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Image tag to deploy (defaults to github.ref_name)'
+        required: false
+        type: string
+        default: ''
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Image tag to deploy (empty = latest GitHub release)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-yt-bot
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    name: 🚀 Deploy to VPS
+    environment: production
+
+    steps:
+      - name: 🏷️ Resolve tag
+        id: tag
+        run: |
+          INPUT_TAG="${{ inputs.tag }}"
+          if [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/latest" \
+              | grep '"tag_name"' | head -1 | sed 's/.*: "//; s/",*//')
+            if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
+              echo "❌ No tag given and no GitHub releases found."
+              exit 1
+            fi
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "✅ Deploying image tag: $TAG"
+
+      - name: 🔑 Check secrets
+        id: check
+        run: |
+          if [ -n "${{ secrets.VPS_HOST }}" ]; then
+            echo "has_secrets=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_secrets=false" >> "$GITHUB_OUTPUT"
+            echo "⚠️ No VPS secrets found, skipping deployment"
+          fi
+
+      - name: 🔑 Setup SSH
+        if: steps.check.outputs.has_secrets == 'true'
+        uses: webfactory/ssh-agent@v0.9.1
+        with:
+          ssh-private-key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+
+      - name: 🔗 Add host key
+        if: steps.check.outputs.has_secrets == 'true'
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -p 22 -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
+
+      - name: 📥 Checkout repo files
+        if: steps.check.outputs.has_secrets == 'true'
+        uses: actions/checkout@v6
+
+      - name: 🚀 Deploy via Docker
+        if: steps.check.outputs.has_secrets == 'true'
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          BASE_DOWNLOAD_LINK: ${{ secrets.BASE_DOWNLOAD_LINK }}
+          ORIGIN_DOMAIN: ${{ secrets.ORIGIN_DOMAIN || vars.ORIGIN_DOMAIN || '' }}
+          WHITELIST_USERS: ${{ secrets.WHITELIST_USERS || '' }}
+          ADMIN_USERS: ${{ secrets.ADMIN_USERS || '' }}
+          STORAGE_DAYS: ${{ vars.STORAGE_DAYS || '2' }}
+          COOKIE_TTL_HOURS: ${{ vars.COOKIE_TTL_HOURS || '0' }}
+          MAX_TELEGRAM_SIZE_MB: ${{ vars.MAX_TELEGRAM_SIZE_MB || '2048' }}
+          USE_WARP: ${{ secrets.USE_WARP || 'false' }}
+          MIN_DISK_FREE_MB: ${{ vars.MIN_DISK_FREE_MB || '1024' }}
+          AAC_TRANSCODE: ${{ vars.AAC_TRANSCODE || 'true' }}
+          MAX_COMMENTS: ${{ vars.MAX_COMMENTS || '0' }}
+          LOG_LEVEL: ${{ vars.LOG_LEVEL || 'INFO' }}
+        run: |
+          DEPLOY_DIR="/opt/telegram-yt-bot"
+          CONTAINER="youtube-bot"
+          IMAGE_NAME="$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          IMAGE_TAG="${TAG}"
+          echo "IMAGE_NAME=${IMAGE_NAME}"
+          echo "IMAGE_TAG=${IMAGE_TAG}"
+
+          # Derive ORIGIN_DOMAIN from BASE_DOWNLOAD_LINK when not set.
+          # Skip if it starts with http:// (user wants plain HTTP).
+          if [ -z "$ORIGIN_DOMAIN" ]; then
+            case "$BASE_DOWNLOAD_LINK" in
+              http://*)
+                echo "ℹ️  BASE_DOWNLOAD_LINK uses http:// — skipping HTTPS/Caddy"
+                ;;
+              *)
+                # Strip protocol (if any), path, port — leave just the hostname
+                DERIVED=$(printf '%s' "$BASE_DOWNLOAD_LINK" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##; s#[:/].*##')
+                if [ -n "$DERIVED" ] && [ "$DERIVED" != "localhost" ] && ! printf '%s' "$DERIVED" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
+                  ORIGIN_DOMAIN="$DERIVED"
+                  echo "⚠️  ORIGIN_DOMAIN unset — derived '${ORIGIN_DOMAIN}' from BASE_DOWNLOAD_LINK"
+                fi
+                ;;
+            esac
+          fi
+
+          # Derive the bot's internal listen port from BASE_DOWNLOAD_LINK when it
+          # specifies one (e.g. https://host:9000 -> 9000), else default 8000.
+          INTERNAL_PORT="8000"
+          URL_PORT=$(printf '%s' "$BASE_DOWNLOAD_LINK" | sed -nE 's#^[a-zA-Z][a-zA-Z0-9+.-]*://[^/:]+:([0-9]+).*#\1#p')
+          if [ -n "$URL_PORT" ]; then INTERNAL_PORT="$URL_PORT"; fi
+          echo "Internal bot port: ${INTERNAL_PORT}"
+
+          # Create .env locally (secrets available here)
+          printf 'BOT_TOKEN=%s\n' "$BOT_TOKEN" > /tmp/.env
+          printf 'BASE_DOWNLOAD_LINK=%s\n' "$BASE_DOWNLOAD_LINK" >> /tmp/.env
+          printf 'WHITELIST_USERS=%s\n' "$WHITELIST_USERS" >> /tmp/.env
+          printf 'ADMIN_USERS=%s\n' "$ADMIN_USERS" >> /tmp/.env
+          printf 'STORAGE_DAYS=%s\n' "$STORAGE_DAYS" >> /tmp/.env
+          printf 'COOKIE_TTL_HOURS=%s\n' "$COOKIE_TTL_HOURS" >> /tmp/.env
+          printf 'MAX_TELEGRAM_FILE_SIZE=%s\n' "$MAX_TELEGRAM_SIZE_MB" >> /tmp/.env
+          printf 'USE_WARP=%s\n' "$USE_WARP" >> /tmp/.env
+          printf 'MIN_DISK_FREE_MB=%s\n' "$MIN_DISK_FREE_MB" >> /tmp/.env
+          printf 'AAC_TRANSCODE=%s\n' "$AAC_TRANSCODE" >> /tmp/.env
+          printf 'MAX_COMMENTS=%s\n' "$MAX_COMMENTS" >> /tmp/.env
+          printf 'LOG_LEVEL=%s\n' "$LOG_LEVEL" >> /tmp/.env
+
+          # Use docker-compose.yml from the repo
+          cp docker-compose.yml /tmp/docker-compose.yml
+
+          # When HTTPS is disabled (no ORIGIN_DOMAIN), publish the bot port directly
+          if [ -z "$ORIGIN_DOMAIN" ]; then
+            printf 'services:\n  bot:\n    ports:\n      - "%s:%s"\n' "$INTERNAL_PORT" "$INTERNAL_PORT" > /tmp/ports-override.yml
+          fi
+
+          # Pin the deployed image tag via BOT_IMAGE (compose default is :latest)
+          printf 'BOT_IMAGE=%s\n' "ghcr.io/${IMAGE_NAME}:${IMAGE_TAG}" >> /tmp/.env
+          echo "Image: ghcr.io/${IMAGE_NAME}:${IMAGE_TAG}"
+
+          # Install Docker if not present
+          ssh -p 22 root@${VPS_HOST} "command -v docker || (curl -fsSL https://get.docker.com | sh)"
+
+          # Create deploy directory
+          ssh -p 22 root@${VPS_HOST} "mkdir -p ${DEPLOY_DIR}/{data,downloads,ssl}"
+
+          # Copy files to VPS
+          scp -P 22 /tmp/.env root@${VPS_HOST}:${DEPLOY_DIR}/.env
+          scp -P 22 /tmp/docker-compose.yml root@${VPS_HOST}:${DEPLOY_DIR}/docker-compose.yml
+          if [ -f /tmp/ports-override.yml ]; then
+            scp -P 22 /tmp/ports-override.yml root@${VPS_HOST}:${DEPLOY_DIR}/ports-override.yml
+          fi
+          ssh -p 22 root@${VPS_HOST} "chmod 600 ${DEPLOY_DIR}/.env"
+
+          # Ensure shared Caddy network exists
+          ssh -p 22 root@${VPS_HOST} "docker network create caddy 2>/dev/null || true"
+
+          # Start shared Caddy if not running (first deploy)
+          ssh -p 22 root@${VPS_HOST} "if ! docker ps --format '{{.Names}}' | grep -q '^caddy$'; then if [ ! -f /opt/caddy/Caddyfile ]; then printf '# Shared Caddyfile - managed by deployments\n' > /opt/caddy/Caddyfile; fi; docker run -d --name caddy --restart unless-stopped -p 80:80 -p 443:443 -v /opt/caddy/Caddyfile:/etc/caddy/Caddyfile:ro -v caddy_data:/data -v caddy_config:/config --network caddy caddy:2-alpine; fi"
+
+          # Append this app's domain to the shared Caddyfile (skip if already present)
+          if [ -n "$ORIGIN_DOMAIN" ]; then
+            ssh -p 22 root@${VPS_HOST} "if grep -q '${ORIGIN_DOMAIN}' /opt/caddy/Caddyfile; then echo '⚠️ Domain ${ORIGIN_DOMAIN} already in Caddyfile'; else printf '%s {\n    reverse_proxy ${CONTAINER}:${INTERNAL_PORT}\n}\n' '${ORIGIN_DOMAIN}' >> /opt/caddy/Caddyfile && docker exec caddy caddy reload --config /etc/caddy/Caddyfile && echo '✅ Caddy reloaded with new domain'; fi"
+          fi
+
+          # Remove stale port override when switching to HTTPS
+          if [ -n "$ORIGIN_DOMAIN" ]; then
+            ssh -p 22 root@${VPS_HOST} "rm -f ${DEPLOY_DIR}/ports-override.yml"
+          fi
+
+          # Validate token
+          ssh -p 22 root@${VPS_HOST} "grep -q '^BOT_TOKEN=$' ${DEPLOY_DIR}/.env && echo '❌ BOT_TOKEN is empty!' && exit 1 || echo '✅ BOT_TOKEN is set'"
+
+          # Pull and restart
+          ssh -p 22 root@${VPS_HOST} "cd ${DEPLOY_DIR} && docker compose pull && if [ -f ports-override.yml ]; then docker compose -f docker-compose.yml -f ports-override.yml up -d --remove-orphans; else docker compose up -d --remove-orphans; fi"
+
+          # Clean old images
+          ssh -p 22 root@${VPS_HOST} "docker image prune -f"
+
+          # Verify
+          sleep 10
+          ssh -p 22 root@${VPS_HOST} "docker ps --filter 'name=${CONTAINER}' --filter 'status=running' | grep -q ${CONTAINER} && echo '✅ Container is running!' && docker logs --tail=10 ${CONTAINER} || (echo '❌ Container failed!' && docker logs --tail=30 ${CONTAINER} && exit 1)"

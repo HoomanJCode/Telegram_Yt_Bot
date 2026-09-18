@@ -5,6 +5,11 @@ directory over HTTP (or HTTPS when an SSL context is provided). It supports
 Range requests for resume-capable downloads and returns correct MIME types
 for the media formats the bot produces.
 
+The server also serves a landing page at the root URL (``/``) so that users
+who visit the download domain directly in their browser see a friendly,
+informative page instead of a bare 404. Custom error pages (404, 403, 400, 500)
+are rendered using the templates in ``app.templates``.
+
 AI RULE: If you modify this file, you must also update and fix the comments,
 docstrings, and descriptions to keep them accurate and current. Every function
 must have a descriptive docstring explaining its purpose, parameters, and
@@ -15,6 +20,14 @@ import logging
 import socket
 from pathlib import Path
 from aiohttp import web
+
+from app.templates import (
+    landing_page,
+    not_found_page,
+    forbidden_page,
+    server_error_page,
+    bad_request_page,
+)
 
 
 logger = logging.getLogger('yt_bot')
@@ -83,16 +96,52 @@ class FileServer:
     def __init__(self, port=8000, ssl_context=None):
         self.port = port
         self.ssl_context = ssl_context
-        # Build an aiohttp application with a single route for downloads.
+        # Build an aiohttp application.
         self.app = web.Application()
-        # GET serves the body. HEAD serves only headers -- Telegram
-        # mobile clients probe HEAD before GET to learn Content-Length
-        # and decide resume / no-resume. aiohttp's PlainResource
-        # auto-handles HEAD for any registered GET handler, so a
-        # single `add_get` is enough (an explicit `add_head` for a
-        # `/{filename}` PlainResource raises RuntimeError because
-        # PlainResource.add_route already wired HEAD from the GET).
+
+        # --- Middleware: render custom HTML for handled HTTP errors. ---
+        # aiohttp's default error responses are plain-text. This middleware
+        # replaces them with styled HTML pages for common status codes.
+        # IMPORTANT: middleware only wraps requests that match a route, so
+        # completely unmatched paths (e.g. /foo/bar when only /{filename}
+        # exists) still get aiohttp's default 404. We handle that via a
+        # catch-all route instead (see the fallback below).
+        @web.middleware
+        async def _error_middleware(request, handler):
+            try:
+                return await handler(request)
+            except web.HTTPNotFound:
+                return _html_response(not_found_page(request.path), status=404)
+            except web.HTTPForbidden:
+                return _html_response(forbidden_page(), status=403)
+            except web.HTTPBadRequest as exc:
+                reason = exc.text or ''
+                return _html_response(bad_request_page(reason), status=400)
+            except web.HTTPException as exc:
+                return _html_response(server_error_page(), status=exc.status)
+        self.app.middlewares.append(_error_middleware)
+
+        # --- Routes ---
+        # IMPORTANT: registration order matters. aiohttp matches routes in
+        # registration order, so catch-all routes must come LAST.
+        #
+        # 1. Landing page at root so the domain is browsable.
+        self.app.router.add_get('/', self._handle_root)
+        # 2. File listing (directory index).
+        self.app.router.add_get('/files', self._handle_file_list)
+        # 3. GET serves the body. HEAD serves only headers -- Telegram
+        #    mobile clients probe HEAD before GET to learn Content-Length
+        #    and decide resume / no-resume. aiohttp's PlainResource
+        #    auto-handles HEAD for any registered GET handler, so a
+        #    single `add_get` is enough (an explicit `add_head` for a
+        #    `/{filename}` PlainResource raises RuntimeError because
+        #    PlainResource.add_route already wired HEAD from the GET).
         self.app.router.add_get('/{filename}', self._handle_download)
+        # 4. Catch-all fallback: anything not matched by earlier routes
+        #    (e.g. multi-segment paths like /foo/bar) renders the 404 page.
+        #    MUST be registered LAST.
+        self.app.router.add_get('/{tail:.*}', self._handle_fallback)
+
         self._runner = None
 
     @staticmethod
@@ -113,6 +162,74 @@ class FileServer:
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         except (OSError, AttributeError):
             pass
+
+    # ── Landing page, file listing, and catch-all fallback ──────────────
+
+    async def _handle_root(self, request):
+        """Render the landing page at ``/``.
+
+        Shows a friendly welcome message with service status and a link to
+        browse available files. This makes the download domain browsable
+        instead of returning a bare 404.
+        """
+        host = request.host
+        file_count = _count_files()
+        return _html_response(landing_page(host, file_count))
+
+    async def _handle_file_list(self, request):
+        """Render a simple file listing at ``/files``.
+
+        Lists all files currently in the downloads directory with their sizes.
+        """
+        files = sorted(DOWNLOADS_DIR.iterdir()) if DOWNLOADS_DIR.is_dir() else []
+        items_html = ''
+        for f in files:
+            if f.is_file():
+                size = _human_size(f.stat().st_size)
+                items_html += (
+                    f'<li>'
+                    f'<a href="/{f.name}">{f.name}</a>'
+                    f'<span class="file-size">{size}</span>'
+                    f'</li>'
+                )
+
+        if not items_html:
+            items_html = '<p style="color: #64748b;">No files currently available.</p>'
+
+        body = f"""
+            <h1>📂 Available Files</h1>
+            <p class="subtitle">{len(files)} file{'s' if len(files) != 1 else ''} on this server</p>
+            <div class="card">
+                <ul class="files">{items_html}</ul>
+            </div>
+            <a href="/" class="btn btn-secondary">← Back Home</a>
+        """
+        return _html_response(
+            f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>File Listing — Media Server</title>
+    <style>{_STYLES_EXT}</style>
+</head>
+<body>
+    <div class="container">
+        {body}
+    </div>
+</body>
+</html>"""
+        )
+
+    async def _handle_fallback(self, request):
+        """Catch-all handler for unmatched paths.
+
+        Returns the styled 404 page. This catches multi-segment paths and
+        anything that does not match a known route.
+        """
+        return _html_response(not_found_page(request.path), status=404)
+
+    # ── Main download handler ───────────────────────────────────────────
 
     async def _handle_download(self, request):
         """Serve a single file, optionally honouring a Range header."""
@@ -240,3 +357,140 @@ def _mime(ext):
         '.jpg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp',
         '.srt': 'text/plain; charset=utf-8', '.vtt': 'text/vtt; charset=utf-8',
     }.get(ext.lower(), 'application/octet-stream')
+
+
+# ── Helpers ──────────────────────────────────────────────────────────────
+
+
+def _html_response(html: str, *, status: int = 200) -> web.Response:
+    """Build an aiohttp Response with HTML content type.
+
+    Args:
+        html: The full HTML document string.
+        status: HTTP status code. Defaults to 200.
+
+    Returns:
+        An aiohttp ``web.Response`` with ``text/html`` content type.
+    """
+    return web.Response(
+        text=html,
+        content_type='text/html',
+        status=status,
+    )
+
+
+# Shared minimal styles used by the file listing page. Kept in a separate
+# string to avoid duplicating the full _STYLES block from templates.py for
+# the one page that has a slightly different layout.
+_STYLES_EXT = """
+body {{
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen,
+        Ubuntu, Cantarell, sans-serif;
+    background: linear-gradient(135deg, #0f0c29, #1a1a3e, #24243e);
+    color: #e0e0e0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+}}
+.container {{
+    text-align: center;
+    padding: 2rem;
+    max-width: 700px;
+    width: 100%;
+}}
+h1 {{
+    font-size: 2.5rem;
+    margin: 0.5rem 0;
+    background: linear-gradient(90deg, #60a5fa, #a78bfa);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}}
+.subtitle {{
+    font-size: 1.1rem;
+    color: #94a3b8;
+    margin-bottom: 2rem;
+}}
+.card {{
+    background: #1e1e3fcc;
+    backdrop-filter: blur(12px);
+    border: 1px solid #3b3b6e;
+    border-radius: 16px;
+    padding: 1.5rem;
+    margin: 1.5rem 0;
+}}
+.files {{
+    list-style: none;
+    padding: 0;
+    margin: 1rem 0;
+}}
+.files li {{
+    padding: 0.6rem 1rem;
+    margin: 0.3rem 0;
+    background: #16163acc;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}}
+.files a {{
+    color: #93c5fd;
+    text-decoration: none;
+}}
+.files a:hover {{
+    text-decoration: underline;
+}}
+.file-size {{
+    color: #64748b;
+    font-size: 0.85rem;
+}}
+.btn {{
+    display: inline-block;
+    padding: 0.75rem 1.5rem;
+    margin: 0.5rem;
+    border-radius: 8px;
+    text-decoration: none;
+    font-weight: 600;
+    transition: all 0.2s ease;
+    border: none;
+    cursor: pointer;
+}}
+.btn-secondary {{
+    background: #2d2d5e;
+    color: #cbd5e1;
+}}
+.btn-secondary:hover {{
+    background: #3b3b6e;
+    transform: translateY(-2px);
+}}
+"""
+
+
+def _human_size(size_bytes: int) -> str:
+    """Format a byte count as a human-readable string.
+
+    Args:
+        size_bytes: Size in bytes.
+
+    Returns:
+        A string like "12.3 MiB" or "1.5 GiB".
+    """
+    for unit in ('B', 'KiB', 'MiB', 'GiB', 'TiB'):
+        if size_bytes < 1024:
+            return f'{size_bytes:.1f} {unit}' if unit != 'B' else f'{size_bytes} B'
+        size_bytes /= 1024
+    return f'{size_bytes:.1f} PiB'
+
+
+def _count_files() -> int:
+    """Count regular files in the downloads directory (non-recursive).
+
+    Returns:
+        The number of files, or 0 if the directory does not exist.
+    """
+    if not DOWNLOADS_DIR.is_dir():
+        return 0
+    return sum(1 for f in DOWNLOADS_DIR.iterdir() if f.is_file())

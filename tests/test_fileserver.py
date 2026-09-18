@@ -255,3 +255,45 @@ class TestFileServerSSLContext(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestRootLandingPage(unittest.TestCase):
+    """The server should render a browsable landing page at ``/``."""
+
+    def test_landing_page_is_html(self):
+        fs = FileServer(port=0)
+        request = MagicMock()
+        request.host = 'dl.example.com'
+        request.transport = MagicMock()
+        response = asyncio.run(fs._handle_root(request))
+        self.assertEqual(response.status, 200)
+        self.assertIn('text/html', response.content_type)
+        self.assertIn('Service Online', response.text)
+        self.assertIn('dl.example.com', response.text)
+
+    def test_landing_page_shows_file_count(self):
+        fs = FileServer(port=0)
+        request = MagicMock()
+        request.host = 'localhost'
+        request.transport = MagicMock()
+
+        with patch.object(Path, 'is_dir', return_value=True), \
+             patch.object(Path, 'iterdir', return_value=[]):
+            response = asyncio.run(fs._handle_root(request))
+        self.assertEqual(response.status, 200)
+        self.assertIn('0 files', response.text)
+
+
+class TestFallback404(unittest.TestCase):
+    """Unmatched paths should return the styled 404 page."""
+
+    def test_missing_path_returns_404_html(self):
+        fs = FileServer(port=0)
+        request = MagicMock()
+        request.path = '/some/deep/path'
+        request.transport = MagicMock()
+        response = asyncio.run(fs._handle_fallback(request))
+        self.assertEqual(response.status, 404)
+        self.assertIn('text/html', response.content_type)
+        self.assertIn('404', response.text)
+        self.assertIn('/some/deep/path', response.text)
